@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <!-- Required meta tags -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Bootstrap CSS -->
+  <link rel="stylesheet" href="css/bootstrap.min.css"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+  <title>SILy configuration</title>
+  <script lang="javascript">
+    function displayTXPower() {
+      document.getElementById('tx_power_label').innerText = 'Tx Power (' + document.getElementById('lora_txpower').value + ' dbm)';
+    }
+
+    function setFormInputs(json) {
+      var response = JSON.parse(json);
+
+      // response is a table of namespaces' settings
+      for (const ns in response) {
+        for (const s in ns.settings) {
+          let el = document.getElementById(ns.namespace + "_" + s);
+          if (el != null) {
+            el.value = ns.settings[s];
+          }
+        }
+      }
+    }
+
+    function getFormInputs() {
+      var json_data = [
+        {
+          "namespace": "general",
+          "settings": {
+            "hostname": document.getElementById("general_hostname").value,
+            "role": document.getElementById("general_role").value
+          }
+        },
+        {
+          "namespace": "router",
+          "settings": {
+            "serveraddress": document.getElementById("router_serveraddress").value,
+            "serverport": document.getElementById("router_serverport").value
+          }
+        },
+        {
+          "namespace": "node",
+          "settings": {
+            "loraaddress": document.getElementById("node_loraaddress").value
+          }
+        },
+        {
+          "namespace": "lora",
+          "settings": {
+            "frequency": document.getElementById("lora_frequency").value,
+            "spreadfactor": document.getElementById("lora_spreadfactor").value,
+            "bandwidth": document.getElementById("lora_bandwidth").value,
+            "coderate": document.getElementById("lora_coderate").value,
+            "txpower": document.getElementById("lora_txpower").value,
+            "password": document.getElementById("lora_password").value
+          }
+        },
+        {
+          "namespace": "wifi",
+          "settings": {
+            "mode": document.getElementById("wifi_mode").value,
+            "ssid": document.getElementById("wifi_ssid").value,
+            "password": document.getElementById("wifi_password").value
+          }
+        }
+      ];
+
+    }
+
+    function readPreferences() {
+      var xhttp = new XMLHttpRequest();
+      xhttp.onreadystatechange = function () {
+        if (this.readyState == XMLHttpRequest.DONE && this.status == 200) {
+          setFormInputs(this.responseText);
+          displayTXPower();
+        }
+      };
+      xhttp.open("GET", "/config", true);
+      xhttp.send();
+    }
+
+    function sendPreferences() {
+      var xhttp = new XMLHttpRequest();
+      var json_data = getFormInputs();
+      //open the request
+      xhttp.open('POST', '/config', true);
+      xhttp.setRequestHeader("Content-Type", "application/json");
+
+      //send the form data
+      xhttp.send(JSON.stringify(json_data));
+
+      xhttp.onreadystatechange = function () {
+        if (xhttp.readyState == XMLHttpRequest.DONE) {
+          readPreferences(); // read back the configuration
+        }
+      }
+    }
+  </script>
+</head>
+
+<body class="d-flex flex-column min-vh-100 align-items-center" onload="readPreferences()">
+  <div class="px-4" style="max-width: 40em">
+    <div class="row mt-3">
+      <div class="col-sm text-center">
+        <h1>SILy Configuration</h1>
+      </div>
+    </div>
+    <form>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>General</h4>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label for="general_hostname">Hostname</label>
+            <input type="text" class="form-control" id="general_hostname" />
+            <small class="form-text text-muted">Name of this SILy module</small>
+          </div>
+          <div class="form-group">
+            <label for="role">Role</label>
+            <select class="form-select" id="general_role">
+              <option>Node</option>
+              <option>Router</option>
+            </select>
+            <small class="form-text text-muted">Node relays SportIdent punchs to the router (from SI control to
+              LoRa)<br />Router relays SportIdent punchs to the Orienteering software (from LoRa to WiFi)</small>
+          </div>
+        </div>
+      </div>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>Router</h4>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label for="router_serveraddress">Orienteering software server</label>
+            <input type="text" class="form-control" id="router_serveraddress">
+            <small class="form-text text-muted">Hostname or IP address</small>
+          </div>
+          <div class="form-group">
+            <label for="router_serverport">Orienteering software server port</label>
+            <input type="text" class="form-control" id="router_serverport" placeholder="10000">
+            <small class="form-text text-muted">TCP port</small>
+          </div>
+        </div>
+      </div>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>Node</h4>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label for="node_loraaddress">LoRa address</label>
+            <input type="text" class="form-control" id="node_loraaddress">
+            <small class="form-text text-muted">Unique LoRa address (2-254)</small>
+          </div>
+        </div>
+      </div>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>LoRa</h4>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label for="lora_frequency">Frequency</label>
+            <select class="form-select" id="lora_frequency">
+              <option value="865.7">865.7 MHz</option>
+              <option value="866.3">866.3 MHz</option>
+              <option value="866.9">866.9 MHz</option>
+              <option value="867.5">867.5 MHz</option>
+              <option value="869.5" selected>869.5 MHz</option>
+            </select>
+            <small class="form-text text-muted">Optimal frequencies from ANFR with PAR 500mW and 10% duty cycle</small>
+          </div>
+          <div class="form-group">
+            <label for="lora_spreadfactor">Spread Factor</label>
+            <select class="form-select" id="lora_spreadfactor">
+              <option selected>7</option>
+              <option>8</option>
+              <option>9</option>
+              <option>10</option>
+              <option>11</option>
+              <option>12</option>
+            </select>
+            <small class="form-text text-muted">Determines how much the information is spread over time</small>
+          </div>
+          <div class="form-group">
+            <label for="lora_bandwidth">Bandwidth</label>
+            <select class="form-select" id="lora_bandwidth">
+              <option value="7.8">7.8 KHz</option>
+              <option value="10.4">10.4 KHz</option>
+              <option value="15.6">15.6 KHz</option>
+              <option value="20.8">20.8 KHz</option>
+              <option value="31.25">31.25 KHz</option>
+              <option value="41.7">41.7 KHz</option>
+              <option value="62.5">62.5 KHz</option>
+              <option value="125" selected>125 KHz</option>
+            </select>
+            <small class="form-text text-muted">Only bandwidth below 200kHz are allowed in EU for the frequencies
+              above.</small>
+          </div>
+          <div class="form-group">
+            <label for="lora_coderate">Code Rate</label>
+            <select class="form-select" id="lora_coderate">
+              <option selected>4:5</option>
+              <option>4:6</option>
+              <option>4:7</option>
+              <option>4:8</option>
+            </select>
+            <small class="form-text text-muted">Amount of Forward Error Correction that is added to the payload
+              data.</small>
+          </div>
+          <div class="form-group">
+            <label id="tx_power_label" for="lora_txpower"></label>
+            <input id="lora_txpower" oninput="displayTXPower()" type="range" class="form-range" min="-9" max="22"
+              value="22">
+            <small class="form-text text-muted">Amount of Forward Error Correction that is added to the payload
+              data.</small>
+          </div>
+          <div class="form-group">
+            <label for="lora_password">LoRa password</label>
+            <input type="text" class="form-control" id="lora_password">
+            <small class="form-text text-muted">More than 8 characters of several classes recommended</small>
+          </div>
+        </div>
+      </div>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>WiFi</h4>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label for="wifi_mode">WiFi mode</label>
+            <select class="form-select" id="wifi_mode">
+              <option>Access Point</option>
+              <option>Station</option>
+            </select>
+            <small class="form-text text-muted">Access Point emits its own network<br />Station connects to an existing
+              network</small>
+          </div>
+          <div class="form-group">
+            <label for="wifi_ssid">WiFi SSID</label>
+            <input type="text" class="form-control" id="wifi_ssid" placeholder="">
+            <small class="form-text text-muted">Name of the network</small>
+          </div>
+          <div class="form-group">
+            <label for="wifi_password">WiFi password</label>
+            <input type="text" class="form-control" id="wifi_password" placeholder="">
+            <small class="form-text text-muted">More than 8 characters of several classes recommended</small>
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary col m-3" onclick="sendPreferences()">Upload</button>
+        <button class="btn btn-secondary col m-3" onclick="readPreferences()">Cancel</button>
+      </div>
+    </form>
+    <form>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>Import/Export Configuration</h4>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <label for="">Save or restore configuration from/to a local JSON file.</label>
+            <small class="form-text text-muted">It can be used for deploying a configuration on multiple nodes (partial
+              configurations are supported) or for archiving.
+            </small>
+            <div class="row">
+              <button type="submit" class="btn btn-primary col m-3">Import...</button>
+              <button type="submit" class="btn btn-primary col m-3">Export...</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </form>
+    <form>
+      <div class="row card my-3 shadow-sm">
+        <div class="card-header">
+          <h4>Factory Reset</h4>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <label for="">Erase the configuration and restore factory default configuration. </label>
+            <small class="form-text text-muted">Export the configuration beforehand if you intend to restore it later.
+            </small>
+            <div class="form-check mx-3 mt-3">
+              <input class="form-check-input" type="checkbox" value="" id="">
+              <label class="form-check-label" for="">
+                <b>I understand that the current configuration will be lost.</b>
+              </label>
+            </div>
+            <button type="submit" class="btn btn-danger col m-3">Reset</button>
+          </div>
+        </div>
+      </div>
+    </form>
+  </div>
+  <script src="js/bootstrap.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"></script>
+</body>
+
+</html>

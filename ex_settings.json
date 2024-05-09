@@ -1,0 +1,41 @@
+[
+    {
+        "namespace": "general",
+        "settings": {
+            "hostname": "long name for a small computer",
+            "role": "router"
+        }
+    },
+    {
+        "namespace": "router",
+        "settings": {
+            "serveraddress": "xxx.yyy.zzz.ttt",
+            "serverport": "uuuuuu"
+        }
+    },
+    {
+        "namespace": "node",
+        "settings": {
+            "loraaddress": "254"
+        }
+    },
+    {
+        "namespace": "lora",
+        "settings": {
+            "frequency": "869.5",
+            "spreadfactor": "12",
+            "bandwidth": "40.7",
+            "coderate": "4:5",
+            "txpower": "22",
+            "password": "Thisisaverylongpasswordforasmallcomputer"
+        }
+    },
+    {
+        "namespace": "wifi",
+        "settings": {
+            "mode": "Access Point",
+            "ssid": "ThisisaverylongSSIDforasmallnetwork",
+            "password": "Thisisaverylongpasswordforasmallcomputer"
+        }
+    }
+]
