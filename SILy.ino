@@ -33,64 +33,94 @@ SILyPreferences *silyPrefs;
 
 void setup()
 {
-    Serial.begin(115200);
-    sleep(1);
-    Serial.println("Setting up board...");
-
     pinMode(BOARD_LED, OUTPUT);
     digitalWrite(BOARD_LED, LED_ON);
 
+    Serial.begin(115200);
+    sleep(1);
+    Serial.println("[INFO] Starting board...");
+
+    Serial.println("[INFO] Starting NVS...");
     silyPrefs = new SILyPreferences();
 
+    Serial.println(silyPrefs->generateJson());
+    Serial.println("[INFO] NVS started");
+
+    Serial.print("[INFO] Starting LittleFS...");
     if (!LittleFS.begin(false))
     {
-        Serial.println("[ERROR] Unable to mount LittleFS filesystem.");
+        Serial.println(" Unable to mount LittleFS filesystem.");
         return;
     }
+    else
+    {
+        Serial.println("ok");
+    }
 
-    WiFi.setHostname(silyPrefs->get("general", "hostname"));
+    Serial.println("[INFO] Setting up WiFi...");
+    String hostname = silyPrefs->get("general", "hostname");
+    String ssid = silyPrefs->get("wifi", "ssid");
+    String password = silyPrefs->get("wifi", "password");
+
+    WiFi.setHostname(hostname.c_str());
+    Serial.print("[INFO] Hostname: ");
+    Serial.println(WiFi.getHostname());
     if (silyPrefs->get("wifi", "mode") == "Access Point")
     {
-        Serial.println("Creating Wifi AP");
         WiFi.mode(WIFI_AP);
-        WiFi.softAP(silyPrefs->get("wifi", "ssid"), silyPrefs->get("wifi", "password"));
-        Serial.print("AP Created with IP Gateway ");
+        WiFi.softAP(ssid, password);
+        Serial.print("[INFO] Broadcasting Wifi AP ");
+        Serial.println(WiFi.softAPSSID());
+        Serial.print("[INFO] AP IP: ");
         Serial.println(WiFi.softAPIP());
     }
     else
     {
-        WiFi.begin(silyPrefs->get("wifi", "ssid"), silyPrefs->get("wifi", "password"));
+        WiFi.begin(ssid, password);
         while (WiFi.status() != WL_CONNECTED)
         {
-            Serial.println("Connecting to WiFi...");
+            Serial.printf("[INFO] Connecting to WiFi %s...\n", ssid.c_str());
             delay(1000);
         }
 
-        Serial.print("IP: ");
+        Serial.print("[INFO] IP: ");
         Serial.println(WiFi.localIP());
     }
+    Serial.println("[INFO] WiFi started");
 
+    Serial.println("[INFO] Setting up Web server...");
     server.onNotFound([](AsyncWebServerRequest *request)
                       { request->send(404); });
+    Serial.println("[INFO] Error handler...ok");
 
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request)
-              { request->send(200, "application/json", silyPrefs->generateJson()); });
+              { String json = silyPrefs->generateJson();
+                Serial.print("[DEBUG] Sending: ");
+                Serial.println(json);
+                request->send(200, "application/json", silyPrefs->generateJson()); });
+    Serial.println("[INFO] GET config handler...ok");
 
+    // Beware here: data is NOT NULL terminated. It can therefore not be cast directly into char*
     server.on("/config", HTTP_POST, [](AsyncWebServerRequest *request)
-              {
-            String message;
-            if (request->hasParam("jsonConfig", true))
-            {
-                silyPrefs->parseJson(request->getParam("jsonConfig", true)->value().c_str());
-            }
-            request->send(200); });
+              { request->send(200); }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+              { 
+                String json = String((const char *) data, len);
+                Serial.print("[DEBUG] Receiving: ");
+                Serial.println(json);
+                silyPrefs->parseJson(json); });
+    Serial.println("[INFO] POST config handler...ok");
 
     server.serveStatic("/", LittleFS, "/").setDefaultFile("/index.html");
+    Serial.println("[INFO] Static files handler...ok");
 
     server.begin();
+    Serial.println("[INFO] Web server started");
+
+    Serial.println("[INFO] Board started");
 }
 
 void loop()
 {
-    sleep(1);
+    sleep(5);
+    // Serial.println("[DEBUG] I'm alive!");
 }

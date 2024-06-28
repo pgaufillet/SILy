@@ -24,10 +24,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 class SILyPreferences {
     public:
         SILyPreferences();
-        const char *get(const char * ns, const char * key);
+        String get(const char * ns, const char * key);
         void put(const char * ns, const char * key, const char * value);
-        const char *generateJson();
-        bool parseJson(const char* json);
+        String generateJson();
+        bool parseJson(String json);
         bool init();
     
     private:

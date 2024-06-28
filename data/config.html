@@ -9,109 +9,16 @@
   <link rel="stylesheet" href="css/bootstrap.min.css"
     integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
   <title>SILy configuration</title>
-  <script lang="javascript">
-    function displayTXPower() {
-      document.getElementById('tx_power_label').innerText = 'Tx Power (' + document.getElementById('lora_txpower').value + ' dbm)';
-    }
-
-    function setFormInputs(json) {
-      var response = JSON.parse(json);
-
-      // response is a table of namespaces' settings
-      for (const ns in response) {
-        for (const s in ns.settings) {
-          let el = document.getElementById(ns.namespace + "_" + s);
-          if (el != null) {
-            el.value = ns.settings[s];
-          }
-        }
-      }
-    }
-
-    function getFormInputs() {
-      var json_data = [
-        {
-          "namespace": "general",
-          "settings": {
-            "hostname": document.getElementById("general_hostname").value,
-            "role": document.getElementById("general_role").value
-          }
-        },
-        {
-          "namespace": "router",
-          "settings": {
-            "serveraddress": document.getElementById("router_serveraddress").value,
-            "serverport": document.getElementById("router_serverport").value
-          }
-        },
-        {
-          "namespace": "node",
-          "settings": {
-            "loraaddress": document.getElementById("node_loraaddress").value
-          }
-        },
-        {
-          "namespace": "lora",
-          "settings": {
-            "frequency": document.getElementById("lora_frequency").value,
-            "spreadfactor": document.getElementById("lora_spreadfactor").value,
-            "bandwidth": document.getElementById("lora_bandwidth").value,
-            "coderate": document.getElementById("lora_coderate").value,
-            "txpower": document.getElementById("lora_txpower").value,
-            "password": document.getElementById("lora_password").value
-          }
-        },
-        {
-          "namespace": "wifi",
-          "settings": {
-            "mode": document.getElementById("wifi_mode").value,
-            "ssid": document.getElementById("wifi_ssid").value,
-            "password": document.getElementById("wifi_password").value
-          }
-        }
-      ];
-
-    }
-
-    function readPreferences() {
-      var xhttp = new XMLHttpRequest();
-      xhttp.onreadystatechange = function () {
-        if (this.readyState == XMLHttpRequest.DONE && this.status == 200) {
-          setFormInputs(this.responseText);
-          displayTXPower();
-        }
-      };
-      xhttp.open("GET", "/config", true);
-      xhttp.send();
-    }
-
-    function sendPreferences() {
-      var xhttp = new XMLHttpRequest();
-      var json_data = getFormInputs();
-      //open the request
-      xhttp.open('POST', '/config', true);
-      xhttp.setRequestHeader("Content-Type", "application/json");
-
-      //send the form data
-      xhttp.send(JSON.stringify(json_data));
-
-      xhttp.onreadystatechange = function () {
-        if (xhttp.readyState == XMLHttpRequest.DONE) {
-          readPreferences(); // read back the configuration
-        }
-      }
-    }
-  </script>
 </head>
 
-<body class="d-flex flex-column min-vh-100 align-items-center" onload="readPreferences()">
+<body class="d-flex flex-column min-vh-100 align-items-center">
   <div class="px-4" style="max-width: 40em">
     <div class="row mt-3">
       <div class="col-sm text-center">
         <h1>SILy Configuration</h1>
       </div>
     </div>
-    <form>
+    <form onsubmit="sendPreferences(event)">
       <div class="row card my-3 shadow-sm">
         <div class="card-header">
           <h4>General</h4>
@@ -124,7 +31,7 @@
           </div>
           <div class="form-group">
             <label for="role">Role</label>
-            <select class="form-select" id="general_role">
+            <select class="form-select" id="general_role" onchange="refreshVisibility()">
               <option>Node</option>
               <option>Router</option>
             </select>
@@ -133,7 +40,7 @@
           </div>
         </div>
       </div>
-      <div class="row card my-3 shadow-sm">
+      <div class="row card my-3 shadow-sm" style="display: none" id="router_form">
         <div class="card-header">
           <h4>Router</h4>
         </div>
@@ -150,7 +57,7 @@
           </div>
         </div>
       </div>
-      <div class="row card my-3 shadow-sm">
+      <div class="row card my-3 shadow-sm" style="display: none" id="node_form">
         <div class="card-header">
           <h4>Node</h4>
         </div>
@@ -252,12 +159,12 @@
           <div class="form-group">
             <label for="wifi_password">WiFi password</label>
             <input type="text" class="form-control" id="wifi_password" placeholder="">
-            <small class="form-text text-muted">More than 8 characters of several classes recommended</small>
+            <small class="form-text text-muted">Minimum 8 characters. Several classes of characters recommended</small>
           </div>
         </div>
       </div>
       <div class="row">
-        <button class="btn btn-primary col m-3" onclick="sendPreferences()">Upload</button>
+        <button class="btn btn-primary col m-3" type="submit">Upload</button>
         <button class="btn btn-secondary col m-3" onclick="readPreferences()">Cancel</button>
       </div>
     </form>
@@ -302,8 +209,117 @@
       </div>
     </form>
   </div>
-  <script src="js/bootstrap.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-    crossorigin="anonymous"></script>
+  <!--script src="js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"></script-->
+  <script lang="javascript">
+    function displayTXPower() {
+      document.getElementById('tx_power_label').innerText = 'Tx Power (' + document.getElementById('lora_txpower').value + ' dbm)';
+    }
+
+    function setFormInputs(json) {
+      var response = JSON.parse(json);
+
+      // response is a table of namespaces' settings
+      for (const ns in response) {
+        for (const s in response[ns].settings) {
+          let el = document.getElementById(response[ns].namespace + "_" + s);
+          if (el != null) {
+            el.value = response[ns].settings[s];
+          }
+        }
+      }
+    }
+
+    function getFormInputs() {
+      var json_data = [
+        {
+          "namespace": "general",
+          "settings": {
+            "hostname": document.getElementById("general_hostname").value,
+            "role": document.getElementById("general_role").value
+          }
+        },
+        {
+          "namespace": "router",
+          "settings": {
+            "serveraddress": document.getElementById("router_serveraddress").value,
+            "serverport": document.getElementById("router_serverport").value
+          }
+        },
+        {
+          "namespace": "node",
+          "settings": {
+            "loraaddress": document.getElementById("node_loraaddress").value
+          }
+        },
+        {
+          "namespace": "lora",
+          "settings": {
+            "frequency": document.getElementById("lora_frequency").value,
+            "spreadfactor": document.getElementById("lora_spreadfactor").value,
+            "bandwidth": document.getElementById("lora_bandwidth").value,
+            "coderate": document.getElementById("lora_coderate").value,
+            "txpower": document.getElementById("lora_txpower").value,
+            "password": document.getElementById("lora_password").value
+          }
+        },
+        {
+          "namespace": "wifi",
+          "settings": {
+            "mode": document.getElementById("wifi_mode").value,
+            "ssid": document.getElementById("wifi_ssid").value,
+            "password": document.getElementById("wifi_password").value
+          }
+        }
+      ];
+
+      return json_data;
+    }
+
+    function readPreferences() {
+      var xhttp = new XMLHttpRequest();
+      xhttp.onreadystatechange = function () {
+        if (this.readyState == XMLHttpRequest.DONE && this.status == 200) {
+          setFormInputs(this.responseText);
+          displayTXPower();
+          refreshVisibility();
+        }
+      };
+      xhttp.open("GET", "/config", true);
+      xhttp.send();
+    }
+
+    function sendPreferences(event) {
+      event.preventDefault(); // Prevent the default behaviour of form submit event
+      var xhttp = new XMLHttpRequest();
+      var json_data = getFormInputs();
+      //open the request
+      xhttp.open('POST', '/config', true);
+      xhttp.setRequestHeader("Content-Type", "application/json");
+
+      //send the form data
+      xhttp.send(JSON.stringify(json_data));
+
+      xhttp.onreadystatechange = function () {
+        if (xhttp.readyState == XMLHttpRequest.DONE) {
+          readPreferences(); // read back the configuration
+        }
+      }
+    }
+
+    function refreshVisibility() {
+      if (document.getElementById("general_role").value == "Router") {
+        document.getElementById("router_form").style.display = "flex";
+        document.getElementById("node_form").style.display = "none";
+      } else {
+        document.getElementById("router_form").style.display = "none";
+        document.getElementById("node_form").style.display = "flex";
+      }
+    }
+
+    window.addEventListener('load', readPreferences);
+  </script>
 </body>
 
 </html>
