@@ -1,6 +1,6 @@
 /*
 SILy 
-Copyright (C) 2024 Pierre Gaufillet
+Copyright (C) 2024-2025 Pierre Gaufillet
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -28,7 +28,7 @@ class SILyPreferences {
         void put(const char * ns, const char * key, const char * value);
         String generateJson();
         bool parseJson(String json);
-        bool init();
+        void reset();
     
     private:
         Preferences *prefs;

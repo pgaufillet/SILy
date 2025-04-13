@@ -1,6 +1,6 @@
 /*
 SILy
-Copyright (C) 2024 Pierre Gaufillet
+Copyright (C) 2024-2025 Pierre Gaufillet
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -33,7 +33,7 @@ SILyPreferences::SILyPreferences()
     if (!has_been_initalized)
     {
         Serial.print("[INFO] Initializing NVS preferences...");
-        init();
+        reset();
         Serial.println("ok");
     }
     // Check NVS health (enough free entries for a complete reconfiguration).
@@ -187,12 +187,12 @@ bool SILyPreferences::parseJson(String json)
     return true;
 }
 
-bool SILyPreferences::init()
+void SILyPreferences::reset()
 {
     // Default values
     prefs->begin("general");
     prefs->putString("hostname", "sily1");
-    prefs->putString("role", "node");
+    prefs->putString("role", "Node");
     prefs->end();
 
     prefs->begin("router");
@@ -215,7 +215,7 @@ bool SILyPreferences::init()
 
     prefs->begin("wifi");
     prefs->putString("mode", "Access Point");
-    prefs->putString("ssid", "sily1");
-    prefs->putString("password", "sily2024"); // no password or >= 8 chars
+    prefs->putString("ssid", "Sily1");
+    prefs->putString("password", "sily2025"); // no password or >= 8 chars
     prefs->end();
 }

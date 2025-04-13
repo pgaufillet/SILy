@@ -1,6 +1,6 @@
 /*
 SILy
-Copyright (C) 2024 Pierre Gaufillet
+Copyright (C) 2024-2025 Pierre Gaufillet
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -94,11 +94,19 @@ void setup()
     Serial.println("[INFO] Error handler...ok");
 
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request)
-              { String json = silyPrefs->generateJson();
+              { 
+                String json = silyPrefs->generateJson();
                 Serial.print("[DEBUG] Sending: ");
                 Serial.println(json);
                 request->send(200, "application/json", silyPrefs->generateJson()); });
     Serial.println("[INFO] GET config handler...ok");
+
+    server.on("/config/reset", HTTP_POST, [](AsyncWebServerRequest *request)
+              { 
+                Serial.println("[DEBUG] Reset config");
+                silyPrefs->reset(); 
+                request->send(200); });
+    Serial.println("[INFO] POST config reset handler...ok");
 
     // Beware here: data is NOT NULL terminated. It can therefore not be cast directly into char*
     server.on("/config", HTTP_POST, [](AsyncWebServerRequest *request)

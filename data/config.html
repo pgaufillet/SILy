@@ -168,26 +168,25 @@
         <button class="btn btn-secondary col m-3" onclick="readPreferences()">Cancel</button>
       </div>
     </form>
-    <form>
-      <div class="row card my-3 shadow-sm">
-        <div class="card-header">
-          <h4>Import/Export Configuration</h4>
-        </div>
-        <div class="card-body">
+    <div class="row card my-3 shadow-sm">
+      <div class="card-header">
+        <h4>Import/Export Configuration</h4>
+      </div>
+      <div class="card-body">
+        <div class="row">
+          <label for="">Save or restore configuration from/to a local JSON file.</label>
+          <small class="form-text text-muted">It can be used for deploying a configuration on multiple nodes (partial
+            configurations are supported) or for archiving.
+          </small>
           <div class="row">
-            <label for="">Save or restore configuration from/to a local JSON file.</label>
-            <small class="form-text text-muted">It can be used for deploying a configuration on multiple nodes (partial
-              configurations are supported) or for archiving.
-            </small>
-            <div class="row">
-              <button type="submit" class="btn btn-primary col m-3">Import...</button>
-              <button type="submit" class="btn btn-primary col m-3">Export...</button>
-            </div>
+            <input type="file" id="import_file" style="display: none">
+            <button onclick="importFile()" class="btn btn-primary col m-3">Import...</button>
+            <button onclick="exportFile()" class="btn btn-primary col m-3">Export</button>
           </div>
         </div>
       </div>
-    </form>
-    <form>
+    </div>
+    <form onsubmit="resetPreferences(event)">
       <div class="row card my-3 shadow-sm">
         <div class="card-header">
           <h4>Factory Reset</h4>
@@ -198,12 +197,13 @@
             <small class="form-text text-muted">Export the configuration beforehand if you intend to restore it later.
             </small>
             <div class="form-check mx-3 mt-3">
-              <input class="form-check-input" type="checkbox" value="" id="">
+              <input class="form-check-input" type="checkbox" value="" id="reset_check"
+                onchange="document.getElementById('reset_button').disabled = !this.checked;">
               <label class="form-check-label" for="">
                 <b>I understand that the current configuration will be lost.</b>
               </label>
             </div>
-            <button type="submit" class="btn btn-danger col m-3">Reset</button>
+            <button type="submit" class="btn btn-danger col m-3" id="reset_button" disabled>Reset</button>
           </div>
         </div>
       </div>
@@ -278,6 +278,7 @@
     }
 
     function readPreferences() {
+      event.preventDefault(); // Prevent the default behaviour of form submit event
       var xhttp = new XMLHttpRequest();
       xhttp.onreadystatechange = function () {
         if (this.readyState == XMLHttpRequest.DONE && this.status == 200) {
@@ -286,39 +287,103 @@
           refreshVisibility();
         }
       };
-      xhttp.open("GET", "/config", true);
+      xhttp.open('GET', '/config', true);
       xhttp.send();
     }
 
-    function sendPreferences(event) {
-      event.preventDefault(); // Prevent the default behaviour of form submit event
+    function postPreferences(s) {
       var xhttp = new XMLHttpRequest();
-      var json_data = getFormInputs();
       //open the request
       xhttp.open('POST', '/config', true);
-      xhttp.setRequestHeader("Content-Type", "application/json");
+      xhttp.setRequestHeader('Content-Type', 'application/json');
 
       //send the form data
-      xhttp.send(JSON.stringify(json_data));
+      xhttp.send(s);
 
       xhttp.onreadystatechange = function () {
-        if (xhttp.readyState == XMLHttpRequest.DONE) {
+        if (xhttp.readyState == XMLHttpRequest.DONE && this.status == 200) {
           readPreferences(); // read back the configuration
         }
       }
     }
 
+    function sendPreferences(event) {
+      event.preventDefault(); // Prevent the default behaviour of form submit event
+      postPreferences(JSON.stringify(getFormInputs()));
+    }
+
     function refreshVisibility() {
-      if (document.getElementById("general_role").value == "Router") {
-        document.getElementById("router_form").style.display = "flex";
-        document.getElementById("node_form").style.display = "none";
+      if (document.getElementById('general_role').value == 'Router') {
+        document.getElementById('router_form').style.display = 'flex';
+        document.getElementById('node_form').style.display = 'none';
       } else {
-        document.getElementById("router_form").style.display = "none";
-        document.getElementById("node_form").style.display = "flex";
+        document.getElementById('router_form').style.display = 'none';
+        document.getElementById('node_form').style.display = 'flex';
       }
     }
 
-    window.addEventListener('load', readPreferences);
+    function resetPreferences(event) {
+      event.preventDefault(); // Prevent the default behaviour of form submit event
+
+      var xhttp = new XMLHttpRequest();
+      //open the request
+      xhttp.open('POST', '/config/reset', true);
+
+      //send the request
+      xhttp.send();
+
+      xhttp.onreadystatechange = function () {
+        if (xhttp.readyState == XMLHttpRequest.DONE && xhttp.status === 200) {
+          readPreferences(); // read back the configuration
+        }
+      }
+    }
+
+    function importFile() {
+      const fileElem = document.getElementById('import_file');
+
+      if (fileElem) {
+        fileElem.click();
+      };
+    }
+
+    function exportFile() {
+      var element = document.createElement('a');
+      var json_data = getFormInputs();
+
+      element.style.display = 'none';
+      element.setAttribute('href', 'data:application/json;charset=utf-8,' + JSON.stringify(json_data));
+
+      var node_name = document.getElementById('general_hostname').value.trim().toLowerCase();
+      var file_name = 'sily.conf';
+
+      if (node_name != '') {
+        file_name = node_name + '.conf';
+      }
+
+      element.setAttribute('download', file_name);
+      document.body.appendChild(element);
+      element.click();
+      document.body.removeChild(element);
+    }
+
+    window.addEventListener('load', function () {
+      readPreferences();
+
+      const fileElem = document.getElementById('import_file');
+      fileElem.addEventListener('change', function (e) {
+        const selectedFile = e.target.files[0];
+        const reader = new FileReader();
+
+        reader.addEventListener('load', (event) => {
+          postPreferences(event.target.result);
+          console.log(event.target.result);
+        });
+        reader.readAsText(selectedFile);
+
+        e.target.value = '';
+      });
+    });
   </script>
 </body>
 
