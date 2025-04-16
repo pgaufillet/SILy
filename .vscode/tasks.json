@@ -40,7 +40,54 @@
                 "isDefault": true
             },
             "detail": "Tâche générée par le débogueur."
-        }
+        },
+        {
+            "label": "Build LittleFS Image",
+            "type": "shell",
+            "command": "~/Library/Arduino15/packages/esp32/tools/mklittlefs/3.0.0-gnu12-dc7f933/mklittlefs",
+            "args": [
+              "-c",
+              "data/",             // Dossier de vos fichiers à inclure dans LittleFS
+              "-b", "4096",         // Taille des blocs
+              "-p", "256",          // Taille des pages
+              "-s", "1441792",      // Taille totale de la partition (ajustez si nécessaire)
+              "build/SILy.ino.littlefs.bin"        // Nom du fichier image LittleFS généré
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Créer l'image LittleFS"
+          },
+          {
+            "label": "Upload LittleFS Partition",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+              "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
+              "-i", "sily1.local",
+              "--file", "build/SILy.ino.littlefs.bin",
+              "--spiffs",
+              "--debug"
+            ],
+            "group": "build",
+            "dependsOn": "Build LittleFS Image",  // Cette tâche dépend de la construction de l'image
+            "problemMatcher": [],
+            "detail": "Uploader la partition LittleFS via OTA"
+          },
+          {
+            "label": "Upload Firmware",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+              "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
+              "-i", "sily1.local",
+              "--file", "build/SILy.ino.bin",
+              "--debug"
+            ],
+            "group": "build",
+            "dependsOn": "Upload LittleFS Partition",  // Cette tâche dépend de l'upload de la partition FS
+            "problemMatcher": [],
+            "detail": "Uploader le firmware via OTA"
+          }
     ],
     "version": "2.0.0"
 }

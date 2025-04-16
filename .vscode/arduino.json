@@ -4,5 +4,5 @@
     "board": "esp32:esp32:lilygo_t3s3",
     "programmer": "esptool",
     "output": "build",
-    "port": "/dev/tty.usbmodem14101"
+    "port": "/dev/tty.usbmodem14201"
 }
