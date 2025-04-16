@@ -24,6 +24,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "SILyPreferences.h"
 
+#define SILY_VERSION "0.1.0"
+#define SILY_NAME "SILy"
+#define SILY_COPYRIGHT "Pierre Gaufillet 2024-2025"
+#define SILY_LICENSE "GNU GPLv3"
+
 #define BOARD_LED 37
 #define LED_ON HIGH
 #define LED_OFF LOW
@@ -113,6 +118,16 @@ void setup() {
         silyPrefs->parseJson(json);
       });
   Serial.println("[INFO] POST config handler...ok");
+
+  server.on("/app", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String json = "{\"version\":\"" SILY_VERSION "\",\"name\":\""
+                  SILY_NAME "\",\"copyright\":\"" SILY_COPYRIGHT
+                  "\",\"license\":\"" SILY_LICENSE "\"}";
+    Serial.print("[DEBUG] Sending: ");
+    Serial.println(json);
+    request->send(200, "application/json", json);
+  });
+  Serial.println("[INFO] GET app handler...ok");
 
   server.serveStatic("/", LittleFS, "/").setDefaultFile("/index.html");
   Serial.println("[INFO] Static files handler...ok");

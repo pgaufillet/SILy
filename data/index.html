@@ -31,6 +31,20 @@
       </div>
     </div>
   </div>
+  <footer class="mt-auto text-center py-3 bg-light w-100">
+    <small class="text-muted"><span id="name"></span> <span id="version"></span> — </span>© <span
+        id="copyright"></span> — Licensed under <span id="license"></span></small>
+  </footer>
+  <script>
+    fetch('/app')
+      .then(res => res.json())
+      .then(data => {
+        document.getElementById('version').textContent = `${data.version}`;
+        document.getElementById('name').textContent = `${data.name}`;
+        document.getElementById('copyright').textContent = `${data.copyright}`;
+        document.getElementById('license').textContent = `${data.license}`;
+      });
+  </script>
 </body>
 
 </html>

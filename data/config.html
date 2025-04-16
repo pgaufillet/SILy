@@ -18,6 +18,17 @@
         <h1>SILy Configuration</h1>
       </div>
     </div>
+    <div class="row mt-3">
+      <div class="col-sm text-start">
+        <a href="index.html" class="btn btn-link">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-left"
+            viewBox="0 0 16 16">
+            <path fill-rule="evenodd"
+              d="M15 8a.5.5 0 0 1-.5.5H3.707l4.147 4.146a.5.5 0 0 1-.708.708l-5-5a.5.5 0 0 1 0-.708l5-5a.5.5 0 0 1 .708.708L3.707 7.5H14.5A.5.5 0 0 1 15 8z" />
+          </svg>Home
+        </a>
+      </div>
+    </div>
     <form onsubmit="sendPreferences(event)">
       <div class="row card my-3 shadow-sm">
         <div class="card-header">
@@ -127,8 +138,7 @@
             <label id="tx_power_label" for="lora_txpower"></label>
             <input id="lora_txpower" oninput="displayTXPower()" type="range" class="form-range" min="-9" max="22"
               value="22">
-            <small class="form-text text-muted">Amount of Forward Error Correction that is added to the payload
-              data.</small>
+            <small class="form-text text-muted">Transmission power from -9 dbm (0,13 mW) to 22 dbm (158 mW).</small>
           </div>
           <div class="form-group">
             <label for="lora_password">LoRa password</label>
@@ -384,6 +394,21 @@
         e.target.value = '';
       });
     });
+  </script>
+  <footer class="mt-auto text-center py-3 bg-light w-100">
+    <small class="text-muted"><span id="name"></span> <span id="version"></span> — </span>© <span id="copyright"></span>
+      —
+      Licensed under <span id="license"></span></small>
+  </footer>
+  <script>
+    fetch('/app')
+      .then(res => res.json())
+      .then(data => {
+        document.getElementById('version').textContent = `${data.version}`;
+        document.getElementById('name').textContent = `${data.name}`;
+        document.getElementById('copyright').textContent = `${data.copyright}`;
+        document.getElementById('license').textContent = `${data.license}`;
+      });
   </script>
 </body>
 
