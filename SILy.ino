@@ -127,18 +127,18 @@ void setup() {
         String type;
         if (ArduinoOTA.getCommand() == U_FLASH) {
           type = "sketch";
-        } else { // U_SPIFFS
+        } else { // U_SPIFFS (also works for LittleFS)
           type = "filesystem";
           LittleFS.end();
         }
 
-        Serial.println("Start updating " + type);
+        Serial.print("[INFO] Start updating " + type);
       })
-      .onEnd([]() { Serial.println("\nEnd updating"); })
+      .onEnd([]() { Serial.println("\n[INFO] Updating done"); })
       .onProgress(
           [](unsigned int progress, unsigned int total) { Serial.printf("."); })
       .onError([](ota_error_t error) {
-        Serial.printf("Error[%u]: ", error);
+        Serial.printf("[ERROR] %u: ", error);
         if (error == OTA_AUTH_ERROR) {
           Serial.println("Auth Failed");
         } else if (error == OTA_BEGIN_ERROR) {
