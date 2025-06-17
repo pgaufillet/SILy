@@ -131,9 +131,10 @@ void LoraMapMgr::receiveHeartbeat(uint8_t *payload, size_t payloadSize,
   if (payloadSize >= sizeof(HeartbeatPayloadHeader)) {
     HeartbeatPayloadHeader *header =
         reinterpret_cast<HeartbeatPayloadHeader *>(payload);
-    Serial.printf("[DEBUG] Heartbeat, battery level: %d, "
-                  "sily mode: %d, num neighbors: %d\n",
-                  header->batteryLevel, header->silyMode, header->numNeighbors);
+    Serial.printf("[DEBUG] Heartbeat from %02X, batt: %d, "
+                  "mode: %d, neighbors: %d\n",
+                  src, header->batteryLevel, header->silyMode,
+                  header->numNeighbors);
 
     if (header->numNeighbors > 0) {
       size_t expectedSize = sizeof(HeartbeatPayloadHeader) +
@@ -142,7 +143,7 @@ void LoraMapMgr::receiveHeartbeat(uint8_t *payload, size_t payloadSize,
         Neighbor *neighbors =
             reinterpret_cast<Neighbor *>(payload + sizeof(*header));
         for (size_t i = 0; i < header->numNeighbors; i++) {
-          Serial.printf("[DEBUG] Neighbor %04X with SNR %d\n",
+          Serial.printf("[DEBUG] Neighbor %04X, SNR: %d\n",
                         neighbors[i].address, neighbors[i].snr);
           self->links->addOrUpdate(src, neighbors[i].address, neighbors[i].snr);
         }
