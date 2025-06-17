@@ -3,11 +3,11 @@
         "namespace": "general",
         "settings": {
             "hostname": "long name for a small computer",
-            "role": "router"
+            "role": "gateway"
         }
     },
     {
-        "namespace": "router",
+        "namespace": "gateway",
         "settings": {
             "serveraddress": "xxx.yyy.zzz.ttt",
             "serverport": "uuuuuu"

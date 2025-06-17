@@ -44,26 +44,26 @@
             <label for="role">Role</label>
             <select class="form-select" id="general_role" onchange="refreshVisibility()">
               <option>Node</option>
-              <option>Router</option>
+              <option>Gateway</option>
             </select>
-            <small class="form-text text-muted">Node relays SportIdent punchs to the router (from SI control to
-              LoRa)<br />Router relays SportIdent punchs to the Orienteering software (from LoRa to WiFi)</small>
+            <small class="form-text text-muted">Node relays SportIdent punchs to the gateway (from SI control to
+              LoRa)<br />Gateway relays SportIdent punchs to the Orienteering software (from LoRa to WiFi)</small>
           </div>
         </div>
       </div>
-      <div class="row card my-3 shadow-sm" style="display: none" id="router_form">
+      <div class="row card my-3 shadow-sm" style="display: none" id="gateway_form">
         <div class="card-header">
-          <h4>Router</h4>
+          <h4>Gateway</h4>
         </div>
         <div class="card-body">
           <div class="form-group">
-            <label for="router_serveraddress">Orienteering software server</label>
-            <input type="text" class="form-control" id="router_serveraddress">
+            <label for="gateway_serveraddress">Orienteering software server</label>
+            <input type="text" class="form-control" id="gateway_serveraddress">
             <small class="form-text text-muted">Hostname or IP address</small>
           </div>
           <div class="form-group">
-            <label for="router_serverport">Orienteering software server port</label>
-            <input type="text" class="form-control" id="router_serverport" placeholder="10000">
+            <label for="gateway_serverport">Orienteering software server port</label>
+            <input type="text" class="form-control" id="gateway_serverport" placeholder="10000">
             <small class="form-text text-muted">TCP port</small>
           </div>
         </div>
@@ -239,10 +239,10 @@
           }
         },
         {
-          "namespace": "router",
+          "namespace": "gateway",
           "settings": {
-            "serveraddress": document.getElementById("router_serveraddress").value,
-            "serverport": document.getElementById("router_serverport").value
+            "serveraddress": document.getElementById("gateway_serveraddress").value,
+            "serverport": document.getElementById("gateway_serverport").value
           }
         },
         {
@@ -305,10 +305,10 @@
     }
 
     function refreshVisibility() {
-      if (document.getElementById('general_role').value == 'Router') {
-        document.getElementById('router_form').style.display = 'flex';
+      if (document.getElementById('general_role').value == 'Gateway') {
+        document.getElementById('gateway_form').style.display = 'flex';
       } else {
-        document.getElementById('router_form').style.display = 'none';
+        document.getElementById('gateway_form').style.display = 'none';
       }
     }
 

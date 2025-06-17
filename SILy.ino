@@ -186,8 +186,7 @@ void setup() {
     loraMapMgr.setPeriod(10000);
     loraMapMgr.startNode();
 
-    // TODO: Router should be replaced by Gateway everywhere
-  } else if (silyPrefs->get("general", "role") == "Router") {
+  } else if (silyPrefs->get("general", "role") == "Gateway") {
     loraMapMgr.startGateway();
   }
   Serial.println("[INFO] Lora map started");

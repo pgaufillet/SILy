@@ -43,7 +43,7 @@ void LoraMgr::setConfig(SILyPreferences *silyPrefs) {
   config.cr = coding_rate.substring(coding_rate.length() - 1).toInt();
   config.power = silyPrefs->get("lora", "txpower").toInt();
 
-  if (silyPrefs->get("general", "role") == "Router") {
+  if (silyPrefs->get("general", "role") == "Gateway") {
     radio.addRole(ROLE_GATEWAY);
   }
 
