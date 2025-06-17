@@ -97,15 +97,6 @@ String SILyPreferences::generateJson()
 
     json += ",";
 
-    json += "{\"namespace\":\"node\",\"settings\":{";
-    prefs->begin("node", true);
-    json += "\"loraaddress\":\"";
-    json += prefs->getString("loraaddress");
-    json += "\"}}";
-    prefs->end();
-
-    json += ",";
-
     json += "{\"namespace\":\"lora\",\"settings\":{";
     prefs->begin("lora", true);
     json += "\"frequency\":\"";
@@ -198,10 +189,6 @@ void SILyPreferences::reset()
     prefs->begin("router");
     prefs->putString("serveraddress", "");
     prefs->putString("serverport", "");
-    prefs->end();
-
-    prefs->begin("node");
-    prefs->putString("loraaddress", "");
     prefs->end();
 
     prefs->begin("lora");

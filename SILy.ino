@@ -22,7 +22,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <Preferences.h>
 #include <WiFi.h>
 
-#include "SILyPreferences.h"
+#include "loramapmgr.h"
+#include "loramgr.h"
+#include "silypreferences.h"
 
 #define SILY_VERSION "0.1.0"
 #define SILY_NAME "SILy"
@@ -34,8 +36,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define LED_OFF LOW
 
 AsyncWebServer server(80);
-
 SILyPreferences *silyPrefs;
+LoraMgr &loraMgr = LoraMgr::getInstance();
+LoraMapMgr &loraMapMgr = LoraMapMgr::getInstance();
 
 void setup() {
   pinMode(BOARD_LED, OUTPUT);
@@ -120,8 +123,8 @@ void setup() {
   Serial.println("[INFO] POST config handler...ok");
 
   server.on("/app", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String json = "{\"version\":\"" SILY_VERSION "\",\"name\":\""
-                  SILY_NAME "\",\"copyright\":\"" SILY_COPYRIGHT
+    String json = "{\"version\":\"" SILY_VERSION "\",\"name\":\"" SILY_NAME
+                  "\",\"copyright\":\"" SILY_COPYRIGHT
                   "\",\"license\":\"" SILY_LICENSE "\"}";
     Serial.print("[DEBUG] Sending: ");
     Serial.println(json);
@@ -167,8 +170,27 @@ void setup() {
         }
       });
 
+  // OTA starts lately due to LoRaMesher initialization duration (time between
+  // setup and loop is too long). It causes problems when flashing the
+  // filesystem and immediately after the program.
+  // TODO: start OTA in a separate task instead of loop
   ArduinoOTA.begin();
   Serial.println("[INFO] OTA started");
+
+  loraMgr.setConfig(silyPrefs);
+  loraMgr.start();
+
+  Serial.println("[INFO] Lora mesh started");
+
+  if (silyPrefs->get("general", "role") == "Node") {
+    loraMapMgr.setPeriod(10000);
+    loraMapMgr.startNode();
+
+    // TODO: Router should be replaced by Gateway everywhere
+  } else if (silyPrefs->get("general", "role") == "Router") {
+    loraMapMgr.startGateway();
+  }
+  Serial.println("[INFO] Lora map started");
 
   Serial.println("[INFO] Board started");
 }
@@ -176,5 +198,4 @@ void setup() {
 void loop() {
   delay(150);
   ArduinoOTA.handle();
-  // Serial.println("[DEBUG] I'm alive!");
 }

@@ -68,18 +68,6 @@
           </div>
         </div>
       </div>
-      <div class="row card my-3 shadow-sm" style="display: none" id="node_form">
-        <div class="card-header">
-          <h4>Node</h4>
-        </div>
-        <div class="card-body">
-          <div class="form-group">
-            <label for="node_loraaddress">LoRa address</label>
-            <input type="text" class="form-control" id="node_loraaddress">
-            <small class="form-text text-muted">Unique LoRa address (2-254)</small>
-          </div>
-        </div>
-      </div>
       <div class="row card my-3 shadow-sm">
         <div class="card-header">
           <h4>LoRa</h4>
@@ -258,12 +246,6 @@
           }
         },
         {
-          "namespace": "node",
-          "settings": {
-            "loraaddress": document.getElementById("node_loraaddress").value
-          }
-        },
-        {
           "namespace": "lora",
           "settings": {
             "frequency": document.getElementById("lora_frequency").value,
@@ -325,10 +307,8 @@
     function refreshVisibility() {
       if (document.getElementById('general_role').value == 'Router') {
         document.getElementById('router_form').style.display = 'flex';
-        document.getElementById('node_form').style.display = 'none';
       } else {
         document.getElementById('router_form').style.display = 'none';
-        document.getElementById('node_form').style.display = 'flex';
       }
     }
 

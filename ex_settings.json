@@ -14,12 +14,6 @@
         }
     },
     {
-        "namespace": "node",
-        "settings": {
-            "loraaddress": "254"
-        }
-    },
-    {
         "namespace": "lora",
         "settings": {
             "frequency": "869.5",

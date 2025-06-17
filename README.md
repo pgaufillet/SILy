@@ -4,7 +4,7 @@ Meshed LoRa network for SportIdent SRR Orienteering stations based on Lilygo T3S
 
 The communication path is:
 
-**SI BSF8-SRR** --SRR--> **SI SRR module** --UART--> **Lilygo T3S3 node** --PyMesh--> **Lilygo T3S3 router** --WiFi+TCP--> **MeOS**.
+**SI BSF8-SRR** --SRR--> **SI SRR module** --UART--> **Lilygo T3S3 node** --LoraMesh--> **Lilygo T3S3 gateway** --WiFi+TCP--> **MeOS**.
 
 ## Hardware
 
@@ -16,6 +16,7 @@ The communication path is:
 * MeOS: <http://www.melin.nu/meos/en/> and <https://github.com/melinsoftware/meos>.
 * ESP32 Arduino documentation: <https://espressif-docs.readthedocs-hosted.com/projects/arduino-esp32/en/latest/>.
 * Lilygo T3S3: <https://github.com/Xinyuan-LilyGO/LilyGo-LoRa-Series>.
+* LoraMesher: <https://github.com/LoRaMesher/LoRaMesher>.
 
 ## Configuration guide
 
@@ -29,11 +30,11 @@ TBC
 
 SILy nodes can be of 2 types:
 
-* **Node**: general case. Nodes read punches and send them to the router.
-* **router**: only one router in the network, receiving punches from nodes and
+* **Node**: general case. Nodes read punches and send them to the gateway.
+* **Gateway**: only one gateway in the network, receiving punches from nodes and
 relaying them to MeOS.
 
-Nodes and router share the same software.
+Nodes and gateway share the same software.
 
 ## Technical notes
 
