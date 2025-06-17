@@ -1,6 +1,6 @@
 {
     "sketch": "SILy.ino",
-    "configuration": "PSRAM=enabled,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,UploadSpeed=921600,DebugLevel=none,EraseFlash=none,Revision=Radio_SX1262",
+    "configuration": "PSRAM=enabled,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,UploadSpeed=921600,DebugLevel=error,EraseFlash=none,Revision=Radio_SX1262",
     "board": "esp32:esp32:lilygo_t3s3",
     "programmer": "esptool",
     "output": "build",

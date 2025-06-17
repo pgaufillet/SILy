@@ -25,6 +25,9 @@
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/libraries/WiFi/src",
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/libraries/LittleFS/src",
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/libraries/Preferences/src",
+                "/Users/pgaufillet/Documents/Arduino/libraries/LoRaMesher/src",
+                "/Users/pgaufillet/Documents/Arduino/libraries/RadioLib/src",
+                "/Users/pgaufillet/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/libraries/SPI/src",
                 "/Users/pgaufillet/Documents/Arduino/libraries/ArduinoJson/src",
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/libraries/ESPmDNS/src",
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp-x32/2411/xtensa-esp-elf/include/c++/14.2.0",
@@ -32,7 +35,9 @@
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp-x32/2411/xtensa-esp-elf/include/c++/14.2.0/backward",
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp-x32/2411/lib/gcc/xtensa-esp-elf/14.2.0/include",
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp-x32/2411/lib/gcc/xtensa-esp-elf/14.2.0/include-fixed",
-                "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp-x32/2411/xtensa-esp-elf/include"
+                "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp-x32/2411/xtensa-esp-elf/include",
+                "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.4-2f7dcd86-v1/esp32/include/**",
+                "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.4-2f7dcd86-v1/esp32/include/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos"
             ],
             "forcedInclude": [
                 "/Users/pgaufillet/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/cores/esp32/Arduino.h"

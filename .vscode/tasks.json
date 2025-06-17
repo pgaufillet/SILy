@@ -1,93 +1,158 @@
 {
-    "tasks": [
-        {
-            "type": "cppbuild",
-            "label": "C/C++: xtensa-esp32s3-elf-g++ générer le fichier actif",
-            "command": "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/xtensa-esp32s3-elf-gcc/esp-2021r2-patch5-8.4.0/bin/xtensa-esp32s3-elf-g++",
-            "args": [
-                "-fdiagnostics-color=always",
-                "-g",
-                "${file}",
-                "-o",
-                "${fileDirname}/${fileBasenameNoExtension}",
-                "-mlongcalls",
-                "-ffunction-sections",
-                "-fdata-sections",
-                "-Wno-error=unused-function",
-                "-Wno-error=unused-variable",
-                "-Wno-error=deprecated-declarations",
-                "-Wno-unused-parameter",
-                "-Wno-sign-compare",
-                "-freorder-blocks",
-                "-Wwrite-strings",
-                "-fstack-protector",
-                "-fstrict-volatile-bitfields",
-                "-Wno-error=unused-but-set-variable",
-                "-fno-jump-tables",
-                "-fno-tree-switch-conversion",
-                "-std=gnu++11",
-                "-fexceptions",
-                "-fno-rtti"
-            ],
-            "options": {
-                "cwd": "${fileDirname}"
-            },
-            "problemMatcher": [
-                "$gcc"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "detail": "Tâche générée par le débogueur."
-        },
-        {
-            "label": "Build LittleFS Image",
-            "type": "shell",
-            "command": "~/Library/Arduino15/packages/esp32/tools/mklittlefs/3.0.0-gnu12-dc7f933/mklittlefs",
-            "args": [
-              "-c",
-              "data/",             // Dossier de vos fichiers à inclure dans LittleFS
-              "-b", "4096",         // Taille des blocs
-              "-p", "256",          // Taille des pages
-              "-s", "1441792",      // Taille totale de la partition (ajustez si nécessaire)
-              "build/SILy.ino.littlefs.bin"        // Nom du fichier image LittleFS généré
-            ],
-            "group": "build",
-            "problemMatcher": [],
-            "detail": "Créer l'image LittleFS"
-          },
-          {
-            "label": "Upload LittleFS Partition",
-            "type": "shell",
-            "command": "python3",
-            "args": [
-              "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
-              "-i", "sily1.local",
-              "--file", "build/SILy.ino.littlefs.bin",
-              "--spiffs",
-              "--debug"
-            ],
-            "group": "build",
-            "dependsOn": "Build LittleFS Image",  // Cette tâche dépend de la construction de l'image
-            "problemMatcher": [],
-            "detail": "Uploader la partition LittleFS via OTA"
-          },
-          {
-            "label": "Upload Firmware",
-            "type": "shell",
-            "command": "python3",
-            "args": [
-              "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
-              "-i", "sily1.local",
-              "--file", "build/SILy.ino.bin",
-              "--debug"
-            ],
-            "group": "build",
-            "dependsOn": "Upload LittleFS Partition",  // Cette tâche dépend de l'upload de la partition FS
-            "problemMatcher": [],
-            "detail": "Uploader le firmware via OTA"
-          }
-    ],
-    "version": "2.0.0"
+  "tasks": [
+    {
+      "type": "cppbuild",
+      "label": "C/C++: xtensa-esp32s3-elf-g++ générer le fichier actif",
+      "command": "/Users/pgaufillet/Library/Arduino15/packages/esp32/tools/xtensa-esp32s3-elf-gcc/esp-2021r2-patch5-8.4.0/bin/xtensa-esp32s3-elf-g++",
+      "args": [
+        "-fdiagnostics-color=always",
+        "-g",
+        "${file}",
+        "-o",
+        "${fileDirname}/${fileBasenameNoExtension}",
+        "-mlongcalls",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-Wno-error=unused-function",
+        "-Wno-error=unused-variable",
+        "-Wno-error=deprecated-declarations",
+        "-Wno-unused-parameter",
+        "-Wno-sign-compare",
+        "-freorder-blocks",
+        "-Wwrite-strings",
+        "-fstack-protector",
+        "-fstrict-volatile-bitfields",
+        "-Wno-error=unused-but-set-variable",
+        "-fno-jump-tables",
+        "-fno-tree-switch-conversion",
+        "-std=gnu++11",
+        "-fexceptions",
+        "-fno-rtti"
+      ],
+      "options": {
+        "cwd": "${fileDirname}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "detail": "Tâche générée par le débogueur."
+    },
+    {
+      "label": "Build LittleFS Image",
+      "type": "shell",
+      "command": "~/Library/Arduino15/packages/esp32/tools/mklittlefs/3.0.0-gnu12-dc7f933/mklittlefs",
+      "args": [
+        "-c",
+        "data/", // Dossier de vos fichiers à inclure dans LittleFS
+        "-b",
+        "4096", // Taille des blocs
+        "-p",
+        "256", // Taille des pages
+        "-s",
+        "1441792", // Taille totale de la partition (ajustez si nécessaire)
+        "build/SILy.ino.littlefs.bin" // Nom du fichier image LittleFS généré
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Créer l'image LittleFS"
+    },
+    {
+      "label": "Flash littlefs partition to tty.usbmodem14201",
+      "type": "shell",
+      "command": "~/Library/Arduino15/packages/esp32/tools/esptool_py/4.9.dev3/esptool",
+      "args": [
+        "--chip",
+        "esp32s3",
+        "--port",
+        "/dev/tty.usbmodem14201", // À adapter selon votre configuration
+        "--baud",
+        "460800",
+        "write_flash",
+        "--flash_mode",
+        "dio",
+        "--flash_freq",
+        "80m",
+        "--flash_size",
+        "detect",
+        "0x290000", // Adresse de la partition littlefs à adapter
+        "build/SILy.ino.littlefs.bin" // Chemin vers le fichier binaire littlefs
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Flash LittleFS partition to ESP32-S3"
+    },
+    {
+      "label": "Upload LittleFS Partition to sily1",
+      "type": "shell",
+      "command": "python3",
+      "args": [
+        "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
+        "-i",
+        "sily1.local",
+        "--file",
+        "build/SILy.ino.littlefs.bin",
+        "--spiffs",
+        "--debug"
+      ],
+      "group": "build",
+      "dependsOn": "Build LittleFS Image", // Cette tâche dépend de la construction de l'image
+      "problemMatcher": [],
+      "detail": "Uploader la partition LittleFS via OTA"
+    },
+    {
+      "label": "Upload LittleFS Partition to sily2",
+      "type": "shell",
+      "command": "python3",
+      "args": [
+        "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
+        "-i",
+        "sily2.local",
+        "--file",
+        "build/SILy.ino.littlefs.bin",
+        "--spiffs",
+        "--debug"
+      ],
+      "group": "build",
+      "dependsOn": "Build LittleFS Image", // Cette tâche dépend de la construction de l'image
+      "problemMatcher": [],
+      "detail": "Uploader la partition LittleFS via OTA"
+    },
+    {
+      "label": "Upload Firmware to sily1",
+      "type": "shell",
+      "command": "python3",
+      "args": [
+        "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
+        "-i",
+        "sily1.local",
+        "--file",
+        "build/SILy.ino.bin",
+        "--debug"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Uploader le firmware via OTA"
+    },
+    {
+      "label": "Upload Firmware to sily2",
+      "type": "shell",
+      "command": "python3",
+      "args": [
+        "~/Library/Arduino15/packages/esp32/hardware/esp32/3.2.0/tools/espota.py",
+        "-i",
+        "sily2.local",
+        "--file",
+        "build/SILy.ino.bin",
+        "--debug"
+      ],
+      "group": "build",
+      "problemMatcher": [],
+      "detail": "Uploader le firmware via OTA"
+    }
+  ],
+  "version": "2.0.0"
 }
