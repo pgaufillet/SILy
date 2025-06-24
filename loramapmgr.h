@@ -38,6 +38,8 @@ public:
     return singleton;
   };
 
+  String generateMapJson();
+
 private:
   LoraMgr &loramgr = LoraMgr::getInstance();
   uint32_t period = -1; // in ms

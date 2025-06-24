@@ -132,6 +132,14 @@ void setup() {
   });
   Serial.println("[INFO] GET app handler...ok");
 
+  server.on("/loramap", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String json = loraMapMgr.generateMapJson();
+    Serial.print("[DEBUG] Sending: ");
+    Serial.println(json);
+    request->send(200, "application/json", json);
+  });
+  Serial.println("[INFO] GET loramap handler...ok");
+
   server.serveStatic("/", LittleFS, "/").setDefaultFile("/index.html");
   Serial.println("[INFO] Static files handler...ok");
 
@@ -173,7 +181,8 @@ void setup() {
   // OTA starts lately due to LoRaMesher initialization duration (time between
   // setup and loop is too long). It causes problems when flashing the
   // filesystem and immediately after the program.
-  // TODO: start OTA in a separate task instead of loop
+  // TODO: start OTA in a separate task instead of loop. See if it is possible
+  // to use ESP-IDF OTA directly.
   ArduinoOTA.begin();
   Serial.println("[INFO] OTA started");
 

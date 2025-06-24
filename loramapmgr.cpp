@@ -156,3 +156,46 @@ void LoraMapMgr::receiveHeartbeat(uint8_t *payload, size_t payloadSize,
     Serial.println("[ERROR] Invalid heartbeat packet size");
   }
 }
+
+String LoraMapMgr::generateMapJson() {
+  bool not_void_json = false;
+  String json = "{\"links\":[";
+  // Nodes can be extracted from the link list as no node can be isolated by
+  // design
+  // TODO: Protect againt concurrency with a critical section
+  for (size_t i = 0; i < links->count(); i++) {
+    const MeshLink *link = links->get(i);
+    if (i > 0) {
+      json += ",";
+      not_void_json = true;
+    }
+    json += "{\"src\":" + String(link->localAddr) +
+            ",\"dst\":" + String(link->remoteAddr) +
+            ",\"snr\":" + String(link->snr) +
+            ",\"time\":" + String(link->lastRefreshTime) + "}";
+  }
+
+  LM_LinkedList<RouteNode> *routingTableList =
+      loramgr.radio.routingTableListCopy();
+  for (size_t i = 0; i < routingTableList->getLength(); i++) {
+
+    RouteNode *route = (*routingTableList)[i];
+    NetworkNode *node = &(route->networkNode);
+    if (node->metric == 1) { // direct neighbors only
+      if (not_void_json) {
+        json += ",";
+      }
+      json += "{\"src\":" + String(loramgr.radio.getLocalAddress()) +
+              ",\"dst\":" + String(node->address) +
+              ",\"snr\":" + String(route->receivedSNR) +
+              ",\"time\":" + String(millis()) + "}";
+    }
+  }
+  delete routingTableList;
+
+  // TODO: send node names
+
+  json += "]}";
+
+  return json;
+}
