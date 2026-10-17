@@ -20,8 +20,16 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   - `sily/` — the application;
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
-    on the unix port and can be extracted later;
+    on the unix port and can be extracted later; its core is event-driven
+    without I/O (time and events in, actions and next deadline out,
+    `mesh/core.py`), driven by an asyncio runner on the board and by the
+    simulator on the host;
   - `board/` — board support, the only hardware-specific code.
+- `sim/` — host-only mesh simulator, not deployed: deterministic random
+  generator, discrete-event scheduler, platform fakes, scripted radio medium
+  (loss, asymmetry, partitions, collisions, half duplex, carrier sense) and
+  the host runner of mesh cores. Imports `mesh` only; goes with it if the mesh
+  is extracted.
 - `tests/` — host tests (`run.py` runner, `test_*.py` modules).
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
   `LILYGO_T3_S3` board plus the frozen `lora-async` package.

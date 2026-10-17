@@ -1,7 +1,10 @@
-"""Package isolation rules of src/ (MESH_DESIGN §1, ARCHITECTURE).
+"""Package isolation rules (MESH_DESIGN §1, ARCHITECTURE).
 
-- mesh: application-agnostic, platform injected: no sily, board, machine.
+- mesh: application-agnostic, platform injected: no sily, board, machine,
+  and not the host-only simulator sim.
 - board: hardware only: no sily, mesh.
+- sim: host-only, outside src/ (not deployed); uses mesh only: no sily,
+  board, machine.
 """
 
 import os
@@ -9,11 +12,14 @@ import unittest
 
 import run
 
-_SRC = run._dirname(__file__) + "/../src"
+_ROOT = run._dirname(__file__) + "/.."
+_SRC = _ROOT + "/src"
 
+# Package directory -> modules it must not import.
 _FORBIDDEN = {
-    "mesh": ("sily", "board", "machine"),
-    "board": ("sily", "mesh"),
+    _SRC + "/mesh": ("sily", "board", "machine", "sim"),
+    _SRC + "/board": ("sily", "mesh"),
+    _ROOT + "/sim": ("sily", "board", "machine"),
 }
 
 
@@ -69,13 +75,26 @@ class ImportedModules(unittest.TestCase):
         self.assertEqual(imported_modules(source), ["os", "a", "d", "e", "machine"])
 
 
+def _exists(path):
+    try:
+        os.stat(path)
+    except OSError:
+        return False
+    return True
+
+
 class Isolation(unittest.TestCase):
     def test_packages(self):
         for package, forbidden in _FORBIDDEN.items():
-            paths = python_files(_SRC + "/" + package)
+            paths = python_files(package)
             self.assertTrue(paths, "no source found for " + package)
             for path in paths:
                 with open(path) as f:
                     imported = imported_modules(f.read())
                 for name in forbidden:
                     self.assertFalse(name in imported, "%s imports %s" % (path, name))
+
+    def test_simulator_not_deployed(self):
+        # make deploy copies src/: the simulator must live outside it.
+        self.assertTrue(_exists(_ROOT + "/sim/__init__.py"))
+        self.assertFalse(_exists(_SRC + "/sim"))

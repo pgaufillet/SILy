@@ -9,9 +9,12 @@ builtins = ["const"]
 select = ["E", "F", "W", "I", "B"]
 
 [lint.isort]
-# Packages of src/, and modules provided by MicroPython or the firmware.
-known-first-party = ["board", "mesh", "sily"]
+# Packages of src/, the host-only simulator, and modules provided by
+# MicroPython or the firmware.
+known-first-party = ["board", "mesh", "sily", "sim"]
 known-third-party = ["lora", "machine", "micropython"]
+# Helper modules of tests/, imported from the test directory.
+known-local-folder = ["run", "simcores"]
 
 [lint.per-file-ignores]
 # Frozen manifests are executed with include(), require(), freeze()... in scope.

@@ -19,14 +19,18 @@ PORT ?= /dev/ttyACM0
 BOARD = SILY_T3S3
 BOARD_DIR = $(CURDIR)/firmware/$(BOARD)
 
-# Host tests: application sources and micropython-lib's unittest, without
-# installing anything into the MicroPython tree.
-TEST_PATH = .frozen:$(CURDIR)/src:$(MPY_LIB)/python-stdlib/unittest
+# Host tests: application sources, the host-only simulator (sim/, from the
+# repository root) and micropython-lib's unittest, without installing anything
+# into the MicroPython tree.
+TEST_PATH = .frozen:$(CURDIR)/src:$(CURDIR):$(MPY_LIB)/python-stdlib/unittest
+# Heap of the unix port for host tests (default 2 MB): simulated hours of
+# multi-node traffic keep their traces in memory.
+TEST_HEAP ?= 32M
 
 # Top-level entries of src/ copied to the board's filesystem root.
 DEPLOY_ITEMS = $(notdir $(wildcard src/*))
 
-LINT_PATHS = src tests firmware Makefile README.md
+LINT_PATHS = src sim tests firmware Makefile README.md
 
 .PHONY: help check test lint firmware flash deploy
 
@@ -41,7 +45,7 @@ help:
 check: lint test
 
 test:
-	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) tests/run.py tests
+	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/run.py tests
 
 lint:
 	$(RUFF) check .
