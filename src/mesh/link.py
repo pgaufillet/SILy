@@ -11,7 +11,15 @@ a negative refusal reason (`BAD_PORT`...). Mesh components queue their own
 messages with `send` (mesh ports, explicit next hop). Applications register
 one handler per port with `bind` (ports 16–255; ports 0–15 belong to the
 mesh, `bind_mesh`), and a failure callback with `on_failure` (explicit
-failures after submission, MP5).
+failures after submission, MP5: local reasons, negative, or the network's,
+positive, `mesh.reliable` reasons 1–6).
+
+**Class 1** (§12): `mesh.reliable.Reliable` (``reliable``) keeps class 1/2
+messages until acknowledged (passive or explicit, port 3), retries them, holds
+them without route and turns failures into errors (port 4) or failure
+callbacks; it is plugged into the extension points below, the forwarding
+path and the receive path (duplicate cache, explicit acknowledgements). A
+class 1 submission without next hop is held, not refused.
 
 **Transmit path** (§6, §7, §8): when the queue holds messages and the radio
 is free, the engine drops the priority-2/3 reports (class 0) that the
@@ -39,15 +47,20 @@ destination: own address or `BROADCAST` processes the messages, any other
 one goes to `overheard` (passive acknowledgements). Each message is
 delivered to its port's handler when this node is its destination, otherwise
 passed to `forward` (next hop from the injected ``next_hop`` function, after
-a random delay of at most one slot, §7).
+a random delay of at most one slot, §7). A class 1/2 message already in the
+duplicate cache is neither delivered nor forwarded again; the frame then
+gets an explicit acknowledgement, as when it carries a class 1/2 message
+delivered here or held (`mesh.reliable`).
 
-**Extension points** (no-op or minimal defaults, overridden or replaced by
-the later steps): `heard` (neighbour table; an override calls it first),
-`overheard` (passive acknowledgements), `sent` (class 1 bookkeeping, frame
-counter of the frame), `give_up` (busy channel), `forward` (routing:
-data-path validation, jitter, source routes, holding), `tick` and `timer`
-(protocol timers), ``next_hop`` (routing), ``rank`` and ``dodag_version``
-(header fields set by routing).
+**Extension points** (minimal defaults, overridden or replaced by the later
+steps): `heard` (neighbour table), `overheard` (passive acknowledgements),
+`sent` (class 1 bookkeeping, frame counter of the frame), `tick` and `timer`
+(protocol timers): an override calls the base method (class 1 lives there);
+`give_up` (busy channel), `forward` (routing: data-path validation, jitter,
+source routes; returns `QUEUED`, `HELD` or `NOT_TAKEN`, on which class 1
+acknowledges or not), ``next_hop`` and ``reroute`` (routing: next hop, next
+hop after failure, `mesh.reliable`), ``rank`` and ``dodag_version`` (header
+fields set by routing).
 
 **Runner contract**: a submission made outside `step` (application task)
 takes effect at the next step; the runner steps the core (``step(now,
@@ -81,9 +94,10 @@ from mesh.frame import (
 )
 from mesh.neighbours import NeighbourTable
 from mesh.platform import randbelow, retained_layout
-from mesh.ports import APP_HIGH, PRIORITY_LOW, PRIORITY_PERIODIC
+from mesh.ports import ACK, APP_HIGH, ERROR, PRIORITY_LOW, PRIORITY_PERIODIC
 from mesh.ports import priority as port_priority
 from mesh.radio import CHANNEL, RX, RX_ERROR, SENSE_ACTION, TX, TX_DONE
+from mesh.reliable import Reliable, identity
 from mesh.replay import ReplayTable
 from mesh.replay import retained_size as replay_size
 from mesh.security import AUTHENTICATION, REPLAY, KeyRing, Security
@@ -105,7 +119,7 @@ BAD_CLASS = -2  # class other than 0, 1, 2
 BAD_DEST = -3  # own address or out of range
 TOO_LONG = -4  # payload above MAX_PAYLOAD or above the frame limit
 BROADCAST_CLASS = -5  # class 1 or 2 requested for a broadcast
-NO_ROUTE = -6  # no next hop (provisional, until class 1/2 holding, §12)
+NO_ROUTE = -6  # class 0 without next hop (class 1/2 messages are held, §12)
 QUEUE_FULL = -7  # transmit queue full
 ORIGIN_QUOTA = -8  # own traffic over its quota (§7)
 EXHAUSTED = -9  # frame counter exhausted: the board no longer transmits
@@ -116,6 +130,12 @@ AUTH = 0  # authentication failures (wrong key, foreign network, forgery)
 REPLAYS = 1  # replays rejected
 QUOTA = 2  # forwarded messages of this origin refused by the queue
 KNOWN = 3  # 1 if the address had authenticated before an authentication failure
+
+# Outcomes of `forward` (and of the dispatch of a received message).
+NOT_TAKEN = 0  # dropped or refused: not acknowledged
+QUEUED = 1  # queued towards its next hop
+HELD = 2  # queued without next hop: held during repair (§12)
+DELIVERED = 3  # this node is its destination
 
 # Transmit states.
 IDLE = 0
@@ -160,6 +180,26 @@ class Counters:
         self.give_ups = 0
         self.access_dropped = 0  # reports dropped after MAX_ATTEMPTS busy senses
         self.unexpected = 0  # radio events not matching the transmit state
+        # Class 1 (§12, `mesh.reliable`).
+        self.retries = 0  # transmissions after the first to one next hop
+        self.reroutes = 0  # attempts exhausted: switched to another next hop
+        self.unreachable = 0  # attempts exhausted, no alternative: failed (reason 1)
+        self.held = 0  # messages put on hold (no next hop)
+        self.hold_expired = 0  # held messages failed after the holding (reason 3)
+        self.acks_passive = 0  # messages acknowledged by overhearing the next hop
+        self.acks_explicit = 0  # messages acknowledged by a port 3 entry
+        self.ack_entries = 0  # port 3 entries sent
+        self.acks_late = 0  # entries sent for a forward not on air within half a timeout
+        self.acks_dropped = 0  # port 3 entries refused by the queue
+        self.ack_withheld = 0  # frames not acknowledged: a class 1/2 message refused
+        self.malformed_acks = 0
+        self.duplicates = 0  # class 1/2 messages received again: acknowledged, dropped
+        self.errors_sent = 0  # port 4 errors about forwarded messages
+        self.errors_received = 0  # errors about own messages (failure callback)
+        self.errors_forwarded = 0  # root: errors forwarded to the origin
+        self.errors_dropped = 0  # errors failed (never an error about an error) or refused
+        self.errors_misrouted = 0
+        self.errors_malformed = 0
 
 
 class SenderCounters:
@@ -226,14 +266,27 @@ class LinkEngine(Core):
     `mesh.platform.Random` (backoff, first sequence number); sf, profile:
     spreading factor and regional profile (time on air, frame limit);
     next_hop: function(msg) -> next hop address or None (routing; static in
-    tests); slot_ms: backoff slot, the time on air of a presence frame by
-    default. ``neighbours``: its `mesh.neighbours.NeighbourTable` (presence
-    period of the SF by default; routing sets it). Use `open_link` to build
-    one from the platform.
+    tests; None holds a class 1/2 message); reroute: function(msg, hop) ->
+    next hop after hop failed `mesh.reliable.ATTEMPTS` times, `HOLD` or None
+    (no alternative; None as a function: no alternative ever); slot_ms:
+    backoff slot, the time on air of a presence frame by default.
+    ``neighbours``: its `mesh.neighbours.NeighbourTable` (presence period of
+    the SF by default; routing sets it). ``reliable``: its class 1 state.
+    Use `open_link` to build one from the platform.
     """
 
     def __init__(
-        self, address, security, dutycycle, queue, random, sf, profile, next_hop=None, slot_ms=None
+        self,
+        address,
+        security,
+        dutycycle,
+        queue,
+        random,
+        sf,
+        profile,
+        next_hop=None,
+        slot_ms=None,
+        reroute=None,
     ):
         super().__init__()
         if type(address) is not int or address < 0 or address >= BROADCAST:
@@ -251,6 +304,7 @@ class LinkEngine(Core):
         self._toa = self.toa_ms  # bound once: pack calls it per message
         self.slot_ms = slot_ms if slot_ms else self.toa_ms(PRESENCE_FRAME)
         self.next_hop = next_hop
+        self.reroute = reroute
         self.rank = frame.RANK_ROOT if self.is_root else frame.RANK_INFINITE
         self.dodag_version = 0
         self.neighbours = NeighbourTable(sf)
@@ -270,6 +324,17 @@ class LinkEngine(Core):
         self._attempts = 0
         self._cw = CW_MIN
         self._sel = None
+        self._reliable()
+
+    def _reliable(self):
+        self.reliable = Reliable(self)
+        self._handlers[ACK] = self.reliable.on_ack
+        self._handlers[ERROR] = self.reliable.on_error
+
+    def set_queue(self, queue):
+        """Replace the transmit queue (tests: another size); class 1 state restarts."""
+        self.queue = queue
+        self._reliable()
 
     def toa_ms(self, length):
         """Return the time on air (ms) of a frame of length bytes."""
@@ -302,8 +367,18 @@ class LinkEngine(Core):
 
     def fail(self, msg, reason):
         """Report the failure of an own message to the application (MP5)."""
+        self.failed(destination(msg), msg.port, msg.seq, reason)
+
+    def failed(self, dest, port, seq, reason):
+        """Report the failure of the own message (dest, port, seq) to the application."""
         if self._failure is not None:
-            self._failure(destination(msg), msg.port, msg.seq, reason)
+            self._failure(dest, port, seq, reason)
+
+    def next_seq(self):
+        """Return the next sequence number of the node-wide counter and advance it."""
+        seq = self._seq
+        self._seq = (seq + 1) & 0xFFFF
+        return seq
 
     def submit(self, port, cls, dest, payload, replace=False):
         """Queue an application message; return its sequence or a refusal.
@@ -314,7 +389,9 @@ class LinkEngine(Core):
         port (§12). Returns the message's sequence number (>= 0; 0 when the
         message carries none) once queued, otherwise a negative reason
         (`BAD_PORT`, `BAD_CLASS`, `UNSUPPORTED`, `BAD_DEST`, `BROADCAST_CLASS`,
-        `TOO_LONG`, `EXHAUSTED`, `NO_ROUTE`, `QUEUE_FULL`, `ORIGIN_QUOTA`).
+        `TOO_LONG`, `EXHAUSTED`, `NO_ROUTE`, `QUEUE_FULL`, `ORIGIN_QUOTA`). A
+        class 1 message without next hop is queued and held (§12): it is
+        sent when a route appears, or fails later (`on_failure`, reason 3).
         """
         if type(port) is not int or port < APP_HIGH or port > 255:
             return BAD_PORT
@@ -352,11 +429,13 @@ class LinkEngine(Core):
             hop = BROADCAST
         else:
             hop = self.next_hop(msg) if self.next_hop is not None else None
-            if hop is None:
+            if hop is None and not cls:
                 return NO_ROUTE
-        outcome = self.send(msg, hop, replace=replace)
+        outcome = self.send(msg, BROADCAST if hop is None else hop, replace=replace)
         if outcome == REFUSED:
             return ORIGIN_QUOTA if self.queue.reason == OVER_QUOTA else QUEUE_FULL
+        if hop is None:
+            self.reliable.hold(self.queue.slot, msg, None)  # from the next step
         if seq is None:
             return 0
         self._seq = (seq + 1) & 0xFFFF
@@ -389,20 +468,28 @@ class LinkEngine(Core):
 
     def overheard(self, header, messages, now):
         """A frame for another link destination (passive acknowledgements)."""
+        self.reliable.overheard(header, messages, now)
 
     def sent(self, sel, counter, now):
         """A frame goes on air: sel (`txqueue.Selection`, before its commit), counter."""
+        self.reliable.sent(sel, counter, now)
 
     def give_up(self, sel, now):
         """MAX_ATTEMPTS busy senses for sel: drop its priority-2/3 reports (§8)."""
         self.counters.access_dropped += self.queue.drop(_is_report, sel)
 
     def forward(self, msg, header, now):
-        """A message for another node: queue a copy towards next_hop(msg)."""
+        """A message for another node: queue a copy towards next_hop(msg).
+
+        Returns `QUEUED`, `HELD` (class 1/2 without next hop: held, §12) or
+        `NOT_TAKEN` (class 0 without next hop, or refused by the queue). A
+        queued class 1/2 message is acknowledged explicitly unless it goes
+        on air within half a timeout (`Reliable.owe`).
+        """
         hop = self.next_hop(msg) if self.next_hop is not None else None
-        if hop is None:
+        if hop is None and not msg.cls:
             self.counters.no_route += 1
-            return
+            return NOT_TAKEN
         copy = Message(
             msg.mode,
             msg.cls,
@@ -413,17 +500,23 @@ class LinkEngine(Core):
             msg.seq,
             msg.route,
         )
-        outcome = self.queue.offer(copy, hop)
-        if accepted(outcome):
-            self.counters.forwarded += 1
-            # §7: a relay waits a random delay in [0, ToA(presence frame)]
-            # before forwarding, so that relays (and the sender's next frame)
-            # do not sense the end of one frame together.
-            self.access_at(now + randbelow(self.random, self.slot_ms + 1))
-            if outcome == EVICTED:
-                self.counters.evicted += 1
-        else:
+        outcome = self.queue.offer(copy, BROADCAST if hop is None else hop)
+        if not accepted(outcome):
             self._count_refusal(ROOT if msg.origin is None else msg.origin)
+            return NOT_TAKEN
+        self.counters.forwarded += 1
+        if outcome == EVICTED:
+            self.counters.evicted += 1
+        if hop is None:
+            self.reliable.hold(self.queue.slot, copy, now)
+            return HELD
+        if copy.cls:
+            self.reliable.owe(self.queue.slot, copy, header.source, header.counter, now)
+        # §7: a relay waits a random delay in [0, ToA(presence frame)]
+        # before forwarding, so that relays (and the sender's next frame)
+        # do not sense the end of one frame together.
+        self.access_at(now + randbelow(self.random, self.slot_ms + 1))
+        return QUEUED
 
     def access_at(self, time):
         """Start the transmit path at time at the latest (queued messages wait)."""
@@ -432,10 +525,11 @@ class LinkEngine(Core):
 
     def tick(self, now):
         """Called at every step, before the transmit path (protocol timers)."""
+        self.reliable.tick(now)
 
     def timer(self):
         """Return the time of the next protocol timer, or None."""
-        return None
+        return self.reliable.timer()
 
     # --- Core ----------------------------------------------------------------
 
@@ -626,24 +720,50 @@ class LinkEngine(Core):
             c.rx_overheard += 1
             self.overheard(h, messages, now)
             return
+        rel = self.reliable
+        ack = False
+        refused = False
         for m in messages:
             c.rx_messages[m.port] += 1
             frame.expand_first_hop(m, h.source)
-            self._accept(m, h, now)
+            key = identity(m, h.source, h.dest) if m.cls else None
+            if key is None:
+                self._accept(m, h, now)
+                continue
+            # Class 1/2 (§12): duplicate cache, then one explicit
+            # acknowledgement for the frame unless forwarding acknowledges.
+            if rel.duplicate(key, now):
+                c.duplicates += 1
+                ack = True
+                continue
+            outcome = self._accept(m, h, now)
+            if outcome == NOT_TAKEN:
+                refused = True
+                continue
+            rel.remember(key, now)
+            if outcome != QUEUED:
+                ack = True
+        if refused:
+            # One entry would acknowledge the refused message too: none, and
+            # no late one either (the sender retries the whole frame).
+            rel.cancel_owed(h.source, h.counter)
+            if ack:
+                c.ack_withheld += 1
+        elif ack:
+            rel.acknowledge(h.source, h.counter, now)
 
     def _accept(self, m, h, now):
+        """Deliver or forward a received message; return `DELIVERED`, `QUEUED`..."""
         mode = m.mode
         if mode == LINK_LOCAL:
             origin = h.source
         elif mode == UPWARD:
             if not self.is_root:
-                self.forward(m, h, now)
-                return
+                return self.forward(m, h, now)
             origin = m.origin
         elif mode == DOWNWARD or mode == P2P:
             if m.dest != self.address:
-                self.forward(m, h, now)
-                return
+                return self.forward(m, h, now)
             origin = ROOT if mode == DOWNWARD else m.origin
         elif mode == NODE_BROADCAST:
             origin = m.origin  # rebroadcast and duplicate filter: §9 broadcast
@@ -652,9 +772,10 @@ class LinkEngine(Core):
         handler = self._handlers[m.port]
         if handler is None:
             self.counters.rx_no_handler += 1
-            return
+            return DELIVERED
         self.counters.delivered += 1
         handler(origin, m, h)
+        return DELIVERED
 
 
 def open_link(
@@ -666,6 +787,7 @@ def open_link(
     profile,
     sf,
     next_hop=None,
+    reroute=None,
     epoch=0,
     queue_size=SIZE,
     budget_ms=None,
@@ -678,7 +800,8 @@ def open_link(
     random: the `mesh.platform` objects (frame counter in storage; duty-cycle
     window, then replay table, in retained memory, restored when valid).
     budget_ms, window_ms: duty-cycle budget and window, from the profile by
-    default (tests scale them down). Build it once per boot.
+    default (tests scale them down); next_hop, reroute: as `LinkEngine`.
+    Build it once per boot.
     """
     if budget_ms is None:
         budget_ms = profile.budget_ms()
@@ -692,5 +815,13 @@ def open_link(
     )
     dutycycle = DutyCycle(budget_ms, window_ms, bins, retained, dc_at)
     return LinkEngine(
-        address, security, dutycycle, TxQueue(queue_size), random, sf, profile, next_hop
+        address,
+        security,
+        dutycycle,
+        TxQueue(queue_size),
+        random,
+        sf,
+        profile,
+        next_hop,
+        reroute=reroute,
     )

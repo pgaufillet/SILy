@@ -49,9 +49,10 @@ the class 0 messages and keeps the class 1 and 2 messages as *waiting* for an
 acknowledgement: they keep their entry (quota and size) and their age, are
 not packed again, and count one more attempt. The reliability layer then
 calls `remove` (acknowledged, or failed) or `retry` (timeout: packed again,
-possibly towards another next hop with fresh attempts). Entries are
-designated by their slot and checked against their message, so that a stale
-handle never touches a reused slot.
+possibly towards another next hop with fresh attempts); `hold` makes a
+queued message wait without an attempt (held during repair, §12). Entries
+are designated by their slot (``slot`` after `offer`) and checked against
+their message, so that a stale handle never touches a reused slot.
 
 Bounded memory: every array is allocated at construction; queueing and
 packing allocate nothing per message beyond the message itself (one list of
@@ -169,6 +170,7 @@ class TxQueue:
         self.reason = 0
         self.victim = None
         self.victim_origin = None
+        self.slot = None
 
     def __len__(self):
         return self._count
@@ -188,9 +190,11 @@ class TxQueue:
         trickle_reset: port 9 priority (`mesh.ports.priority`); replace: class
         0 replace by newer for this port. On a refusal or eviction, ``reason``
         is `FULL` or `OVER_QUOTA`; on `EVICTED`, ``victim`` and
-        ``victim_origin`` give the message dropped. Raises ValueError for a
-        malformed message, a reserved port or a message no frame can carry
-        (a bug of the caller: submissions are checked before, MP6).
+        ``victim_origin`` give the message dropped. ``slot`` is the entry of
+        the message once queued (or of the message it replaced), None after a
+        refusal. Raises ValueError for a malformed message, a reserved port or
+        a message no frame can carry (a bug of the caller: submissions are
+        checked before, MP6).
         """
         p = port_priority(msg.port, trickle_reset)
         frame.check_message(msg)
@@ -203,12 +207,14 @@ class TxQueue:
         self.reason = 0
         self.victim = None
         self.victim_origin = None
+        self.slot = None
         if replace and msg.cls == 0:
             i = self._older(key, msg.port)
             if i != _NIL:
                 self._msg[i] = msg
                 self._hop[i] = hop
                 self._prio[i] = p
+                self.slot = i
                 return REPLACED
         o = self._origin(key)
         if o != _NIL and self._count > self.size // 2 and self._ocount[o] >= self.quota:
@@ -287,6 +293,7 @@ class TxQueue:
             self._next[self._tail] = i
         self._tail = i
         self._count += 1
+        self.slot = i
 
     def _remove(self, i):
         prev = self._prev[i]
@@ -463,19 +470,36 @@ class TxQueue:
         """Return the transmissions of msg in slot since queued or retargeted."""
         return self._attempts[slot] if self._msg[slot] is msg else 0
 
-    def retry(self, slot, msg, hop=None):
+    def retry(self, slot, msg, hop=None, fresh=False):
         """Make waiting msg in slot eligible again; return False if stale.
 
-        hop: a new next hop (e.g. the next parent): attempts restart from 0.
-        The message keeps its age, hence its place in its origin's turn.
+        hop: a new next hop (e.g. the next parent): attempts restart from 0,
+        as they do with fresh (a held message resumed, §12). The message keeps
+        its age, hence its place in its origin's turn.
         """
         if self._msg[slot] is not msg:
             return False
         self._flags[slot] &= ~_WAIT
         if hop is not None and hop != self._hop[slot]:
             self._hop[slot] = hop
+            fresh = True
+        if fresh:
             self._attempts[slot] = 0
         return True
+
+    def hold(self, slot, msg):
+        """Make msg in slot wait without an attempt (held, §12); False if stale.
+
+        It keeps its entry and is not packed until `retry`.
+        """
+        if self._msg[slot] is not msg:
+            return False
+        self._flags[slot] |= _WAIT
+        return True
+
+    def holds(self, slot, msg):
+        """Return True if slot holds msg (waiting or not)."""
+        return self._msg[slot] is msg
 
     def remove(self, slot, msg):
         """Remove msg from slot (acknowledged, or failed); False if stale."""

@@ -146,12 +146,12 @@ class Submission(unittest.TestCase):
 
     def test_queue_full_and_own_quota(self):
         e = _engine(A, hop=B)
-        e.queue = TxQueue(8, 2)
+        e.set_queue(TxQueue(8, 2))
         results = [e.submit(20, 0, ROOT, b"m%d" % i) for i in range(6)]
         # Own traffic is one origin: refused once the queue is more than half
         # full and the origin holds its quota.
         self.assertEqual(results, [0, 0, 0, 0, 0, ORIGIN_QUOTA])
-        e.queue = TxQueue(4)
+        e.set_queue(TxQueue(4))
         results = [e.submit(20, 0, ROOT, b"m%d" % i) for i in range(5)]
         self.assertEqual(results, [0, 0, 0, 0, QUEUE_FULL])
         self.assertEqual(e.counters.refused_full, 1)

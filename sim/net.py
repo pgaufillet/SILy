@@ -68,8 +68,11 @@ class Network:
         self._labels += 1
         return self._labels
 
-    def add(self, name, address=None, key=None, next_hop=None):
-        """Add a board on medium port name; mesh address defaults to name."""
+    def add(self, name, address=None, key=None, next_hop=None, reroute=None):
+        """Add a board on medium port name; mesh address defaults to name.
+
+        next_hop, reroute: routing functions of its engines (`mesh.link.LinkEngine`).
+        """
         board = Board(
             self,
             name,
@@ -77,6 +80,7 @@ class Network:
             self.key if key is None else key,
             next_hop,
             self._label(),
+            reroute,
         )
         self.boards[name] = board
         return board
@@ -114,16 +118,18 @@ class Board:
 
     ``engine`` is the current engine (None while the board is off; a reboot
     builds a new one, whose counters start from zero); ``inbox`` records
-    (time, origin, port, payload) for the ports given to `listen`, across
-    reboots; ``boots`` counts the engines built.
+    (time, origin, port, payload) for the ports given to `listen`, and
+    ``failures`` (time, dest, port, seq, reason) for the failure callback,
+    across reboots; ``boots`` counts the engines built.
     """
 
-    def __init__(self, net, name, address, key, next_hop, label):
+    def __init__(self, net, name, address, key, next_hop, label, reroute=None):
         self.net = net
         self.name = name
         self.address = address
         self.key = key
         self.next_hop = next_hop
+        self.reroute = reroute
         self.platform = FakePlatform(net.rng.derive(label))
         self.port = net.medium.attach(name)
         self.inbox = []
@@ -145,6 +151,7 @@ class Board:
             net.profile,
             net.sf,
             self.next_hop,
+            self.reroute,
             budget_ms=net.budget_ms,
             window_ms=net.window_ms,
         )
