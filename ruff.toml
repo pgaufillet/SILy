@@ -1,0 +1,18 @@
+# Ruff for MicroPython code: CPython is only the linter's host.
+line-length = 99
+# MicroPython syntax is close to Python 3.8 with f-strings (no match, no PEP 604).
+target-version = "py38"
+# `const` is a MicroPython builtin when not imported from `micropython`.
+builtins = ["const"]
+
+[lint]
+select = ["E", "F", "W", "I", "B"]
+
+[lint.isort]
+# Packages of src/, and modules provided by MicroPython or the firmware.
+known-first-party = ["board", "mesh", "sily"]
+known-third-party = ["lora", "machine", "micropython"]
+
+[lint.per-file-ignores]
+# Frozen manifests are executed with include(), require(), freeze()... in scope.
+"firmware/*/manifest.py" = ["F821"]
