@@ -8,7 +8,7 @@ Header: byte 0 versions (bits 7–6 protocol version, bit 5 key epoch, bits 4–
 DODAG version, bit 0 reserved: sent 0, ignored); link destination 2 B; link
 source 2 B; frame counter 3 B; rank 1 B. Integers are little-endian.
 
-Security boundary (§14, implemented by the security layer): `aad` is the
+Security boundary (§14, implemented by `mesh.security`): `aad` is the
 associated data, `body` the region encrypted in place (plaintext and
 ciphertext have the same length), `tag` the 4 bytes the seal writes. The
 AEAD nonce starts with the link source and the frame counter exactly as they

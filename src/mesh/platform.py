@@ -56,6 +56,24 @@ class Retained:
         raise NotImplementedError
 
 
+def retained_layout(retained, *sizes):
+    """Return the offsets of consecutive regions of sizes bytes in retained.
+
+    Users of the retained memory share its data without overlap: each gets
+    an offset from this layout and its size from its own ``retained_size``
+    (e.g. `mesh.dutycycle`, `mesh.replay`). Raises ValueError if the regions
+    do not fit in retained.data.
+    """
+    offsets = []
+    offset = 0
+    for size in sizes:
+        offsets.append(offset)
+        offset += size
+    if offset > len(retained.data):
+        raise ValueError("retained memory too small")
+    return tuple(offsets)
+
+
 class Random:
     """Random source (ESP32: hardware RNG; host: seeded generator)."""
 
