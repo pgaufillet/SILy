@@ -9,14 +9,14 @@ Network keys: master key = PBKDF2-HMAC-SHA256(password, `SALT_PREFIX` ‖
 network name, iterations, 32 B), both strings in UTF-8; from it, with one
 HMAC per label: frame key (16 B, label ``frame``), key fingerprint (4 B,
 ``fingerprint``), wrapping key (16 B, ``key-wrap``). The iteration count is
-set so that derivation takes 1–2 s on the board (`DEFAULT_ITERATIONS` until
-measured).
+set so that derivation takes 1–2 s on the board: 6000 iterations take
+1.44 s on a T3S3 with the application loaded (docs/measurements.md).
 """
 
 import hashlib
 
 SALT_PREFIX = b"mesh/1"
-DEFAULT_ITERATIONS = 10000  # to be set from the board measurement (1-2 s)
+DEFAULT_ITERATIONS = 6000  # network-wide: every node must use the same count
 MASTER_SIZE = 32
 FRAME_KEY_SIZE = 16
 FINGERPRINT_SIZE = 4

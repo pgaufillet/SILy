@@ -127,13 +127,13 @@ class NetworkKeys(unittest.TestCase):
         self.assertEqual(keys.wrapping_key, h("ea948d32b504f569f4c4aa4005e2a96b"))
 
     def test_derivation_default_iterations_empty_name(self):
-        # Default iteration count (10 000) and network name (empty).
+        # Default iteration count (6000) and network name (empty).
         keys = kdf.derive("correct horse battery")
         self.assertEqual(
-            keys.master, h("e1f93d994077ebc750de3f1af4db2f5332fad22110cb94088e30fac135d18fd6")
+            keys.master, h("08be6dfd52152363765506e45144befdc9fb0f056cc235683b6754936e0121cd")
         )
-        self.assertEqual(keys.frame_key, h("7d10912a2ed4fd1a6d49263df7dec261"))
-        self.assertEqual(keys.fingerprint, h("3032d6c7"))
+        self.assertEqual(keys.frame_key, h("424ca433f4187a241f48084943340bc6"))
+        self.assertEqual(keys.fingerprint, h("323b1cbe"))
 
     def test_network_name_and_password_separate_keys(self):
         a = kdf.derive("password-one", "", 2)

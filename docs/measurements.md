@@ -26,7 +26,7 @@ carrier sense ones repeated five times.
 |---|---|
 | RTC user memory (`RTC().memory()`) | **2048 B**; kept across soft reset and `machine.reset()`; the mesh uses 901 B (duty-cycle window 257 B, replay table 644 B) |
 | NVS write + commit of the 4-byte counter record | mean 2.6 ms, max 15.8 ms (another run: 1.9 / 11.4 ms); `commit` alone 14 µs: ESP-IDF writes at `set` |
-| PBKDF2-HMAC-SHA256, application loaded | 0.24–0.25 ms per iteration: **1 s ≈ 4 200, 2 s ≈ 8 400 iterations**; 6 000 → 1.44 s; 10 000 (`kdf.DEFAULT_ITERATIONS`) → 2.4 s |
+| PBKDF2-HMAC-SHA256, application loaded | 0.24–0.25 ms per iteration: **1 s ≈ 4 200, 2 s ≈ 8 400 iterations**; 6 000 (`kdf.DEFAULT_ITERATIONS`) → 1.44 s; 10 000 → 2.4 s |
 | PBKDF2, fresh heap (after soft reset) | 0.113 ms per iteration (1 s ≈ 8 900) |
 | Heap of the link engine (`open_link` + runner, empty queue) | 12.6 KB (15.8 KB in one run) |
 | Heap of the bench node (modem, adapter, filter, engine, runner) | 15 KB |
