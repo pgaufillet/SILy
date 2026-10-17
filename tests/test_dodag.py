@@ -11,6 +11,7 @@ from mesh import frame
 from mesh import profile as profiles
 from mesh.counter import FrameCounter
 from mesh.dodag import (
+    DESYNC_SLOTS,
     INFO_SIZE,
     TOPOLOGY_S,
     Dodag,
@@ -497,14 +498,32 @@ class Resets(_Case):
         self.assertEqual(b.dodag.counters.solicited, 1)
         self.assertQuiet(b, start, start + 2 * b.imin)
 
-    def test_rank_error_resets(self):
+    def test_rank_error_advertises_at_once_then_resets(self):
         b = self.attached(3)
-        b.steady([(self.p, 16, 3)])
+        b.steady([(self.p, 16, 3), (self.q, 20, 3)])
         start = b.now
         b.dodag.rank_error(start)
         b.wake()
         self.assertEqual(b.dodag.counters.rank_errors, 1)
-        self.assertAdvertWithin(b, start, rank=24)
+        self.assertEqual(b.dodag.trickle.interval, b.imin)
+        # At once, whatever the frames heard meanwhile (no suppression).
+        b.rx(self.p.frame(16, 3))
+        b.rx(self.q.frame(20, 3))
+        b.advance(start + 200)
+        sent = b.adverts(start)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1].rank, 24)
+        # At most once per Imin: a second error within Imin only resets.
+        b.dodag.rank_error(b.now)
+        b.wake()
+        b.rx(self.p.frame(16, 3))
+        b.rx(self.q.frame(20, 3))
+        b.advance(start + b.imin - 1)
+        self.assertEqual(len(b.adverts(start)), 1)
+        self.assertEqual(b.dodag.counters.rank_errors, 2)
+        b.dodag.rank_error(b.now + 1)
+        b.advance(b.now + 200)
+        self.assertEqual(len(b.adverts(start)), 2)
 
     def test_generic_reset(self):
         b = self.attached(3)
@@ -519,13 +538,13 @@ class Resets(_Case):
         b.steady([(self.p, 16, 3), (self.q, 20, 3)])
         start = b.now
         suppressed = b.dodag.trickle.suppressed
-        b.dodag.rank_error(start)
+        b.dodag.reset(start)
         b.rx(self.p.frame(16, 3))
         b.rx(self.q.frame(20, 3))
         self.assertQuiet(b, start, start + b.imin)
         self.assertEqual(b.dodag.trickle.suppressed, suppressed + 1)
         start = b.now
-        b.dodag.rank_error(start)
+        b.dodag.reset(start)
         b.rx(self.p.frame(16, 3))
         b.rx(self.q.frame(20, 1))  # another version: not counted (and resets)
         self.assertAdvertWithin(b, start)
@@ -534,7 +553,7 @@ class Resets(_Case):
         b = self.attached(3)
         b.steady([(self.p, 16, 3)])
         start = b.now
-        b.dodag.rank_error(start)
+        b.dodag.reset(start)
         self.assertEqual(b.engine.submit(200, 0, ROOT, b"report"), 0)
         b.wake()
         b.advance(start + b.imin)
@@ -567,10 +586,12 @@ class Resets(_Case):
         b.advance(detach + 100)
         d = b.dodag
         self.assertEqual((d.counters.poisons, b.engine.rank), (1, RANK_INFINITE))
-        # Rank 255 advertised at once.
+        # Rank 255 advertised at once (after a random delay of at most 4
+        # slots, so that nodes detaching on one event do not collide).
+        b.advance(detach + DESYNC_SLOTS * b.engine.slot_ms + 100)
         sent = b.adverts(detach)
         self.assertEqual(len(sent), 1)
-        self.assertTrue(sent[0][0] - detach < 100)
+        self.assertTrue(sent[0][0] - detach < DESYNC_SLOTS * b.engine.slot_ms + 100)
         self.assertEqual(sent[0][1].rank, RANK_INFINITE)
         # Q heard during the hold: no selection before 2 Imin.
         b.advance(detach + b.imin)
@@ -591,6 +612,7 @@ class Resets(_Case):
         start = b.now
         b.rx(self.p.frame(RANK_INFINITE, 3))
         self.assertEqual((b.dodag.counters.poisons, b.engine.rank), (1, RANK_INFINITE))
+        b.advance(start + DESYNC_SLOTS * b.engine.slot_ms + 100)
         sent = b.adverts(start)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][1].rank, RANK_INFINITE)
@@ -602,16 +624,17 @@ class Resets(_Case):
         b.advance(detach + 2 * b.imin + 300)
         sol = b.solicitations(detach)
         self.assertEqual(len(sol), 1)
-        self.assertTrue(detach + 2 * b.imin <= sol[0][0] < detach + 2 * b.imin + 100)
+        late = DESYNC_SLOTS * b.engine.slot_ms + 100
+        self.assertTrue(detach + 2 * b.imin <= sol[0][0] < detach + 2 * b.imin + late)
         self.assertEqual(sol[0][1].rank, RANK_INFINITE)
         self.assertFalse(b.dodag.trickle.running)
         self.assertEqual(len(b.adverts(detach)), 1)  # the poison only
         # Then once per presence period while without route.
-        b.advance(detach + 2 * b.imin + 2 * PERIOD + 300)
+        b.advance(detach + 2 * b.imin + 2 * PERIOD + 3 * late)
         times = [t for t, _ in b.solicitations(detach)]
         self.assertEqual(len(times), 3)
         for t0, t1 in zip(times, times[1:]):
-            self.assertTrue(PERIOD <= t1 - t0 <= PERIOD + 200, times)
+            self.assertTrue(PERIOD <= t1 - t0 <= PERIOD + late, times)
         # An answer heard after the poison: rejoined.
         b.rx(self.p.info(16, 3))
         self.assertEqual((b.dodag.parents.preferred, b.engine.rank), (P, 24))

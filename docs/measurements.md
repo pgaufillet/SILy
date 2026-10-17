@@ -99,3 +99,17 @@ least the measured one.
 | B sends 5 frames under another password | 5 authentication failures, 0 frames accepted, 0 CRC errors; sender 2 counted, flagged as known before |
 | B sends 5 raw frames of 100 B cut after 40 ms | 5 CRC errors (radio and link counters), 0 authentication failures, 0 header errors |
 | Neighbour filter allowing only 3, B sends 3 frames | 3 filtered, 0 accepted; after `filter 2`, the next frame is accepted |
+
+## 2026-10-17 — routing smoke test, two T3S3 boards, SF7
+
+Same boards and settings; `tools/bench.py --only routing`: board A runs the
+bench console as the root (address 0, `routing=True`, presence period 10 s,
+topology 60 s), board B as a node (address 2, `routing=True`), both with
+`mesh.routing.Routing` (DODAG, upward forwarding, reports).
+
+| Item | Result |
+|---|---|
+| B attached | rank 8, preferred parent 0 (the root), DODAG version 0 adopted from the root's information; 6.2 s after B's bench start (key derivation, solicitation, answer) |
+| Root reports | `PRESENCE 2 0 1` (parent 0, flag *first report*), then `TOPOLOGY 2 [[0, 20, true, 100]]` (margin 20 dB, parent-set member, 100 % delivery), `NODEINFO 2 dc5475db9604 bench2`, then `PRESENCE 2 0 0` one period later |
+| Counters | no rank error, loop, refusal or malformed report on either board |
+| Heap of the bench node with routing (`heap_engine`) | 31.3 KB (12.6–15.8 KB with static routes) |

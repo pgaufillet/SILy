@@ -30,7 +30,11 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   version from a neighbour of finite rank; a solicitation (attached nodes
   and the root); an increase of the own rank; poisoning; a rank error
   (`rank_error`, data-path validation); the first parent after boot or
-  detach. `reset` is the generic entry point.
+  detach. `reset` is the generic entry point. After a rank error the node
+  also advertises at once, at most once per Imin: §9 wants its rank to
+  reach the inconsistent sender within Imin, which a Trickle advertisement
+  suppressed by k = 2 frames of the neighbourhood would not guarantee (in
+  a loop, the frames of the loop itself suppress it).
 - **Adoption**: an attached node adopts a newer version from the DODAG
   information of a neighbour of finite rank; a detached node (or one that
   has adopted nothing since boot) adopts any version, its own included. It
@@ -47,6 +51,13 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   node advertises rank 255 at once (Trickle reset), selects nothing for
   2 Imin (``Parents.hold_ms``), then stops its Trickle timer, sends a
   solicitation and rejoins through neighbours heard after the poison.
+  The poison and the solicitations leave after a random delay of at most
+  `DESYNC_SLOTS` slots (the frame header says rank 255 at once): nodes
+  that detach on one event (the children of a silent relay, which heard
+  its last frame together) would otherwise send them together, and a
+  neighbour that loses both poisons to the collision keeps a stale route
+  through which they rejoin (a loop; §7 desynchronises relays the same
+  way).
 - **Solicitation**: a node without route solicits at boot after a random
   delay in [0, Imin], at the end of the detach hold, then once per presence
   period while it has no route.
@@ -55,7 +66,15 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   when (global repair, §9) belongs to the root's later step.
 
 ``next_hop`` gives the preferred parent for upward messages (the link
-engine's ``next_hop`` until upward forwarding is complete).
+engine's ``next_hop``, set by `mesh.routing.Routing`).
+
+**Events**: every change of the parent set is applied from
+`Parents.events`, the events accumulated since the last step included: a
+parent dropped by class 1 (``engine.reroute``, `Parents.next_parent`, run by
+the class 1 timers) updates the header rank, poisons or resets Trickle in
+the same step. ``changed``, if set, is called with (events, now) after each
+application (`mesh.routing`: presence report at once after a change of
+preferred parent, queued upward messages redirected).
 
 Readings where §9/§11 are silent: a node that has adopted nothing since
 boot selects no parent (it learns the network's parameters first); a
@@ -84,6 +103,7 @@ from mesh.trickle import IMIN_SLOTS, URGENT, Trickle
 from mesh.txqueue import accepted
 
 INFO_SIZE = 8
+DESYNC_SLOTS = 4  # random delay of the poison and solicitations (CW_MIN slots, §8)
 TOPOLOGY_ON_CHANGE = 0x01  # flags bit 0: topology report on change (deployment, §17)
 HOLD_IMIN = 2  # detach hold, in Imin (§9)
 BEHIND_IMIN = 2  # Imin a node keeps its parents while behind a newer version
@@ -254,11 +274,14 @@ class Dodag:
         self._dirty = False  # a frame was heard: select again in this step's tick
         self._check_at = None  # a member falls silent
         self._solicit_at = None  # next solicitation of a node without route
+        self._poison_at = None  # poison advertisement due
         self._ask_at = None  # solicitation for the DODAG information of another version
         self._asked = None  # time of the last one (at most one per Imin)
         self._behind_until = None  # behind a newer version: parents kept until
         self._advert = None  # (slot, message) of the last advertisement queued
+        self._rank_advert = None  # time of the last advertisement after a rank error
         self._solicit = None  # ... and of the last solicitation
+        self.changed = None  # function(events, now) after events are applied
         # Extension points: each wrapper calls the engine's previous method.
         self._base_heard = engine.heard
         self._base_sent = engine.sent
@@ -304,9 +327,19 @@ class Dodag:
             self.trickle.reset(now, need_info)
 
     def rank_error(self, now):
-        """Data-path validation found a rank inconsistency (§9): count it, reset Trickle."""
+        """Data-path validation found a rank inconsistency (§9): count it, reset Trickle.
+
+        The node advertises at once (at most once per Imin), so that its rank
+        reaches the sender within Imin whatever the suppression.
+        """
         self.counters.rank_errors += 1
         self.reset(now)
+        if not self.attached:
+            return
+        last = self._rank_advert
+        if last is None or now >= last + self.imin_ms:
+            self._rank_advert = now
+            self._advertise(True)
 
     def set_version(self, version, now, info=None):
         """Root: issue DODAG version (and new parameters info); Trickle reset."""
@@ -401,6 +434,10 @@ class Dodag:
         if due:
             self._advertise(due == URGENT)
         self._base_tick(now)
+        # Parent dropped by class 1 during the timers (reroute): apply now.
+        events = self.parents.events()
+        if events:
+            self._apply(events, now)
 
     def _timer(self):
         t = self._base_timer()
@@ -408,6 +445,7 @@ class Dodag:
             self.trickle.timer(),
             self._check_at,
             self._solicit_at,
+            self._poison_at,
             self._ask_at,
             self._behind_until,
         ):
@@ -424,7 +462,14 @@ class Dodag:
         else:
             self._solicit_at = now + randbelow(self.engine.random, self.imin_ms + 1)
 
+    def _desync(self):
+        return randbelow(self.engine.random, DESYNC_SLOTS * self.engine.slot_ms + 1)
+
     def _routing(self, now):
+        if self._poison_at is not None and now >= self._poison_at:
+            self._poison_at = None
+            if not self.attached:
+                self._advertise(True)
         if self._behind_until is not None and now >= self._behind_until:
             self._behind_until = None
             self._dirty = True  # stop keeping the parents of the old version
@@ -438,12 +483,13 @@ class Dodag:
             due = True
         if due and self.configured and self._behind_until is None:
             self._dirty = False
-            self._apply(p.recompute(now), now)
+            p.recompute(now)
+            self._apply(p.events(), now)
         if not self.attached and self._solicit_at is not None and now >= self._solicit_at:
             if p.hold_until is None or now >= p.hold_until:
                 self.trickle.stop()
                 self._send_solicitation()
-                self._solicit_at = now + self.engine.neighbours.period_ms
+                self._solicit_at = now + self.engine.neighbours.period_ms + self._desync()
 
     def _apply(self, events, now, need_info=False):
         p = self.parents
@@ -460,6 +506,8 @@ class Dodag:
         if events & PARENT_CHANGED:
             self.engine.reliable.route_changed(now)
         self._watch()
+        if self.changed is not None and events:
+            self.changed(events, now)
 
     def _watch(self):
         # Next time a member of the parent set falls silent, or the hold ends.
@@ -476,9 +524,9 @@ class Dodag:
         self.engine.rank = RANK_INFINITE
         self.counters.poisons += 1
         self.trickle.reset(now)
-        self._advertise(True)
+        self._poison_at = now + self._desync()
         hold = self.parents.hold_until
-        self._solicit_at = now if hold is None else hold
+        self._solicit_at = (now if hold is None else hold) + self._desync()
 
     def _adopt(self, version, info, now):
         self._apply_info(info)
@@ -489,7 +537,8 @@ class Dodag:
         self._behind_until = None
         self._ask_at = None
         self._dirty = False
-        self._apply(self.parents.on_new_version(version, now), now, True)
+        self.parents.on_new_version(version, now)
+        self._apply(self.parents.events(), now, True)
 
     # --- Sending -----------------------------------------------------------------------------
 

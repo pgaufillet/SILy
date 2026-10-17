@@ -5,6 +5,8 @@ Debug tool, started by hand from the REPL (never at boot)::
     from sily import bench
     bench.run(1)                        # address 1, SF7, bench password
     bench.run(2, password="other", allow=(1,), power=-9)
+    bench.run(0, routing=True, presence_s=10)   # root of a DODAG
+    bench.run(2, routing=True)                  # a node joining it
 
 It builds the board's node (SX1262 adapter, neighbour filter, link engine on
 the ESP32 platform, asyncio runner), prints one ``READY`` line, then reads
@@ -28,13 +30,24 @@ Commands (addresses in decimal):
 - ``cut SIZE MS``: a raw frame of SIZE bytes cut after MS ms (outside the
   mesh): neighbours receive a CRC error;
 - ``filter off`` or ``filter A,B,...``: neighbour filter (§1);
+- ``route``: one ``ROUTE`` line, a JSON object: rank, DODAG version,
+  preferred parent and parent set, routing and report counters (with
+  ``routing``);
 - ``zero``: reset the CPU meters;
 - ``quit``.
+
+With ``routing`` the node runs the mesh routing (`mesh.routing.Routing`:
+DODAG, upward forwarding, presence and topology reports) instead of static
+routes; address 0 is the root, which prints ``PRESENCE ORIGIN PARENT FLAGS
+EXTENSION``, ``TOPOLOGY ORIGIN [[ADDRESS, MARGIN, MEMBER, RATIO]...]`` and
+``NODEINFO ORIGIN MAC NAME`` for each report it receives; ``presence_s``
+(root only) sets the presence period of the DODAG information it issues
+(§9; topology period 6 times longer).
 
 Bench defaults: password ``bench`` with 1000 PBKDF2 iterations (the
 production count is set by measurement, ``docs/measurements.md``), TX power
 -9 dBm (boards a few centimetres apart), EU profile, static routes (every
-destination is a neighbour).
+destination is a neighbour) unless ``routing``.
 """
 
 import asyncio
@@ -44,13 +57,20 @@ import struct
 import sys
 from time import ticks_diff, ticks_ms, ticks_us
 
+import machine
+
+import sily
 from board.platform import HardwareRandom, NvsStorage, RtcRetained
 from board.sx1262 import Sx1262
 from board.t3s3 import make_modem
 from mesh import kdf
 from mesh import profile as profiles
+from mesh.dodag import DodagInfo, default_info
 from mesh.link import destination, open_link
+from mesh.ports import NODE_INFO, PRESENCE
 from mesh.radio import CHANNEL, RX, RX_ERROR, TX_DONE, NeighbourFilter
+from mesh.reports import NodeInfo
+from mesh.routing import Routing
 from mesh.runner import Runner
 from sily.radio import MeshRadio, link_source, lora_config
 
@@ -82,6 +102,12 @@ def _out(*items):
     print(*items)
 
 
+def firmware_version():
+    """Return the application version as the 16-bit node information field (major, minor)."""
+    major, minor = sily.__version__.split(".")[:2]
+    return int(major) << 8 | int(minor)
+
+
 class Bench:
     """One bench node. See the module documentation for the parameters."""
 
@@ -95,6 +121,8 @@ class Bench:
         key=None,
         allow=None,
         power=-9,
+        routing=False,
+        presence_s=None,
     ):
         gc.collect()
         free0 = gc.mem_free()
@@ -125,8 +153,23 @@ class Bench:
             HardwareRandom(),
             profile,
             sf,
-            next_hop=destination,  # static: every destination is a neighbour
+            next_hop=None if routing else destination,  # static: every one a neighbour
         )
+        self.routing = None
+        if routing:
+            info = default_info(sf, profiles.EU_869)
+            if presence_s is not None:
+                info = DodagInfo(
+                    info.flags,
+                    presence_s,
+                    6 * presence_s,
+                    info.imin_slots,
+                    info.max_increase,
+                    info.profile,
+                )
+            node = NodeInfo(machine.unique_id(), firmware_version(), "bench%d" % address)
+            self.routing = Routing(self.engine, profiles.EU_869, info, node_info=node)
+            self.routing.on_report = self._report
         self.runner = Runner(self.engine, self.filter)
         gc.collect()
         free2 = gc.mem_free()
@@ -175,6 +218,35 @@ class Bench:
     def _flood(self, origin, msg, header):
         self.flood_rx += 1
         self.flood_rx_bytes += len(msg.payload)
+
+    def _report(self, port, origin, report, header):
+        if port == PRESENCE:
+            _out("PRESENCE", origin, report.parent, report.flags, report.extension.hex())
+        elif port == NODE_INFO:
+            _out("NODEINFO", origin, report.mac.hex(), report.name)
+        else:
+            _out("TOPOLOGY", origin, json.dumps(report))
+
+    def route(self):
+        """Return the routing state as a dict (the ``ROUTE`` line)."""
+        r = self.routing
+        if r is None:
+            return {"routing": False}
+        d = r.dodag
+        p = r.parents
+        out = {
+            "address": self.engine.address,
+            "rank": self.engine.rank,
+            "version": self.engine.dodag_version,
+            "attached": r.attached,
+            "preferred": p.preferred,
+            "members": list(p.members()),
+            "dodag": d.counters.__dict__,
+            "routing": r.counters.__dict__,
+        }
+        if r.reporter is not None:
+            out["reports"] = r.reporter.counters.__dict__
+        return out
 
     def _submit(self, port, dest, payload):
         result = self.engine.submit(port, 0, dest, payload)
@@ -292,6 +364,8 @@ class Bench:
             else:
                 self.filter.allowed = set(int(a) for a in "".join(args).split(",") if a)
             _out("FILTER", args)
+        elif cmd == "route":
+            _out("ROUTE", json.dumps(self.route()))
         elif cmd == "zero":
             self.runner.cpu.clear()
             for meter in self.adapter.cpu.values():

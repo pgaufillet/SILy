@@ -15,7 +15,9 @@ iterations for 1-2 s), aead (seal/open time), link (sealed frames both ways,
 echo round trips, CPU per frame, heap), sense (carrier sense while the other
 board transmits, airtime accounted vs measured), errors (authentication
 failures with a wrong key, CRC errors from cut frames), filter (neighbour
-filter). The boards are left at the REPL, idle.
+filter), routing (A root, B a node of its DODAG: B attaches at rank 8 and
+its presence, topology and node information reach A; not in the default
+set). The boards are left at the REPL, idle.
 """
 
 import argparse
@@ -578,6 +580,36 @@ def test_filter(a, b, res, sf):
     print(json.dumps(out, indent=1))
 
 
+def test_routing(a, b, res, sf, presence_s=10):
+    print("== routing: A root (address 0), B a node (address 2) of its DODAG")
+    ra = a.start_bench(0, sf=sf, routing=True, presence_s=presence_s)
+    sa = len(a.lines)
+    t0 = time.time()
+    rb = b.start_bench(2, sf=sf, routing=True)
+    out = {"ready_a": ra, "ready_b": rb, "presence_s": presence_s}
+    attached = None
+    for _ in range(4 * presence_s):
+        route = json.loads(b.command("route", "ROUTE").split(None, 1)[1])
+        if route["attached"]:
+            attached = route
+            break
+        a.pump(1.0)
+    out["attach_s"] = round(time.time() - t0, 1) if attached else None
+    out["route_b"] = attached
+    line = a.wait_for("PRESENCE 2 ", 3 * presence_s, sa)
+    out["presence_s_after_start"] = round(time.time() - t0, 1)
+    out["presence"] = line
+    a.pump(presence_s + 2)  # a periodic presence, topology and node information
+    out["presences"] = a.lines_since(sa, "PRESENCE")
+    out["topology"] = a.lines_since(sa, "TOPOLOGY")
+    out["node_info"] = a.lines_since(sa, "NODEINFO")
+    out["route_a"] = json.loads(a.command("route", "ROUTE").split(None, 1)[1])
+    out["route_b_end"] = json.loads(b.command("route", "ROUTE").split(None, 1)[1])
+    _stop(a, b)
+    res["routing"] = out
+    print(json.dumps({k: out[k] for k in ("attach_s", "presence", "presences")}, indent=1))
+
+
 TESTS = ("platform", "kdf", "aead", "link", "sense", "errors", "filter")
 
 
@@ -587,7 +619,7 @@ def main():
     parser.add_argument("--b", required=True, help="serial port of board B (address 2)")
     parser.add_argument("--sf", type=int, default=7)
     parser.add_argument("--out", default="bench-results.json")
-    parser.add_argument("--only", default=",".join(TESTS))
+    parser.add_argument("--only", default=",".join(TESTS), help="also: routing")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     only = args.only.split(",")
@@ -609,6 +641,8 @@ def main():
             test_errors(a, b, res, args.sf)
         if "filter" in only:
             test_filter(a, b, res, args.sf)
+        if "routing" in only:
+            test_routing(a, b, res, args.sf)
     finally:
         for board in (a, b):
             board.interrupt()

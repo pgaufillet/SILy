@@ -53,6 +53,9 @@ possibly towards another next hop with fresh attempts); `hold` makes a
 queued message wait without an attempt (held during repair, §12). Entries
 are designated by their slot (``slot`` after `offer`) and checked against
 their message, so that a stale handle never touches a reused slot.
+`redirect` gives the messages not waiting a new next hop (routing, after a
+change of preferred parent: queued upward messages follow it); `select`
+lists them (routing, after a detach: they are held or dropped).
 
 Bounded memory: every array is allocated at construction; queueing and
 packing allocate nothing per message beyond the message itself (one list of
@@ -486,6 +489,33 @@ class TxQueue:
         if fresh:
             self._attempts[slot] = 0
         return True
+
+    def select(self, test):
+        """Return [(slot, msg)] of the entries not waiting for which test(msg) is true."""
+        out = []
+        i = self._head
+        while i != _NIL:
+            if not self._flags[i] & _WAIT and test(self._msg[i]):
+                out.append((i, self._msg[i]))
+            i = self._next[i]
+        return out
+
+    def redirect(self, test, hop):
+        """Send the entries not waiting for which test(msg) is true to hop; return their number.
+
+        Waiting entries (sent, or held) keep their next hop: the reliability
+        layer retries or resumes them. A redirected entry restarts its
+        attempts and keeps its age.
+        """
+        n = 0
+        i = self._head
+        while i != _NIL:
+            if not self._flags[i] & _WAIT and self._hop[i] != hop and test(self._msg[i]):
+                self._hop[i] = hop
+                self._attempts[i] = 0
+                n += 1
+            i = self._next[i]
+        return n
 
     def hold(self, slot, msg):
         """Make msg in slot wait without an attempt (held, §12); False if stale.

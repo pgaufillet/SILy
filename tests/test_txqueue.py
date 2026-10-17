@@ -446,6 +446,42 @@ class Commit(unittest.TestCase):
         self.assertEqual(_send(q), [newer])
 
 
+class Redirect(unittest.TestCase):
+    def test_entries_not_waiting_follow_the_new_hop(self):
+        q = TxQueue(8)
+        waiting = _up(0x32, cls=1)
+        q.offer(waiting, _PARENT)
+        s_wait = q.slot
+        self.assertEqual(_send(q), [waiting])  # on air: waits for its acknowledgement
+        up_idle = _up(0x30, cls=1)
+        q.offer(up_idle, _PARENT)
+        s_idle = q.slot
+        q.offer(_up(0x31), _PARENT)
+        down = Message(frame.DOWNWARD, 0, _APP_LOW, b"d", dest=0x40)
+        q.offer(down, 0x40)
+        self.assertEqual(_send(q)[0], up_idle)  # with the class 0 one, which leaves
+        q.retry(s_idle, up_idle)  # timed out: queued again, one attempt
+        self.assertEqual(q.attempts(s_idle, up_idle), 1)
+        q.offer(_up(0x31), _PARENT)
+        n = q.redirect(lambda m: m.mode == UPWARD, _OTHER)
+        self.assertEqual(n, 2)
+        self.assertEqual(q.attempts(s_idle, up_idle), 0)
+        # The waiting message keeps its hop; the downward one too.
+        q.retry(s_wait, waiting)
+        dests = []
+        while len(q):
+            sel = q.pack(0, DutyCycle(_BUDGET), frame.MAX_FRAME, _toa)
+            dests.append((sel.dest, sorted(m.origin or m.dest for m in sel.messages)))
+            sent = [(sel.slots[j], sel.messages[j]) for j in range(sel.count)]
+            q.commit(sel)
+            for slot, m in sent:
+                q.remove(slot, m)  # acknowledged
+        self.assertEqual(
+            sorted(dests), sorted([(_PARENT, [0x32]), (_OTHER, [0x30, 0x31]), (0x40, [0x40])])
+        )
+        self.assertEqual(q.redirect(lambda m: True, _OTHER), 0)
+
+
 class Dropping(unittest.TestCase):
     def test_ready_excludes_waiting_messages(self):
         q = TxQueue()

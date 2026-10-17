@@ -56,11 +56,15 @@ delivered here or held (`mesh.reliable`).
 steps): `heard` (neighbour table), `overheard` (passive acknowledgements),
 `sent` (class 1 bookkeeping, frame counter of the frame), `tick` and `timer`
 (protocol timers): an override calls the base method (class 1 lives there);
-`give_up` (busy channel), `forward` (routing: data-path validation, jitter,
-source routes; returns `QUEUED`, `HELD` or `NOT_TAKEN`, on which class 1
-acknowledges or not), ``next_hop`` and ``reroute`` (routing: next hop, next
-hop after failure, `mesh.reliable`), ``rank`` and ``dodag_version`` (header
-fields set by routing).
+`give_up` (busy channel), `expand` (first-hop compression undone on every
+message addressed to this node: origin, and port fields such as the
+presence report's parent), `repeated` (a class 1/2 message found in the
+duplicate cache: routing tells a loop from a retransmission), `forward`
+(routing: data-path validation, replace by newer, source routes; returns
+`QUEUED`, `HELD`, `DELIVERED` or `NOT_TAKEN`, on which class 1 acknowledges
+or not), ``next_hop`` and ``reroute`` (routing: next hop, next hop after
+failure, `mesh.reliable`), ``rank`` and ``dodag_version`` (header fields set
+by routing).
 
 **Runner contract**: a submission made outside `step` (application task)
 takes effect at the next step; the runner steps the core (``step(now,
@@ -478,13 +482,27 @@ class LinkEngine(Core):
         """MAX_ATTEMPTS busy senses for sel: drop its priority-2/3 reports (§8)."""
         self.counters.access_dropped += self.queue.drop(_is_report, sel)
 
-    def forward(self, msg, header, now):
+    def expand(self, msg, header):
+        """A message of a frame addressed to this node: undo first-hop compression (§11).
+
+        A mode 6 message becomes mode 1, its origin the link source; routing
+        restores the fields its ports compress (the presence report's parent).
+        """
+        frame.expand_first_hop(msg, header.source)
+
+    def repeated(self, msg, header, now):
+        """A class 1/2 message already in the duplicate cache (acknowledged, dropped)."""
+        self.counters.duplicates += 1
+
+    def forward(self, msg, header, now, replace=False):
         """A message for another node: queue a copy towards next_hop(msg).
 
         Returns `QUEUED`, `HELD` (class 1/2 without next hop: held, §12) or
         `NOT_TAKEN` (class 0 without next hop, or refused by the queue). A
         queued class 1/2 message is acknowledged explicitly unless it goes
-        on air within half a timeout (`Reliable.owe`).
+        on air within half a timeout (`Reliable.owe`). replace: class 0
+        replace by newer (§12: a queued message of the same origin and port
+        gives its place to the copy; routing sets it for the mesh reports).
         """
         hop = self.next_hop(msg) if self.next_hop is not None else None
         if hop is None and not msg.cls:
@@ -500,7 +518,7 @@ class LinkEngine(Core):
             msg.seq,
             msg.route,
         )
-        outcome = self.queue.offer(copy, BROADCAST if hop is None else hop)
+        outcome = self.queue.offer(copy, BROADCAST if hop is None else hop, replace=replace)
         if not accepted(outcome):
             self._count_refusal(ROOT if msg.origin is None else msg.origin)
             return NOT_TAKEN
@@ -725,7 +743,7 @@ class LinkEngine(Core):
         refused = False
         for m in messages:
             c.rx_messages[m.port] += 1
-            frame.expand_first_hop(m, h.source)
+            self.expand(m, h)
             key = identity(m, h.source, h.dest) if m.cls else None
             if key is None:
                 self._accept(m, h, now)
@@ -733,7 +751,7 @@ class LinkEngine(Core):
             # Class 1/2 (§12): duplicate cache, then one explicit
             # acknowledgement for the frame unless forwarding acknowledges.
             if rel.duplicate(key, now):
-                c.duplicates += 1
+                self.repeated(m, h, now)
                 ack = True
                 continue
             outcome = self._accept(m, h, now)
