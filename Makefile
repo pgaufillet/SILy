@@ -30,7 +30,7 @@ TEST_HEAP ?= 32M
 # Top-level entries of src/ copied to the board's filesystem root.
 DEPLOY_ITEMS = $(notdir $(wildcard src/*))
 
-LINT_PATHS = src sim tests firmware Makefile README.md
+LINT_PATHS = src sim tests tools docs firmware Makefile README.md
 
 .PHONY: help check test lint firmware flash deploy
 
