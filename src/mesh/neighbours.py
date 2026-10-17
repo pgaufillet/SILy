@@ -1,0 +1,383 @@
+"""Neighbour table and link estimation (MESH_DESIGN §9 link estimation; MP12, MP13).
+
+One `Neighbour` per link source heard (64 at most by default, MP13), fed by
+the link engine's `heard` step with every authenticated frame, whatever its
+link destination (the channel is shared, §9). Per neighbour:
+
+- **rank and DODAG version** of its last frame, **time last heard**;
+- **inbound delivery ratio** ``d_in``: frames received / counter values
+  spent by the neighbour over its last 16 frame counter values (a 16-bit
+  window shifted by the counter gap). A gap above 16 (long silence, reboot)
+  restarts the window with the frame alone. A frame whose counter is not
+  above the last one (possible only when the replay table has evicted the
+  sender, §14) is ignored by the table;
+- **acknowledgement window** ``p_ack``: acknowledged / sent over the last 16
+  messages sent through this neighbour, fed by class 1 and passive
+  acknowledgements (`NeighbourTable.acked`);
+- **ETX** in units of 1/`ETX_ONE`: ``1 / p_ack`` once the link has
+  acknowledgement samples (the link is used: both directions tested),
+  ``1 / d_in²`` before (symmetry assumed). With samples but no success,
+  ``p_ack`` = 0 gives ETX = samples + 1 (as if the next one succeeded)
+  rather than infinity, so that one lost acknowledgement does not exclude a
+  parent at once;
+- **margin**: link SNR above the demodulation limit of the SF (§5), in
+  tenths of dB, averaged over its last 8 frames (fewer before 8). The link
+  SNR is the packet SNR, or RSSI minus the noise floor at SNR >= +5 dB when
+  a noise floor is known (``noise_floor``), since the SX1262 SNR saturates;
+- **eligibility** as a parent link: margin >= 3 dB and ETX <= 4. The
+  margin has a hysteresis (MP12): once below 3 dB, it must reach 6 dB again.
+  A new neighbour starts on the eligible side;
+- **parent flag**, set by routing: a parent is never evicted.
+
+Bounds (MP13): the entries are allocated at construction and reused. A new
+neighbour in a full table evicts the stalest entry that is not a parent; if
+every entry is a parent the frame is not recorded (``refused``). An entry
+not heard for 4 presence periods is removed by `expire` (also run by
+`heard`): readers call ``expire(now)`` before reading. Entries keep their
+slot while they live, so that a slot index is a stable offset for paged
+reading (§13 management query).
+
+Integer arithmetic only; the presence period is injected (``period_ms``,
+§16 default of the SF until the DODAG information sets it, §9).
+"""
+
+from array import array
+
+from mesh.airtime import SF_MIN, snr_limit_x10
+
+CAPACITY = 64  # entries (MP13)
+WINDOW = 16  # counter values of the reception window, messages of p_ack
+MARGIN_FRAMES = 8  # frames of the margin average
+EXPIRY_PERIODS = 4  # presence periods without a frame before removal
+ETX_ONE = 128  # fixed-point unit of the ETX
+ETX_MAX = 4 * ETX_ONE  # eligibility limit (ETX <= 4)
+MARGIN_LOW = 30  # tenths of dB: an eligible link becomes ineligible below
+MARGIN_HIGH = 60  # tenths of dB: an ineligible link becomes eligible again at
+SNR_SATURATION = 5  # dB: above, the packet SNR saturates (§5)
+ASYMMETRY_POINTS = 30  # inbound ratios of the two ends differing by more: asymmetric
+
+# Presence period (s) per SF 7-12, SILy profile (§16), until the DODAG
+# information carries the network's (§9).
+PRESENCE_S = (30, 30, 60, 120, 300, 600)
+
+_MASK = (1 << WINDOW) - 1
+_INT16 = 32767
+
+
+def presence_ms(sf):
+    """Return the default presence period of sf in ms (§16)."""
+    return PRESENCE_S[sf - SF_MIN] * 1000
+
+
+def popcount16(x):
+    """Return the number of bits set in a 16-bit integer."""
+    x = x - ((x >> 1) & 0x5555)
+    x = (x & 0x3333) + ((x >> 2) & 0x3333)
+    x = (x + (x >> 4)) & 0x0F0F
+    return (x + (x >> 8)) & 0x1F
+
+
+def asymmetric(ratio_ab, ratio_ba):
+    """Return True if the inbound ratios (%) of a link's two ends differ by > 30 points.
+
+    ratio_ab: d_in of a as heard by b, ratio_ba: of b as heard by a (each end
+    reports its own inbound ratio, MP12).
+    """
+    return abs(ratio_ab - ratio_ba) > ASYMMETRY_POINTS
+
+
+class Neighbour:
+    """One entry of the table; read its attributes, change it through the table.
+
+    address; heard (ms, last frame); rank, version (of its last frame);
+    counter (last frame counter); parent (set by routing); rx_bits,
+    rx_span (reception window); ack_bits, ack_count (acknowledgement
+    window); margin_ok (hysteresis state).
+    """
+
+    def __init__(self):
+        self.margins = array("h", [0] * MARGIN_FRAMES)
+        self.address = None
+        self.reset(None, 0, 0, 0, 0)
+
+    def reset(self, address, counter, rank, version, now):
+        self.address = address
+        self.heard = now
+        self.rank = rank
+        self.version = version
+        self.counter = counter
+        self.parent = False
+        self.rx_bits = 1
+        self.rx_span = 1
+        self.ack_bits = 0
+        self.ack_count = 0
+        self.m_count = 0
+        self.m_next = 0
+        self.m_sum = 0
+        self.margin_ok = True
+
+    # --- Inbound delivery ratio ----------------------------------------------
+
+    def received(self):
+        """Return the frames received over the reception window."""
+        return popcount16(self.rx_bits)
+
+    def d_in(self):
+        """Return d_in in percent (0-100, rounded)."""
+        span = self.rx_span
+        return (popcount16(self.rx_bits) * 100 + span // 2) // span
+
+    def _counter(self, counter):
+        gap = counter - self.counter
+        if gap > WINDOW:
+            self.rx_bits = 1
+            self.rx_span = 1
+        else:
+            self.rx_bits = ((self.rx_bits << gap) | 1) & _MASK
+            span = self.rx_span + gap
+            self.rx_span = span if span < WINDOW else WINDOW
+        self.counter = counter
+
+    # --- Acknowledgement window ------------------------------------------------
+
+    def acknowledged(self):
+        """Return the acknowledged messages over the acknowledgement window."""
+        return popcount16(self.ack_bits)
+
+    def p_ack(self):
+        """Return p_ack in percent (0-100, rounded), None without samples."""
+        n = self.ack_count
+        if not n:
+            return None
+        return (popcount16(self.ack_bits) * 100 + n // 2) // n
+
+    def _ack(self, ok):
+        self.ack_bits = ((self.ack_bits << 1) | (1 if ok else 0)) & _MASK
+        if self.ack_count < WINDOW:
+            self.ack_count += 1
+
+    # --- ETX, margin, eligibility ----------------------------------------------
+
+    def etx(self):
+        """Return the ETX in units of 1/ETX_ONE (rounded), per §9."""
+        n = self.ack_count
+        if n:
+            acked = popcount16(self.ack_bits)
+            if not acked:
+                return (n + 1) * ETX_ONE
+            return (n * ETX_ONE + acked // 2) // acked
+        received = popcount16(self.rx_bits)
+        span = self.rx_span
+        r2 = received * received
+        return (span * span * ETX_ONE + r2 // 2) // r2
+
+    def margin(self):
+        """Return the margin averaged over the last 8 frames, tenths of dB; None if none."""
+        n = self.m_count
+        if not n:
+            return None
+        return (2 * self.m_sum + n) // (2 * n)
+
+    def last_margin(self):
+        """Return the margin of the last frame with a measurement, tenths of dB."""
+        if not self.m_count:
+            return None
+        return self.margins[(self.m_next - 1) % MARGIN_FRAMES]
+
+    def _margin(self, sample):
+        if sample > _INT16:
+            sample = _INT16
+        elif sample < -_INT16:
+            sample = -_INT16
+        i = self.m_next
+        if self.m_count < MARGIN_FRAMES:
+            self.m_count += 1
+        else:
+            self.m_sum -= self.margins[i]
+        self.margins[i] = sample
+        self.m_sum += sample
+        self.m_next = (i + 1) % MARGIN_FRAMES
+        average = self.margin()
+        if self.margin_ok:
+            if average < MARGIN_LOW:
+                self.margin_ok = False
+        elif average >= MARGIN_HIGH:
+            self.margin_ok = True
+
+    def eligible(self):
+        """Return True if the link is eligible as a parent link (§9, MP12)."""
+        return self.margin_ok and self.m_count > 0 and self.etx() <= ETX_MAX
+
+    def age(self, now):
+        """Return the time since the last frame (ms)."""
+        return now - self.heard
+
+
+class NeighbourTable:
+    """Neighbour table of one board.
+
+    sf: spreading factor (demodulation limit of the margin); period_ms:
+    presence period (expiry after `EXPIRY_PERIODS`); capacity: entries.
+    ``noise_floor``: measured noise floor (dBm) or None. Counters:
+    ``evictions``, ``expired``, ``refused`` (new neighbour, every entry a
+    parent), ``stale`` (frames with a counter not above the last one).
+    """
+
+    def __init__(self, sf, period_ms=None, capacity=CAPACITY):
+        if capacity < 1:
+            raise ValueError("bad capacity")
+        self.capacity = capacity
+        self.limit_x10 = snr_limit_x10(sf)
+        self.noise_floor = None
+        self.period_ms = presence_ms(sf) if period_ms is None else period_ms
+        self.evictions = 0
+        self.expired = 0
+        self.refused = 0
+        self.stale = 0
+        self._slots = [None] * capacity
+        self._free = [Neighbour() for _ in range(capacity)]
+        self._index = {}  # address -> slot
+        self._next_expiry = 0
+
+    def __len__(self):
+        return len(self._index)
+
+    def set_period(self, period_ms):
+        """Set the presence period (DODAG information, §9; operating mode, §17)."""
+        self.period_ms = period_ms
+        self._next_expiry = 0
+
+    # --- Lookup and iteration --------------------------------------------------
+
+    def get(self, address):
+        """Return the entry of address, or None."""
+        i = self._index.get(address)
+        return None if i is None else self._slots[i]
+
+    def slot(self, i):
+        """Return the entry in slot i (0 to capacity - 1), or None (paged reading)."""
+        return self._slots[i]
+
+    def entries(self):
+        """Yield the entries in slot order (do not change the table meanwhile)."""
+        for n in self._slots:
+            if n is not None:
+                yield n
+
+    def parents(self):
+        """Return the list of the entries flagged as parents."""
+        return [n for n in self._slots if n is not None and n.parent]
+
+    # --- Updates -----------------------------------------------------------------
+
+    def set_parent(self, address, flag=True):
+        """Flag or unflag address as a parent (routing); False if unknown."""
+        n = self.get(address)
+        if n is None:
+            return False
+        n.parent = bool(flag)
+        return True
+
+    def acked(self, address, ok):
+        """Record one message sent through address, acknowledged or not (p_ack).
+
+        Returns False if address is not in the table (nothing recorded).
+        """
+        n = self.get(address)
+        if n is None:
+            return False
+        n._ack(ok)
+        return True
+
+    def heard(self, address, counter, rank, version, rssi, snr, now):
+        """Record an authenticated frame of address; return its entry or None.
+
+        counter, rank, version: from the frame header; rssi (dBm), snr (dB,
+        None if not measured): link measurements; now: ms.
+        """
+        self.expire(now)
+        n = self.get(address)
+        if n is None:
+            n = self._insert(address, now)
+            if n is None:
+                self.refused += 1
+                return None
+            n.reset(address, counter, rank, version, now)
+        elif counter <= n.counter:
+            self.stale += 1
+            return None
+        else:
+            n._counter(counter)
+            n.heard = now
+            n.rank = rank
+            n.version = version
+        if snr is not None:
+            if snr >= SNR_SATURATION and self.noise_floor is not None and rssi is not None:
+                snr = rssi - self.noise_floor
+            n._margin(round(snr * 10) - self.limit_x10)
+        return n
+
+    def remove(self, address):
+        """Remove the entry of address; False if unknown."""
+        i = self._index.pop(address, None)
+        if i is None:
+            return False
+        self._release(i)
+        return True
+
+    def expire(self, now):
+        """Remove the entries not heard for 4 presence periods; return their number."""
+        if now < self._next_expiry:
+            return 0
+        limit = EXPIRY_PERIODS * self.period_ms
+        removed = 0
+        nxt = now + limit
+        for i in range(self.capacity):
+            n = self._slots[i]
+            if n is None:
+                continue
+            end = n.heard + limit
+            if now >= end:
+                del self._index[n.address]
+                self._release(i)
+                removed += 1
+            elif end < nxt:
+                nxt = end
+        self._next_expiry = nxt
+        self.expired += removed
+        return removed
+
+    def _release(self, i):
+        n = self._slots[i]
+        self._slots[i] = None
+        n.address = None
+        n.parent = False
+        self._free.append(n)
+
+    def _insert(self, address, now):
+        if not self._free:
+            self._evict()
+            if not self._free:
+                return None
+        n = self._free.pop()
+        slots = self._slots
+        for i in range(self.capacity):
+            if slots[i] is None:
+                slots[i] = n
+                self._index[address] = i
+                return n
+        raise RuntimeError("slots and free list disagree")
+
+    def _evict(self):
+        # The stalest entry that is not a parent (MP13).
+        victim = -1
+        oldest = None
+        for i in range(self.capacity):
+            n = self._slots[i]
+            if n is not None and not n.parent and (oldest is None or n.heard < oldest):
+                victim = i
+                oldest = n.heard
+        if victim >= 0:
+            del self._index[self._slots[victim].address]
+            self._release(victim)
+            self.evictions += 1

@@ -31,21 +31,23 @@ queued; the engine wakes up when the window next releases airtime.
 **Receive path** (§14 reception order): steps 1–3 by `Security.receive`
 (length and version, authentication, replay; failures counted, per sender
 for authentication and replay). Step 4: duplicate address (link source equal
-to the own address: counted, flag set, frame dropped), `heard` (neighbour
-table and link estimation, §9), message decoding (a malformed body drops
-the whole frame), then the link destination: own address or `BROADCAST`
-processes the messages, any other one goes to `overheard` (passive
-acknowledgements). Each message is delivered to its port's handler when this
-node is its destination, otherwise passed to `forward` (next hop from the
-injected ``next_hop`` function, after a random delay of at most one slot,
-§7).
+to the own address: counted, flag set, frame dropped), `heard` (records
+the frame in the neighbour table ``neighbours``, `mesh.neighbours`: link
+estimation, §9; every frame counts, overheard ones included), message
+decoding (a malformed body drops the whole frame), then the link
+destination: own address or `BROADCAST` processes the messages, any other
+one goes to `overheard` (passive acknowledgements). Each message is
+delivered to its port's handler when this node is its destination, otherwise
+passed to `forward` (next hop from the injected ``next_hop`` function, after
+a random delay of at most one slot, §7).
 
 **Extension points** (no-op or minimal defaults, overridden or replaced by
-the later steps): `heard` (neighbour table), `overheard` (passive
-acknowledgements), `sent` (class 1 bookkeeping, frame counter of the frame),
-`give_up` (busy channel), `forward` (routing: data-path validation, jitter,
-source routes, holding), `tick` and `timer` (protocol timers), ``next_hop``
-(routing), ``rank`` and ``dodag_version`` (header fields set by routing).
+the later steps): `heard` (neighbour table; an override calls it first),
+`overheard` (passive acknowledgements), `sent` (class 1 bookkeeping, frame
+counter of the frame), `give_up` (busy channel), `forward` (routing:
+data-path validation, jitter, source routes, holding), `tick` and `timer`
+(protocol timers), ``next_hop`` (routing), ``rank`` and ``dodag_version``
+(header fields set by routing).
 
 **Runner contract**: a submission made outside `step` (application task)
 takes effect at the next step; the runner steps the core (``step(now,
@@ -77,6 +79,7 @@ from mesh.frame import (
     Header,
     Message,
 )
+from mesh.neighbours import NeighbourTable
 from mesh.platform import randbelow, retained_layout
 from mesh.ports import APP_HIGH, PRIORITY_LOW, PRIORITY_PERIODIC
 from mesh.ports import priority as port_priority
@@ -224,7 +227,9 @@ class LinkEngine(Core):
     spreading factor and regional profile (time on air, frame limit);
     next_hop: function(msg) -> next hop address or None (routing; static in
     tests); slot_ms: backoff slot, the time on air of a presence frame by
-    default. Use `open_link` to build one from the platform.
+    default. ``neighbours``: its `mesh.neighbours.NeighbourTable` (presence
+    period of the SF by default; routing sets it). Use `open_link` to build
+    one from the platform.
     """
 
     def __init__(
@@ -248,6 +253,7 @@ class LinkEngine(Core):
         self.next_hop = next_hop
         self.rank = frame.RANK_ROOT if self.is_root else frame.RANK_INFINITE
         self.dodag_version = 0
+        self.neighbours = NeighbourTable(sf)
         self.counters = Counters()
         self.senders = SenderCounters()
         self.address_conflict = False  # presence flag bit 5; the reporter clears it
@@ -372,7 +378,14 @@ class LinkEngine(Core):
     # --- Extension points ------------------------------------------------------
 
     def heard(self, header, rssi, snr, now):
-        """Reception step 4: a frame of a neighbour passed steps 1–3 (§9 link estimation)."""
+        """Reception step 4: a frame of a neighbour passed steps 1–3 (§9 link estimation).
+
+        Records it in the neighbour table; returns its entry, or None when the
+        table did not record it (stale counter, table full of parents).
+        """
+        return self.neighbours.heard(
+            header.source, header.counter, header.rank, header.dodag_version, rssi, snr, now
+        )
 
     def overheard(self, header, messages, now):
         """A frame for another link destination (passive acknowledgements)."""
