@@ -68,10 +68,12 @@ class Network:
         self._labels += 1
         return self._labels
 
-    def add(self, name, address=None, key=None, next_hop=None, reroute=None):
+    def add(self, name, address=None, key=None, next_hop=None, reroute=None, routing=None):
         """Add a board on medium port name; mesh address defaults to name.
 
-        next_hop, reroute: routing functions of its engines (`mesh.link.LinkEngine`).
+        next_hop, reroute: routing functions of its engines (`mesh.link.LinkEngine`);
+        routing: function(engine) -> routing component plugged into each
+        engine built (``board.routing``), e.g. a `mesh.dodag.Dodag`.
         """
         board = Board(
             self,
@@ -81,6 +83,7 @@ class Network:
             next_hop,
             self._label(),
             reroute,
+            routing,
         )
         self.boards[name] = board
         return board
@@ -117,19 +120,22 @@ class Board:
     """One simulated board: platform fakes, link engine, runner, medium port.
 
     ``engine`` is the current engine (None while the board is off; a reboot
-    builds a new one, whose counters start from zero); ``inbox`` records
+    builds a new one, whose counters start from zero), ``routing`` the
+    component the routing function plugged into it (or None); ``inbox`` records
     (time, origin, port, payload) for the ports given to `listen`, and
     ``failures`` (time, dest, port, seq, reason) for the failure callback,
     across reboots; ``boots`` counts the engines built.
     """
 
-    def __init__(self, net, name, address, key, next_hop, label, reroute=None):
+    def __init__(self, net, name, address, key, next_hop, label, reroute=None, routing=None):
         self.net = net
         self.name = name
         self.address = address
         self.key = key
         self.next_hop = next_hop
         self.reroute = reroute
+        self.make_routing = routing
+        self.routing = None
         self.platform = FakePlatform(net.rng.derive(label))
         self.port = net.medium.attach(name)
         self.inbox = []
@@ -158,6 +164,8 @@ class Board:
         for port in self._ports:
             engine.bind(port, self._record)
         engine.on_failure(self._failed)
+        if self.make_routing is not None:
+            self.routing = self.make_routing(engine)
         self.engine = engine
         self.node = Node(net.scheduler, engine, self.port)
         self.boots += 1
@@ -209,6 +217,7 @@ class Board:
             self.node.stop()
         self.node = None
         self.engine = None
+        self.routing = None
 
 
 class Sniffer:
