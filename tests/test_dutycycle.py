@@ -183,6 +183,23 @@ class SlidingWindow(unittest.TestCase):
         self.assertFalse(window.allows(_HOUR, PRIORITY_LOW, 1))
         self.assertTrue(window.allows(_HOUR + _MIN, PRIORITY_LOW, 1))
 
+    def test_next_release_is_the_next_bin_boundary(self):
+        # Bins start at the first call.
+        window = _filled(1000, now=30000)
+        t = window.next_release(30000)
+        self.assertEqual(t, 30000 + _MIN)
+        self.assertEqual(window.next_release(t - 1), t)
+        self.assertEqual(window.next_release(t), t + _MIN)
+        # The charge leaves at a release time, never between two.
+        releases = 1
+        while True:
+            self.assertEqual(window.used(t - 1), 1000)
+            if window.used(t) == 0:
+                break
+            t = window.next_release(t)
+            releases += 1
+        self.assertEqual((t, releases), (30000 + 61 * _MIN, 61))
+
     def test_long_silence_clears_the_window(self):
         window = _filled(5000)
         self.assertEqual(window.used(10 * _HOUR + 123), 0)

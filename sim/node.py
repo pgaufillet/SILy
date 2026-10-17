@@ -28,6 +28,18 @@ class Node:
         """First step, at the scheduler's current time."""
         self._step(None)
 
+    def wake(self):
+        """Step the core now: after a call made outside ``step`` (a submission)."""
+        self._step(None)
+
+    def stop(self):
+        """Detach from the radio and cancel the timer (the board goes down)."""
+        if self._timer is not None:
+            self.scheduler.cancel(self._timer)
+        self._timer = None
+        self._timer_at = None
+        self.radio.sink = None
+
     def _on_event(self, event):
         self._step(event)
 

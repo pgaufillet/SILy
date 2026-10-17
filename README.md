@@ -27,9 +27,10 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   - `board/` — board support, the only hardware-specific code.
 - `sim/` — host-only mesh simulator, not deployed: deterministic random
   generator, discrete-event scheduler, platform fakes, scripted radio medium
-  (loss, asymmetry, partitions, collisions, half duplex, carrier sense) and
-  the host runner of mesh cores. Imports `mesh` only; goes with it if the mesh
-  is extracted.
+  (loss, asymmetry, partitions, collisions, half duplex, carrier sense), the
+  host runner of mesh cores, and networks of link engines (`sim/net.py`:
+  boards with reset and power loss, sniffer for replays). Imports `mesh`
+  only; goes with it if the mesh is extracted.
 - `tests/` — host tests (`run.py` runner, `test_*.py` modules).
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
   `LILYGO_T3_S3` board plus the frozen `lora-async` package.

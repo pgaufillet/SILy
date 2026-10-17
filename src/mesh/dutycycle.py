@@ -115,6 +115,15 @@ class DutyCycle:
         p = priority if priority > frame_priority else frame_priority
         return p if self.allows(now, p, toa_ms) else 0
 
+    def next_release(self, now):
+        """Return the time (ms) at which the window next drops its oldest bin.
+
+        The earliest time at which `used` may decrease: a frame refused now
+        cannot be admitted before it.
+        """
+        self._advance(now)
+        return self._start + self.bin_ms
+
     def start(self, now, toa_ms):
         """Charge the computed time on air of a frame transmitted at now."""
         self._pending = toa_ms

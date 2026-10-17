@@ -446,6 +446,50 @@ class Commit(unittest.TestCase):
         self.assertEqual(_send(q), [newer])
 
 
+class Dropping(unittest.TestCase):
+    def test_ready_excludes_waiting_messages(self):
+        q = TxQueue()
+        q.offer(_own(cls=1, seq=1), _PARENT, local=True)
+        q.offer(_own(port=_APP_HIGH), _OTHER, local=True)
+        self.assertEqual(q.ready(), 2)
+        sel = q.pack(0, DutyCycle(_BUDGET), frame.MAX_FRAME, _toa)
+        self.assertEqual(sel.dest, _OTHER)  # priority 1 first
+        q.commit(sel)
+        sel = q.pack(0, DutyCycle(_BUDGET), frame.MAX_FRAME, _toa)
+        q.commit(sel)  # the class 1 message now waits
+        self.assertEqual((len(q), q.ready()), (1, 0))
+
+    def test_drop_tests_every_entry_with_priority_and_origin(self):
+        q = TxQueue()
+        q.offer(_own(port=ports.PRESENCE, payload=b"\x00"), _PARENT, local=True)
+        q.offer(_up(_OTHER, port=_APP_LOW), _PARENT)
+        q.offer(_own(port=_APP_HIGH, cls=1, seq=3), _PARENT, local=True)
+        q.commit(q.pack(0, DutyCycle(_BUDGET), frame.MAX_FRAME, _toa))  # all in one frame
+        self.assertEqual(len(q), 1)  # the class 1 message waits
+        q.offer(_own(port=ports.PRESENCE, payload=b"\x01"), _PARENT, local=True)
+        q.offer(_up(_OTHER, port=_APP_LOW), _PARENT)
+        seen = []
+
+        def test(msg, priority, local):
+            seen.append((msg.port, priority, local))
+            return msg.cls == 1 or not local
+
+        self.assertEqual(q.drop(test), 2)
+        self.assertEqual(sorted(seen), [(1, 2, True), (_APP_HIGH, 1, True), (_APP_LOW, 3, False)])
+        self.assertEqual([m.port for m in _send(q)], [ports.PRESENCE])
+        self.assertEqual(len(q), 0)
+
+    def test_drop_within_a_selection(self):
+        q = TxQueue()
+        q.offer(_own(port=_APP_LOW), _PARENT, local=True)
+        q.offer(_up(_OTHER, port=_APP_LOW), _OTHER)  # another next hop: not selected
+        sel = q.pack(0, DutyCycle(_BUDGET), frame.MAX_FRAME, _toa)
+        self.assertEqual(sel.count, 1)
+        self.assertEqual(q.drop(lambda m, p, local: True, sel), 1)
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q.holding(_OTHER), 1)
+
+
 def _flow(q, origin, tick, pending):
     m = _up(origin, payload=bytes((origin, tick & 0xFF)) * 20)
     outcome = q.offer(m, _PARENT)

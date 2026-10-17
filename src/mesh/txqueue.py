@@ -483,3 +483,41 @@ class TxQueue:
             return False
         self._remove(slot)
         return True
+
+    # --- Inspection and dropping ---------------------------------------------
+
+    def ready(self):
+        """Return the number of queued messages not waiting for an acknowledgement."""
+        n = 0
+        i = self._head
+        while i != _NIL:
+            if not self._flags[i] & _WAIT:
+                n += 1
+            i = self._next[i]
+        return n
+
+    def drop(self, test, sel=None):
+        """Remove the entries for which test(msg, priority, local) is true.
+
+        Every entry is tested, waiting ones included, oldest first; sel: test
+        only the messages of this selection (from the last `pack`, before its
+        commit). Returns the number of entries removed. Used by the link
+        engine for messages it gives up (duty-cycle budget, busy channel).
+        """
+        n = 0
+        if sel is not None:
+            for j in range(sel.count):
+                i = sel.slots[j]
+                m = sel.messages[j]
+                if self._msg[i] is m and test(m, self._prio[i], bool(self._flags[i] & _LOCAL)):
+                    self._remove(i)
+                    n += 1
+            return n
+        i = self._head
+        while i != _NIL:
+            nxt = self._next[i]
+            if test(self._msg[i], self._prio[i], bool(self._flags[i] & _LOCAL)):
+                self._remove(i)
+                n += 1
+            i = nxt
+        return n
