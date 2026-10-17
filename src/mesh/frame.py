@@ -284,7 +284,12 @@ def decode_header(buf, length, into=None):
 # --- Messages ----------------------------------------------------------------
 
 
-def _check_message(m):
+def check_message(m):
+    """Raise ValueError if a field of message m is out of range or misplaced.
+
+    A field is misplaced when it is set although its mode or class does not
+    carry it (origin, dest, seq, route).
+    """
     mode = m.mode
     if type(mode) is not int or mode < 0 or mode > FIRST_HOP:
         raise ValueError("mode out of range")
@@ -314,7 +319,8 @@ def _check_message(m):
         raise ValueError("payload too long")
 
 
-def _element_size(m):
+def element_size(m):
+    """Return the bytes of message m as one element (control, port, length excluded)."""
     n = _ADDRESS_BYTES[m.mode] + len(m.payload)
     if has_sequence(m.mode, m.cls):
         n += 2
@@ -323,7 +329,8 @@ def _element_size(m):
     return n
 
 
-def _same_group(a, b):
+def same_group(a, b):
+    """Return True if messages a and b can share one header (bundle)."""
     return (
         a.mode == b.mode
         and a.cls == b.cls
@@ -338,7 +345,7 @@ def _group_end(messages, i):
     first = messages[i]
     j = i + 1
     n = len(messages)
-    while j < n and j - i < 255 and _same_group(first, messages[j]):
+    while j < n and j - i < 255 and same_group(first, messages[j]):
         j += 1
     return j
 
@@ -360,8 +367,8 @@ def frame_size(messages):
         elif j < n:
             size += 1  # length (not last)
         while i < j:
-            _check_message(messages[i])
-            size += _element_size(messages[i])
+            check_message(messages[i])
+            size += element_size(messages[i])
             i += 1
     return size
 
