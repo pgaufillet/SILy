@@ -1,0 +1,3 @@
+# Required by the upstream LILYGO_T3_S3 mpconfigboard.cmake, which reads it
+# from the board directory. Same content as upstream.
+CONFIG_LWIP_LOCAL_HOSTNAME="LILYGO-T3S3"
