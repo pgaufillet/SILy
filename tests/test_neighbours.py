@@ -6,6 +6,7 @@ from mesh import profile as profiles
 from mesh.frame import BROADCAST, ROOT
 from mesh.link import open_link
 from mesh.neighbours import (
+    ACK_MIN,
     ASYMMETRY_POINTS,
     CAPACITY,
     ETX_MAX,
@@ -14,6 +15,7 @@ from mesh.neighbours import (
     asymmetric,
     popcount16,
     presence_ms,
+    silence_ms,
 )
 from mesh.radio import CHANNEL, RX, SENSE, TX, TX_DONE
 from sim.net import Network
@@ -111,7 +113,7 @@ class DeliveryRatio(unittest.TestCase):
 class AcknowledgementWindow(unittest.TestCase):
     def test_unknown_neighbour_not_recorded(self):
         t = _table()
-        self.assertFalse(t.acked(A, True))
+        self.assertFalse(t.acked(A, True, 0))
         self.assertEqual(len(t), 0)
 
     def test_window_of_16_messages(self):
@@ -119,15 +121,15 @@ class AcknowledgementWindow(unittest.TestCase):
         n = _hear(t, A, [1])
         self.assertEqual(n.p_ack(), None)
         for ok in (False, False, False, True):
-            self.assertTrue(t.acked(A, ok))
+            self.assertTrue(t.acked(A, ok, 0))
         self.assertEqual((n.acknowledged(), n.ack_count, n.p_ack()), (1, 4, 25))
         for _ in range(12):
-            t.acked(A, True)
+            t.acked(A, True, 0)
         self.assertEqual((n.acknowledged(), n.ack_count, n.p_ack()), (13, 16, 81))
         for _ in range(3):  # the 3 failures leave the window
-            t.acked(A, True)
+            t.acked(A, True, 0)
         self.assertEqual((n.acknowledged(), n.ack_count, n.p_ack()), (16, 16, 100))
-        t.acked(A, False)
+        t.acked(A, False, 0)
         self.assertEqual((n.acknowledged(), n.ack_count), (15, 16))
         self.assertTrue(n.ack_bits <= 0xFFFF)  # fixed-size window
 
@@ -151,10 +153,10 @@ class Etx(unittest.TestCase):
         t = _table()
         n = _hear(t, A, range(0, 32, 2))  # d_in = 1/2
         for ok in (True, True, False, True):
-            t.acked(A, ok)
+            t.acked(A, ok, 0)
         self.assertEqual(n.etx(), (4 * ETX_ONE + 1) // 3)  # 4/3, not 4
         for _ in range(12):
-            t.acked(A, True)
+            t.acked(A, True, 0)
         self.assertEqual(n.etx(), (16 * ETX_ONE + 7) // 15)
 
     def test_heard_well_forwarding_poorly_loses_preference(self):
@@ -163,23 +165,52 @@ class Etx(unittest.TestCase):
         n = _hear(t, A, range(16))
         self.assertTrue(n.eligible())
         for ok in (True, False, False, False):
-            t.acked(A, ok)
+            t.acked(A, ok, 0)
         self.assertEqual(n.etx(), 4 * ETX_ONE)
-        t.acked(A, False)  # 1 of 5
+        t.acked(A, False, 0)  # 1 of 5
         self.assertEqual(n.etx(), 5 * ETX_ONE)
         self.assertFalse(n.eligible())
 
     def test_no_acknowledgement_at_all_is_finite(self):
         t = _table()
         n = _hear(t, A, range(16))
-        t.acked(A, False)
-        self.assertEqual(n.etx(), 2 * ETX_ONE)  # as if the next one succeeded
-        t.acked(A, False)
-        t.acked(A, False)
-        self.assertEqual(n.etx(), 4 * ETX_ONE)
-        self.assertTrue(n.eligible())
-        t.acked(A, False)
+        for _ in range(ACK_MIN):
+            t.acked(A, False, 0)
+        self.assertEqual(n.etx(), 5 * ETX_ONE)  # as if the next one succeeded
         self.assertFalse(n.eligible())
+        for _ in range(4):
+            t.acked(A, False, 0)
+        self.assertEqual(n.etx(), 9 * ETX_ONE)
+
+    def test_d_in_until_4_samples(self):
+        # p_ack replaces 1/d_in² from ACK_MIN (4) samples on (§9): one lost
+        # acknowledgement on a fresh window does not detach the children.
+        self.assertEqual(ACK_MIN, 4)
+        t = _table()
+        n = _hear(t, A, range(0, 32, 2))  # d_in = 1/2: ETX 4
+        for ok in (False, False, True):
+            t.acked(A, ok, 0)
+            self.assertEqual(n.etx(), 4 * ETX_ONE)
+            self.assertFalse(n.latched)
+        t.acked(A, True, 0)  # 2 of 4
+        self.assertEqual(n.etx(), 2 * ETX_ONE)
+        self.assertTrue(n.latched)
+
+    def test_latch_keeps_p_ack_below_4_samples(self):
+        # Once 4 samples were held, p_ack goes on with a shorter window (after
+        # an ageing), without falling back to d_in; a new entry clears it.
+        t = _table()
+        n = _hear(t, A, range(0, 32, 2))  # d_in = 1/2: ETX 4
+        for ok in (True, True, True, False):
+            t.acked(A, ok, 0)
+        self.assertEqual(t.expire(silence_ms(_PERIOD)), 0)  # failure aged
+        self.assertEqual((n.ack_count, n.latched), (3, True))
+        self.assertEqual(n.etx(), ETX_ONE)  # p_ack 3/3, not 1/d_in²
+        t.remove(A)
+        m = _hear(t, A, range(0, 32, 2), now=3000)
+        self.assertEqual((m.ack_count, m.latched, m.fail_at), (0, False, None))
+        t.acked(A, True, 3000)
+        self.assertEqual(m.etx(), 4 * ETX_ONE)
 
     def test_etx_limit_of_eligibility(self):
         t = _table()
@@ -320,6 +351,56 @@ class Capacity(unittest.TestCase):
         n = _hear(t, 0x0D1, [3], now=5)
         self.assertTrue(t.slot(1) is n)
         self.assertEqual((n.rx_span, n.ack_count, n.parent), (1, 0, False))
+
+
+class FailureAgeing(unittest.TestCase):
+    def test_silence_limit_is_two_and_a_half_periods(self):
+        self.assertEqual(silence_ms(1000), 2500)
+        self.assertEqual(silence_ms(10001), 25002)
+
+    def test_failures_age_out_successes_kept(self):
+        # A link that failed during a cut, heard at 100 % since: its failures
+        # leave the window 2.5 periods after the newest one (§9).
+        t = _table()
+        n = _hear(t, A, range(16))
+        for ok in (True, False, True, False, False, False, False, False):
+            t.acked(A, ok, 100)
+        t.acked(A, False, 400)
+        self.assertEqual((n.ack_count, n.acknowledged(), n.fail_at), (9, 2, 400))
+        self.assertEqual(n.etx(), (9 * ETX_ONE + 1) // 2)  # 4.5
+        self.assertFalse(n.eligible())
+        t.expire(400 + silence_ms(_PERIOD) - 1)
+        self.assertEqual((n.ack_count, n.acknowledged()), (9, 2))
+        t.expire(400 + silence_ms(_PERIOD))
+        self.assertEqual((n.ack_count, n.acknowledged(), n.ack_bits), (2, 2, 0b11))
+        self.assertEqual((n.fail_at, t.aged), (None, 1))
+        self.assertEqual(n.etx(), ETX_ONE)  # latched: p_ack 2/2
+        self.assertTrue(n.eligible())
+
+    def test_a_newer_failure_restarts_the_delay(self):
+        t = _table()
+        n = _hear(t, A, range(16))
+        for ok in (True, True, True, False):
+            t.acked(A, ok, 0)
+        _hear(t, A, [16], now=2000)
+        t.acked(A, True, 2000)
+        t.acked(A, False, 2000)
+        t.expire(silence_ms(_PERIOD))
+        self.assertEqual((n.ack_count, n.acknowledged()), (6, 4))
+        _hear(t, A, [17], now=2000 + silence_ms(_PERIOD))  # heard runs expire too
+        self.assertEqual((n.ack_count, n.acknowledged()), (4, 4))
+
+    def test_ageing_due_even_before_an_expiry(self):
+        # The next check of the table includes the ageing deadline.
+        t = _table()
+        _hear(t, A, [1], now=0)
+        n = _hear(t, B, [1], now=0)
+        self.assertEqual(t.expire(1), 0)  # next check: removals at 4000
+        for ok in (True, False, True, True):
+            t.acked(B, ok, 10)
+        t.expire(10 + silence_ms(_PERIOD))
+        self.assertEqual((n.ack_count, t.aged), (3, 1))
+        self.assertEqual(len(t), 2)
 
 
 class Expiry(unittest.TestCase):

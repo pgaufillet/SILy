@@ -30,12 +30,24 @@ and driven by its `mesh.dodag.Dodag`:
   together; it also restarts the period. Sent only while attached, in mode 6 to the preferred
   parent (17 B with a 1-byte extension, §11 sizes), class 0 replace by
   newer (§12). Flags: bit 0 first report since boot; bit 1 queue overflow,
-  bit 4 rank errors (§9 data-path validation), bit 5 address conflict, bit 6
-  authentication failures, each **since the last report**; bit 2 duty-cycle
-  use above 80 % of the budget, bit 7 next key loaded (§14), the current
-  state; bit 3 when the class 2 tails hook returns tails. A flag observed
-  for a report still queued when the next one replaces it is carried over
-  to the newer one.
+  bit 2 duty-cycle use above 80 % of the budget (seen by the link engine at
+  each charge, ``duty_high``, or at the report), bit 4 rank errors (§9
+  data-path validation), bit 5 address conflict, bit 6 authentication
+  failures, each **since the last report**: kept until a presence carrying
+  it goes on air, so that a presence refused or dropped (the duty-cycle
+  allowance refuses presence above 80 %) passes its flags to the next one;
+  bit 7 next key loaded (§14), the current state; bit 3 when the class 2
+  tails hook returns tails.
+- **Passive acknowledgement of presence** (§9, presence reports matched by
+  origin): when a presence goes on air to a preferred parent other than the
+  root, in a frame without class 1/2 message (those give the frame's sample,
+  `mesh.reliable`), the node waits for the parent's forward of a presence of
+  its origin, overheard: one sample of the parent's acknowledgement window
+  (`NeighbourTable.acked`), a success when it is heard, a failure after the
+  class 1 timeout towards a relay (`Reliable.timeout_ms`: from the end of
+  the frame, a frame of the frame limit + 6 slots, which covers the relay's
+  forwarding delay of at most one slot, §7). No retry; a newer presence on
+  air replaces the wait.
 - **Topology** every topology period, jittered by ±10 %, the first one at a
   random time within the first presence period after the first attachment;
   with the DODAG information flag *topology report on change* (deployment,
@@ -56,16 +68,20 @@ other key epoch).
 Readings where §11/§16/§17 are silent: the delay of the presence after a
 parent change (an initial backoff window, §8), the margin of a link never measured
 (-128), the order of the non-parent entries, the period of node
-information (with every 8th topology report), "first report since boot"
-carried until a presence leaves the queue, presence and topology withheld
+information (with every 8th topology report), "since the last report" read
+as since the last presence on air ("first report since boot" included),
+the timeout of the presence's passive acknowledgement (the class 1 one: a
+forward later than that, behind priority-1 traffic or the relay's own
+duty-cycle allowance, counts as a failure), presence and topology withheld
 while detached (no route; the topology timer restarts at the next
 attachment).
 """
 
 from mesh.dodag import TOPOLOGY_ON_CHANGE
-from mesh.frame import FIRST_HOP, PROTOCOL_VERSION, Message
+from mesh.frame import FIRST_HOP, PROTOCOL_VERSION, ROOT, UPWARD, Message
+from mesh.link import DUTY_HIGH_PERCENT
 from mesh.parents import PARENT_CHANGED
-from mesh.platform import randbelow
+from mesh.platform import jittered, randbelow
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.txqueue import accepted
 
@@ -91,15 +107,7 @@ NODE_INFO_FIXED = 9  # MAC 6, protocol 1, firmware 2
 NAME_MAX = 16
 MAC_SIZE = 6
 NODE_INFO_EVERY = 8  # topology reports per node information report
-JITTER_PERCENT = 10  # periodic timers jittered by +-10 % (§7)
 CHANGE_SLOTS = 4  # presence after a parent change: random delay in [0, 4 slots] (CW_MIN, §8)
-DUTY_HIGH_PERCENT = 80  # duty-cycle use flagged above (§11 bit 2)
-
-
-def jittered(period, random):
-    """Return period jittered uniformly by +-10 % (§7)."""
-    spread = period * JITTER_PERCENT // 100
-    return period - spread + randbelow(random, 2 * spread + 1)
 
 
 def _u16(value, name):
@@ -335,6 +343,8 @@ class Counters:
         self.node_info = 0  # node information reports queued
         self.refused = 0  # reports the queue refused
         self.bad_extension = 0  # extensions above MAX_EXTENSION (sent without)
+        self.presence_acked = 0  # presence forwards overheard (passive acknowledgement)
+        self.presence_unacked = 0  # presence forwards not overheard in time
 
 
 class Reporter:
@@ -361,15 +371,22 @@ class Reporter:
         self.presence_at = None
         self.topology_at = None
         self._presence = None  # (slot, message) of the last presence queued
-        self._sticky = FIRST_REPORT  # flags not yet carried by a presence that left the queue
+        self._sticky = FIRST_REPORT  # flags not yet carried by a presence on air
+        self._carried = 0  # ... of them, those the queued presence carries
+        self._probe_hop = None  # parent whose forward of the presence on air is awaited
+        self._probe_due = None  # ... until (then a failed sample)
         self._rank_errors = 0
         self._auth = 0
         self._info_left = 0  # topology reports before the next node information
         self._signature = None  # neighbour and parent sets of the last topology report
         self._base_tick = engine.tick
         self._base_timer = engine.timer
+        self._base_sent = engine.sent
+        self._base_overheard = engine.overheard
         engine.tick = self._tick
         engine.timer = self._timer
+        engine.sent = self._sent
+        engine.overheard = self._overheard
 
     # --- Entry points ---------------------------------------------------------------
 
@@ -391,8 +408,6 @@ class Reporter:
         """Return the flags of a presence generated at now (and record what it reports)."""
         e = self.engine
         sticky = self._sticky
-        if self._presence is not None and not self._queued(self._presence):
-            sticky = 0  # the last presence left the queue: its flags were reported
         if e.queue.overflow:
             sticky |= QUEUE_OVERFLOW
             e.queue.overflow = False
@@ -407,11 +422,12 @@ class Reporter:
         if auth != self._auth:
             sticky |= AUTH_FAILURES
             self._auth = auth
+        dc = e.dutycycle
+        if e.duty_high or dc.used(now) * 100 > DUTY_HIGH_PERCENT * dc.budget_ms:
+            sticky |= DUTY_HIGH
+            e.duty_high = False
         self._sticky = sticky
         flags = sticky
-        dc = e.dutycycle
-        if dc.used(now) * 100 > DUTY_HIGH_PERCENT * dc.budget_ms:
-            flags |= DUTY_HIGH
         if self._next_key():
             flags |= NEXT_KEY
         return flags
@@ -464,6 +480,8 @@ class Reporter:
 
     def _tick(self, now):
         self._base_tick(now)
+        if self._probe_due is not None and now >= self._probe_due:
+            self._probe(False, now)
         attached = self.dodag.attached
         if self.presence_at is not None and now >= self.presence_at:
             if attached:
@@ -485,15 +503,59 @@ class Reporter:
 
     def _timer(self):
         t = self._base_timer()
-        for u in (self.presence_at, self.topology_at):
+        for u in (self.presence_at, self.topology_at, self._probe_due):
             if u is not None and (t is None or u < t):
                 t = u
         return t
 
-    # --- Sending ----------------------------------------------------------------------
+    def _sent(self, sel, counter, now):
+        self._base_sent(sel, counter, now)
+        entry = self._presence
+        if entry is None:
+            return
+        cls = 0
+        on_air = False
+        for m in sel.messages:
+            cls |= m.cls
+            if m is entry[1]:
+                on_air = True
+        if not on_air:
+            return
+        # Its flags are reported: those observed since stay for the next one.
+        self._sticky &= ~self._carried
+        self._carried = 0
+        self._presence = None
+        # Passive acknowledgement of the presence (§9): one sample when the
+        # parent's forward is overheard or the timeout passes; none towards
+        # the root (it forwards nothing) nor for a frame whose class 1/2
+        # messages already give its sample (`mesh.reliable`).
+        self._probe_hop = None
+        self._probe_due = None
+        hop = sel.dest
+        if hop != ROOT and not cls:
+            self._probe_hop = hop
+            self._probe_due = now + sel.toa_ms + self.engine.reliable.timeout_ms(hop)
 
-    def _queued(self, entry):
-        return entry is not None and self.engine.queue.holds(entry[0], entry[1])
+    def _overheard(self, header, messages, now):
+        self._base_overheard(header, messages, now)
+        if self._probe_due is None or header.source != self._probe_hop:
+            return
+        own = self.engine.address
+        for m in messages:
+            if m.port == PRESENCE and m.mode == UPWARD and m.origin == own:
+                self._probe(True, now)
+                return
+
+    def _probe(self, ok, now):
+        self.engine.neighbours.acked(self._probe_hop, ok, now)
+        if ok:
+            self.counters.presence_acked += 1
+        else:
+            self.counters.presence_unacked += 1
+        self._probe_hop = None
+        self._probe_due = None
+
+    # --- Sending ----------------------------------------------------------------------
 
     def _send(self, port, payload):
         hop = self.dodag.parents.preferred
@@ -510,6 +572,7 @@ class Reporter:
 
     def _send_presence(self, now):
         if self._send(PRESENCE, encode_presence(self.presence(now))):
+            self._carried = self._sticky
             self.counters.presence += 1
 
     def _sets(self):

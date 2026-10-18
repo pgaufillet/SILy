@@ -11,6 +11,7 @@ import unittest
 
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
+from mesh.parents import MIN_HOP, RANK_HYSTERESIS, link_cost
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
 from mesh.routing import Routing
@@ -56,6 +57,34 @@ class Line:
     def port9(self, b):
         return b.engine.counters.tx_messages[DODAG_INFO]
 
+    def check_ranks(self, test):
+        """Each rank is the parent's, as the node last heard it, plus the link
+        cost the node sees (§9), within the rank hysteresis.
+
+        The link cost is that of an eligible link (8 to 32): a frame lost to a
+        hidden terminal (A and C, B and D) while the windows are short raises
+        an ETX above 1.
+        """
+        for b in self.nodes:
+            view = b.engine.neighbours.get(b.routing.parents.preferred)
+            cost = link_cost(view.etx())
+            step = b.engine.rank - view.rank
+            test.assertTrue(abs(step - cost) < RANK_HYSTERESIS, (step, cost, self.ranks()))
+            test.assertTrue(MIN_HOP <= cost <= 4 * MIN_HOP, (cost, self.ranks()))
+
+    def counts(self):
+        """Return (port 9 messages sent, Trickle resets) of each board."""
+        return [(self.port9(b), b.routing.dodag.trickle.resets) for b in self.boards]
+
+    def check_quiet(self, test, before):
+        """Since before (`counts`), a node sent port 9 messages only after a
+        Trickle reset (§9: nothing at Imax). A frame lost to a hidden terminal
+        (A and C, B and D) is a failed acknowledgement sample: the ETX, then
+        the rank, may rise, which resets Trickle."""
+        for b, (sent, resets) in zip(self.boards[1:], before[1:]):
+            if b.routing.dodag.trickle.resets == resets:
+                test.assertEqual(self.port9(b), sent, (b.address, self.counts()))
+
     def steady(self, limit=300000):
         """Run until every board's Trickle timer reaches Imax."""
         while not all(b.routing.dodag.trickle.at_imax() for b in self.boards):
@@ -69,16 +98,17 @@ class Forming(unittest.TestCase):
         line = Line(3)
         line.run(12 * line.imin)
         self.assertEqual(line.attached(), [True] * 4)
-        self.assertEqual(line.ranks(), [8, 16, 24, 32])
         self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
+        line.check_ranks(self)
         line.steady()
-        # Steady state: nodes advertise nothing, the root beacons once per period.
+        # Steady state: nodes advertise nothing (without a reset), the root
+        # beacons once per period.
         start = line.net.now
-        sent = [line.port9(b) for b in line.boards]
+        before = line.counts()
         line.run(start + 6 * PERIOD)
-        after = [line.port9(b) for b in line.boards]
-        self.assertEqual(after[1:], sent[1:])
-        self.assertTrue(5 <= after[0] - sent[0] <= 7, (sent[0], after[0]))
+        line.check_quiet(self, before)
+        beacons = line.port9(line.root) - before[0][0]
+        self.assertTrue(5 <= beacons <= 7, beacons)
         self.assertEqual([b.routing.dodag.counters.poisons for b in line.nodes], [0] * 4)
         self.assertEqual(line.attached(), [True] * 4)
         # The presence reports of every node reach the root.
@@ -116,17 +146,14 @@ class GlobalRepair(unittest.TestCase):
         self.assertEqual([b.routing.parents.max_increase for b in line.nodes], [48] * 4)
         self.assertEqual([b.engine.dodag_version for b in line.boards], [1] * 5)
         self.assertEqual([b.routing.dodag.counters.poisons for b in line.nodes], [0] * 4)
-        # Ranks rebuilt along the same parents: one hop of ETX close to 1 each
-        # (the reports' traffic may cost a frame, hence an ETX above 1).
+        # Ranks rebuilt along the same parents.
         self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
-        ranks = [0] + line.ranks()
-        for hop in range(1, 5):
-            self.assertTrue(8 <= ranks[hop] - ranks[hop - 1] <= 10, ranks)
+        line.check_ranks(self)
         line.steady()
         start = line.net.now
-        sent = [line.port9(b) for b in line.nodes]
+        before = line.counts()
         line.run(start + 4 * 12000)
-        self.assertEqual([line.port9(b) for b in line.nodes], sent)
+        line.check_quiet(self, before)
 
 
 class DetachRejoin(unittest.TestCase):
@@ -138,15 +165,18 @@ class DetachRejoin(unittest.TestCase):
         c, d = line.nodes[2], line.nodes[3]
         lost = line.net.now
         b_board.power_loss(off_ms=4 * PERIOD)
-        line.run(lost + 2 * PERIOD + 3 * line.imin)
+        line.run(lost + 5 * PERIOD // 2 + 3 * line.imin)  # silence limit, poison, hold
         # C lost its only parent: poisoned; D, whose only parent is C, too.
-        self.assertEqual(
-            (c.routing.dodag.counters.poisons, d.routing.dodag.counters.poisons), (1, 1)
-        )
+        # C's presences to the dead B fail (§9 presence samples): C's rank
+        # may rise before the silence limit, D (no longer above C) detaches
+        # first, rejoins C, then detaches again on C's poison.
+        self.assertEqual(c.routing.dodag.counters.poisons, 1)
+        self.assertTrue(1 <= d.routing.dodag.counters.poisons <= 2)
         self.assertEqual((c.engine.rank, d.engine.rank), (RANK_INFINITE, RANK_INFINITE))
         self.assertTrue(c.routing.dodag.counters.solicits >= 1)
         self.assertEqual(line.attached()[0], True)
         # B boots, rejoins through A; C and D rejoin behind it.
         line.run(lost + 4 * PERIOD + 2 * PERIOD)
         self.assertEqual(line.attached(), [True] * 4)
-        self.assertEqual(line.ranks(), [8, 16, 24, 32])
+        self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
+        line.check_ranks(self)

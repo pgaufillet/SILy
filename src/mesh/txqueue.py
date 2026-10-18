@@ -55,7 +55,9 @@ are designated by their slot (``slot`` after `offer`) and checked against
 their message, so that a stale handle never touches a reused slot.
 `redirect` gives the messages not waiting a new next hop (routing, after a
 change of preferred parent: queued upward messages follow it); `select`
-lists them (routing, after a detach: they are held or dropped).
+lists them, waiting ones included on demand (routing, after a detach: they
+are held or dropped; class 1, the copies a node holds); `promote` raises an
+entry's priority.
 
 Bounded memory: every array is allocated at construction; queueing and
 packing allocate nothing per message beyond the message itself (one list of
@@ -490,12 +492,15 @@ class TxQueue:
             self._attempts[slot] = 0
         return True
 
-    def select(self, test):
-        """Return [(slot, msg)] of the entries not waiting for which test(msg) is true."""
+    def select(self, test, waiting=False):
+        """Return [(slot, msg)] of the entries not waiting for which test(msg) is true.
+
+        waiting: the waiting entries (sent, or held) too.
+        """
         out = []
         i = self._head
         while i != _NIL:
-            if not self._flags[i] & _WAIT and test(self._msg[i]):
+            if (waiting or not self._flags[i] & _WAIT) and test(self._msg[i]):
                 out.append((i, self._msg[i]))
             i = self._next[i]
         return out
@@ -516,6 +521,18 @@ class TxQueue:
                 n += 1
             i = self._next[i]
         return n
+
+    def promote(self, slot, msg, priority):
+        """Raise msg in slot to priority if it is more urgent (lower); False if stale.
+
+        The entry keeps its age; used for an advertisement merged with a more
+        urgent one (`mesh.dodag`).
+        """
+        if self._msg[slot] is not msg:
+            return False
+        if priority < self._prio[slot]:
+            self._prio[slot] = priority
+        return True
 
     def hold(self, slot, msg):
         """Make msg in slot wait without an attempt (held, §12); False if stale.

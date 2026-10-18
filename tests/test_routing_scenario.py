@@ -23,6 +23,7 @@ from mesh import frame
 from mesh.counter import FrameCounter
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
+from mesh.parents import SWITCH_THRESHOLD
 from mesh.ports import PRESENCE
 from mesh.profile import EU_869
 from mesh.reliable import ATTEMPTS, identity
@@ -249,7 +250,19 @@ class Forming(unittest.TestCase):
         self.assertEqual([m.rank(n) is not None and m.rank(n) < 255 for n in NODES], [True] * 5)
         self.assertEqual(m.consistent(NODES), [])
         self.assertEqual([m.preferred(n) for n in (A, B)], [ROOT, ROOT])
-        self.assertEqual([m.preferred(n) for n in (C, D)], [A, A])  # better links
+        # C, D: A (larger margin) at equal path cost; a frame lost to a
+        # collision while the windows fill may make B cheaper, by less than
+        # the switch threshold if the node had chosen A first (§9).
+        for n in (C, D):
+            p = m.b(n).routing.parents
+            cost = dict(
+                (x, p.candidate_cost(m.b(n).engine.neighbours.get(x), m.net.now)) for x in (A, B)
+            )
+            if cost[A] == cost[B]:
+                self.assertEqual(p.preferred, A, cost)
+            else:
+                self.assertTrue(p.preferred in (A, B), cost)
+                self.assertTrue(cost[p.preferred] - min(cost.values()) < SWITCH_THRESHOLD, cost)
         self.assertTrue(m.preferred(E) in (C, D))
         # One hop of ETX close to 1 each (a frame lost to a collision while
         # the windows fill raises an ETX a little).
@@ -301,23 +314,31 @@ class RelayKilled(unittest.TestCase):
         children = [n for n in (C, D) if m.preferred(n) == relay]
         return m, relay, other, children
 
-    def test_children_reattach_within_two_periods_idle(self):
+    def test_children_reattach_within_the_silence_limit_idle(self):
         for seed in (2, 3):
             m, relay, other, children = self._formed(seed)
             kill = m.net.now
             log = m.watch((C, D, E), kill)
             m.b(relay).power_loss(off_ms=OFF)
+            last = {}  # the relay's last frame heard by each child (one may be on air)
+
+            def record(m=m, relay=relay, children=children, last=last):
+                for n in children:
+                    last[n] = m.b(n).engine.neighbours.get(relay).heard
+
+            m.net.at(kill + 1000, record)
             m.run(kill + 4 * P)
             for n in children:
                 t, parent = switched(log, n, relay)
-                # No frame from the relay for 2 presence periods (§9 switch,
-                # idle); its last frame may still be on air when it dies.
+                # No frame from the relay for 2.5 presence periods (§9 switch,
+                # idle, strict), the step of the watch aside.
                 self.assertEqual(parent, other)
-                self.assertTrue(t <= 2 * P + 100, (n, t))
+                self.assertTrue(0 <= kill + t - (last[n] + 5 * P // 2) <= 10, (n, t))
                 # Its last frame came at most a jittered period before.
-                self.assertTrue(t >= 2 * P - 11 * P // 10, (n, t))
-                # A presence leaves at once, and the root learns the new parent.
-                gen = [(tg, p) for tg, c, p in m.generated[n] if tg >= kill + t]
+                self.assertTrue(5 * P // 2 - 11 * P // 10 <= t <= 5 * P // 2 + 1000, (n, t))
+                # A presence leaves at once, and the root learns the new parent
+                # (the watch samples every 5 ms: t is up to 5 ms late).
+                gen = [(tg, p) for tg, c, p in m.generated[n] if tg > kill + t - 5]
                 self.assertEqual(gen[0][1], other)
                 self.assertTrue(gen[0][0] - kill - t <= 4 * m.b(n).engine.slot_ms + 10)
                 after = [p for tp, c, p in m.presences[n] if tp >= kill + t]
@@ -353,10 +374,12 @@ class RelayKilled(unittest.TestCase):
         # At least one timeout: the failed attempts raise A's ETX (p_ack), so
         # that B may win by the switch threshold before the third one.
         self.assertTrue(took >= rel.relay_timeout_ms, took)
-        # D, without traffic, switches when the relay has been silent for 2
-        # periods.
-        if D in children:
-            self.assertTrue(switched(log, D, relay)[0] >= 2 * P - 11 * P // 10)
+        # D, without traffic, switches when the relay has been silent for 2.5
+        # periods. (A node that rejoins after its solicitation takes the
+        # first neighbour heard, §9: it may be D, whose parent is the dead
+        # relay; D then has traffic.)
+        if D in children and not m.b(D).engine.counters.tx_messages[APP]:
+            self.assertTrue(switched(log, D, relay)[0] >= 5 * P // 2 - 11 * P // 10)
         # Every class 1 message reached the root once (local repair, §1).
         got = [p for o, p in m.root.inbox_from(APP) if o == C]
         self.assertEqual(sorted(got), [b"p0", b"p1", b"p2"])
@@ -397,6 +420,16 @@ class LoopDuringRepair(unittest.TestCase):
             return forward(msg, header, now)
 
         b.engine.forward = watched_forward
+        to_c = []  # B's frames to C holding its message (B's side: the sniffer may lose one)
+        b_sent = b.engine.sent
+
+        def watched_sent(sel, counter, now):
+            b_sent(sel, counter, now)
+            for x in sel.messages:
+                if sel.dest == C and x.port == APP and x.origin is None:
+                    to_c.append(x.seq)
+
+        b.engine.sent = watched_sent
         start = m.net.now
         log = m.watch((B, C, D), start)
         loops = m.loop_samples((B, C, D), start, start + 12000)
@@ -443,16 +476,14 @@ class LoopDuringRepair(unittest.TestCase):
                         sent[key] = sent.get(key, 0) + 1
                         if key[0] == B:
                             self.assertTrue(t <= quiet, (t - start, key))
-        self.assertTrue((B, ROOT, APP, mine, B) in sent, sent)
+        self.assertTrue(1 <= len(to_c) <= ATTEMPTS and set(to_c) == {mine}, to_c)
         self.assertTrue(max(sent.values()) <= ATTEMPTS, sent)
         # B's message had reached the root through A before the loop.
         self.assertEqual(m.root.inbox_from(APP)[0], (B, b"mine"))
-        # The links come back: no loop, every attached node consistent. (A
-        # node whose failed attempts left a link above ETX 4 may stay away
-        # from it: the acknowledgement history does not age, §9 link
-        # estimation.)
+        # The links come back: no loop, every attached node consistent.
         parents.next_parent = original
         b.engine.forward = forward
+        b.engine.sent = b_sent
         m.net.medium.restore(A, B)
         m.run(m.net.now + 4 * P)
         self.assertEqual(m.consistent((A, B, C, D)), [])
@@ -463,6 +494,72 @@ class LoopDuringRepair(unittest.TestCase):
         self.assertEqual(len(sent_d), 2)
         delivered = [p for o, p in m.root.inbox_from(APP) if o == D]
         self.assertEqual(len(delivered), len(set(delivered)))
+
+
+class OneWayCut(unittest.TestCase):
+    """Root — A, B (hearing each other) — C. C's parent stops hearing C (one
+    way) and C has no class 1 traffic: only its presence reports, no longer
+    forwarded, tell it (§9 passive acknowledgement of presence). Its parent's
+    ETX rises until another candidate wins by the switch threshold; once C
+    sends nothing more there, the failures age out 2.5 periods after the
+    newest one (§9): the link reads as good again, C still hearing it."""
+
+    def test_presence_failures_then_ageing(self):
+        names = (ROOT, A, B, C)
+        links = ((ROOT, A, 10), (ROOT, B, 10), (A, B, 10), (A, C, 12), (B, C, 8))
+        m = Mesh(8, names, links)
+        m.run(12 * m.imin + 3 * P)
+        first = m.preferred(C)
+        self.assertTrue(first in (A, B))
+        c = m.b(C)
+        table = c.engine.neighbours
+        entry = table.get(first)
+        self.assertTrue(entry.ack_count >= 1)  # presence samples (a forward may be lost)
+        failures = []  # times of the failed samples of first
+        acked = table.acked
+
+        def record(address, ok, *now):
+            if address == first and not ok:
+                failures.append(m.net.now)
+            return acked(address, ok, *now)
+
+        table.acked = record
+        cut = m.net.now
+        m.net.medium.cut(C, first)
+        etx = []  # (time, ETX of first) at each change, the table read at that time
+        left = []  # time C left first
+
+        def watch():
+            now = m.net.now
+            if not left and m.preferred(C) != first:
+                left.append(now - cut)
+            table.expire(now)
+            e = table.get(first)
+            value = e.etx() if e is not None else None
+            if not etx or etx[-1][1] != value:
+                etx.append((now, value))
+            m.net.at(now + 50, watch)
+
+        m.net.at(cut, watch)
+        m.run(cut + 20 * P)
+        self.assertTrue(left, etx)
+        t = left[0]
+        # One failed sample per presence (none more after the switch, but a
+        # presence whose wait was pending), then the switch.
+        self.assertTrue(failures and failures[0] > cut, failures)
+        self.assertTrue(len(failures) <= t // (9 * P // 10) + 2, (t, failures))
+        gaps = [b - a for a, b in zip(failures, failures[1:])]
+        self.assertTrue(min(gaps) >= 9 * P // 10 - 100, gaps)
+        self.assertTrue(failures[-1] <= cut + t + P, (t, failures))
+        # Aged out 2.5 periods after the newest failure (the watch's step
+        # aside): successes kept, ETX 1 again; high until then.
+        aged = failures[-1] + 5 * P // 2
+        before = [v for u, v in etx if failures[-1] <= u < aged]
+        self.assertTrue(before and min(before) > 128, (failures[-1], etx))
+        self.assertEqual([v for u, v in etx if u >= aged], [128])
+        self.assertTrue(etx[-1][0] - aged <= 50, (aged, etx[-1]))
+        self.assertTrue(entry.latched and entry.ack_count == entry.acknowledged() >= 1)
+        self.assertTrue(entry.d_in() >= 85, entry.d_in())  # heard well all along
 
 
 class PartitionAndReturn(unittest.TestCase):
@@ -477,16 +574,16 @@ class PartitionAndReturn(unittest.TestCase):
         e = m.b(E)
         m.run(start + 5 * P)
         # Cut off: inside the subtree a node may follow a neighbour whose own
-        # view is still stale (its parent heard less than 2 periods ago, a
+        # view is still stale (its parent heard less than 2.5 periods ago, a
         # poison lost to a collision), so a loop may form, but only for a
         # while: the next frame across it carries the ranks (data-path
         # validation, Trickle). Every node is detached for good once the
-        # stale views have expired: 2 periods, then a poison wave (§9).
+        # stale views have expired: 2.5 periods, then a poison wave (§9).
         for n in sub:
             states = [(t, r) for t, x, p, r in log if x == n]
             last = states[-1]
             self.assertEqual(last[1], RANK_INFINITE, (n, states))
-            self.assertTrue(last[0] <= 2 * P + 3 * m.imin, (n, states))
+            self.assertTrue(last[0] <= 5 * P // 2 + 3 * m.imin, (n, states))
         if loops:
             self.assertTrue(max(episodes(loops)) <= P + 2 * m.imin, episodes(loops))
         late = e.submit(APP, 1, ROOT, b"late")  # held: no route
@@ -513,3 +610,133 @@ class PartitionAndReturn(unittest.TestCase):
                 self.assertEqual(after[-1][2], m.preferred(n))
         self.assertEqual([p for o, p in m.root.inbox_from(APP) if o == E], [b"late"])
         self.assertTrue(late >= 0)
+
+
+class _Cutoff:
+    """Line root — A — B — C, formed. ``cut(lose)``: A and B stop hearing
+    each other (A dies for B: B's subtree is cut off), B detaches, C behind
+    it; the first lose frames B sends at rank 255 are lost at C (link
+    B -> C cut while each is on air; lose None: every one until B has a
+    finite rank again). ``on_detach(now)`` is called at B's first frame at
+    rank 255 (its poison); ``lost`` lists the times of the frames lost."""
+
+    def __init__(self, seed):
+        names = (ROOT, A, B, C)
+        links = ((ROOT, A, 10), (A, B, 10), (B, C, 10))
+        m = Mesh(seed, names, links)
+        m.run(12 * m.imin + 2 * P)
+        # Formed: ranks may still move (hidden terminals: root and B, A and
+        # C), a rank rise detaching the child for a while (§9 rank rule).
+        for _ in range(60):
+            if [m.preferred(n) for n in (A, B, C)] == [ROOT, A, B] and not m.consistent((A, B, C)):
+                break
+            m.run(m.net.now + 1000)
+        else:
+            raise AssertionError("line not formed")
+        self.m = m
+        self.b, self.c = m.b(B), m.b(C)
+        self.lost = []  # times of B's frames lost at C
+        self.detached = None  # time of B's first frame at rank 255
+        self._left = 0
+        self._sent = self.b.engine.sent
+        self.b.engine.sent = self._sent_by_b
+
+    def _sent_by_b(self, sel, counter, now):
+        self._sent(sel, counter, now)
+        e = self.b.engine
+        if e.rank != RANK_INFINITE:
+            if self._left is None and self.lost:
+                self._left = 0  # B has a rank again: losses over
+            return
+        if self.detached is None:
+            self.detached = now
+            self.on_detach(now)
+        if self._left is None or self._left > 0:
+            if self._left is not None:
+                self._left -= 1
+            self.lost.append(now)
+            medium = self.m.net.medium
+            medium.cut(B, C)
+            self.m.net.at(now + sel.toa_ms + 1, medium.restore, B, C)
+
+    def on_detach(self, now):
+        pass
+
+    def cut(self, lose):
+        self._left = lose
+        self.m.net.medium.cut(A, B)
+        self.m.net.medium.cut(B, A)
+
+
+class PoisonLost(unittest.TestCase):
+    """B's poison is lost at C, which keeps B as parent and sends a frame
+    during B's hold: B must not rejoin through C, its own child (TLA+
+    `DODAG_line_solicit_nocycle`: no loop with at most one loss in a row
+    per link)."""
+
+    def test_no_rejoin_through_a_child(self):
+        s = _Cutoff(11)
+        m, c = s.m, s.c
+        sent = []
+
+        def on_detach(now):
+            # A class 0 message of C, still attached through B, reaches B
+            # in the middle of its hold (dropped there: no route).
+            m.net.at(now + m.imin, lambda: sent.append(c.submit(APP, 0, ROOT, b"c")))
+
+        s.on_detach = on_detach
+        start = m.net.now
+        log = m.watch((B, C), start)
+        loops = m.loop_samples((B, C), start, start + 6 * P)
+        s.cut(1)
+        m.run(start + 6 * P)
+        self.assertEqual(len(s.lost), 1)
+        self.assertEqual(sent, [0])
+        self.assertEqual(loops, [])
+        self.assertEqual([p for t, n, p, r in log if n == B and p == C], [])
+        # Both cut off: detached for good (C heard B's solicitation).
+        self.assertEqual((m.rank(B), m.rank(C)), (RANK_INFINITE, RANK_INFINITE))
+        # A heard again: both rejoin, consistent.
+        m.net.medium.restore(A, B)
+        m.net.medium.restore(B, A)
+        m.run(m.net.now + 3 * P)
+        self.assertEqual([m.preferred(n) for n in (A, B, C)], [ROOT, A, B])
+        self.assertEqual(m.consistent((A, B, C)), [])
+
+
+class LoopCustody(unittest.TestCase):
+    """TLA+ `DODAG_line_current_MP5` on the code: B detaches; C, which lost
+    B's poison, sends its class 1 message to B, which holds it; B rejoins
+    through C, its own child, and the message loops. B's frames at rank 255
+    are lost at C until B rejoins: its poison, but also its explicit
+    acknowledgements and solicitation, which in the code carry its rank
+    255 in their header (the model's acknowledgements carry no rank)."""
+
+    def test_looped_message_delivered_or_failed(self):
+        s = _Cutoff(12)
+        m, b, c = s.m, s.b, s.c
+        sent = []
+
+        def on_detach(now):
+            # C's message reaches B shortly before its hold ends.
+            due = b.routing.parents.hold_until - 300
+            m.net.at(due, lambda: sent.append(c.submit(APP, 1, ROOT, b"m")))
+            # A heard again once the loop is over.
+            m.net.at(now + 4 * m.imin, m.net.medium.restore, A, B)
+            m.net.at(now + 4 * m.imin, m.net.medium.restore, B, A)
+
+        s.on_detach = on_detach
+        start = m.net.now
+        log = m.watch((B, C), start)
+        s.cut(None)
+        m.run(start + 3 * P + 4 * m.imin + 3 * P)
+        self.assertTrue(len(sent) == 1 and sent[0] >= 0, sent)
+        # B rejoined through C (its poison and solicitation lost at C): the
+        # loop formed, beyond what the solicitation tolerates (TLA+
+        # `DODAG_line_solicit_consec2`).
+        self.assertTrue([p for t, n, p, r in log if n == B and p == C], log)
+        # MP5: delivered (once: the root filters the copies that custody
+        # makes travel), or the origin told.
+        got = [p for o, p in m.root.inbox_from(APP) if o == C]
+        failed = [f for f in c.failures if f[3] == sent[0]]
+        self.assertTrue((len(got), len(failed)) in ((1, 0), (0, 1)), (got, failed))

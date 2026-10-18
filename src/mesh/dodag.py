@@ -20,12 +20,15 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
 - **Selection**: the parent set is recomputed after every step in which a
   frame was heard (after the frame's messages, so that a DODAG information
   message of a new version is adopted first), when a member falls silent
-  (2 presence periods) and when the detach hold ends.
+  (the silence limit, `mesh.neighbours.silence_ms`: 2.5 presence periods),
+  when a member's acknowledgement failures age out (its ETX may fall) and
+  when the detach hold ends.
 - **Advertisements**: when the Trickle timer says so, a frame to every
-  neighbour holding one DODAG information message (23 B); priority 1 after a
-  reset, 2 for the root beacon (§6). Every frame sent counts as sent for
-  suppression, every frame of the own version from a neighbour of finite
-  rank as heard.
+  neighbour holding one DODAG information message (23 B), priority 1 (every
+  Trickle advertisement follows a reset, §6); one still queued (the root
+  beacon) takes the new one's place, raised to priority 1 if needed. Every
+  frame sent counts as sent for suppression, every frame of the own version
+  from a neighbour of finite rank as heard.
 - **Trickle resets** (§9): adoption of a new version; a frame of an older
   version from a neighbour of finite rank; a solicitation (attached nodes
   and the root); an increase of the own rank; poisoning; a rank error
@@ -49,8 +52,13 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   Trickle timer.
 - **Detach** (poisoning, §9 loop freedom): when no candidate remains, the
   node advertises rank 255 at once (Trickle reset), selects nothing for
-  2 Imin (``Parents.hold_ms``), then stops its Trickle timer, sends a
-  solicitation and rejoins through neighbours heard after the poison.
+  2 Imin (``Parents.hold_ms``), then stops its Trickle timer and sends a
+  solicitation without selecting; the hold lasts until the solicitation
+  goes on air (`Parents.solicited`, from ``sent``: a full queue or the duty
+  cycle keep the node detached), and the node rejoins only through
+  neighbours heard after it (selection at each frame heard: the first
+  candidate heard is taken). The poison is sent once: a child that lost it
+  hears the solicitation (rank 255) and detaches in turn.
   The poison and the solicitations leave after a random delay of at most
   `DESYNC_SLOTS` slots (the frame header says rank 255 at once): nodes
   that detach on one event (the children of a silent relay, which heard
@@ -61,9 +69,15 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
 - **Solicitation**: a node without route solicits at boot after a random
   delay in [0, Imin], at the end of the detach hold, then once per presence
   period while it has no route.
-- **Root**: rank 0, never adopts; its Trickle timer beacons at Imax (§16).
-  `set_version` issues a version (and new parameters): the policy deciding
-  when (global repair, §9) belongs to the root's later step.
+- **Root**: rank 0, never adopts. **Beacon** (§16): one DODAG information
+  advertisement, priority 2, every presence period jittered by ±10 % (§7),
+  the timer re-armed from each firing; it runs beside Trickle, whose resets
+  (solicitation, older version, new version) send their priority-1
+  advertisements without postponing or suppressing it, so that the root's
+  frames are never further apart than 1.1 periods while beacons are not
+  lost. `set_version` issues a version (and new parameters) and re-arms the
+  beacon on the new period: the policy deciding when (global repair, §9)
+  belongs to the root's later step.
 
 ``next_hop`` gives the preferred parent for upward messages (the link
 engine's ``next_hop``, set by `mesh.routing.Routing`).
@@ -86,19 +100,19 @@ period or Imin of 0 is malformed.
 """
 
 from mesh.frame import BROADCAST, FIRST_HOP, LINK_LOCAL, RANK_INFINITE, UPWARD, Message
-from mesh.neighbours import presence_ms
+from mesh.neighbours import presence_ms, silence_ms
 from mesh.parents import (
     ATTACHED,
     DETACHED,
     MAX_RANK_INCREASE,
     PARENT_CHANGED,
     RANK_INCREASED,
-    SILENCE_PERIODS,
     VERSION_MASK,
     Parents,
 )
-from mesh.platform import randbelow
+from mesh.platform import jittered, randbelow
 from mesh.ports import DODAG_INFO
+from mesh.ports import priority as port_priority
 from mesh.trickle import IMIN_SLOTS, URGENT, Trickle
 from mesh.txqueue import accepted
 
@@ -262,7 +276,7 @@ class Dodag:
         if parents is None:
             parents = Parents(engine.neighbours, root=self.root, clock=self._clock)
         self.parents = parents
-        self.trickle = Trickle(1, 1, engine.random, beacon=self.root)
+        self.trickle = Trickle(1, 1, engine.random)
         self._buf = bytearray(INFO_SIZE)  # payload of every advertisement, updated in place
         self._apply_info(info)
         self.version = version & VERSION_MASK if self.root else 0
@@ -272,7 +286,8 @@ class Dodag:
         engine.rank = parents.rank
         self._started = False
         self._dirty = False  # a frame was heard: select again in this step's tick
-        self._check_at = None  # a member falls silent
+        self._check_at = None  # a member falls silent or its failures age out
+        self._beacon_at = None  # root: next beacon
         self._solicit_at = None  # next solicitation of a node without route
         self._poison_at = None  # poison advertisement due
         self._ask_at = None  # solicitation for the DODAG information of another version
@@ -351,6 +366,7 @@ class Dodag:
         self.engine.dodag_version = self.version
         self.parents.on_new_version(self.version, now)
         self.trickle.reset(now, True)
+        self._beacon_at = now + jittered(self.engine.neighbours.period_ms, self.engine.random)
 
     # --- Link engine hooks ---------------------------------------------------------------
 
@@ -394,8 +410,11 @@ class Dodag:
         self._base_sent(sel, counter, now)
         info = False
         for m in sel.messages:
-            if m.port == DODAG_INFO and len(m.payload):
-                info = True
+            if m.port == DODAG_INFO:
+                if len(m.payload):
+                    info = True
+                elif not self.root:
+                    self.parents.solicited(now)  # ends the detach hold
         self.trickle.transmitted(info)
 
     def _on_info(self, origin, msg, header):
@@ -430,6 +449,9 @@ class Dodag:
             self._start(now)
         if not self.root:
             self._routing(now)
+        elif self._beacon_at is not None and now >= self._beacon_at:
+            self._beacon_at = now + jittered(self.engine.neighbours.period_ms, self.engine.random)
+            self._advertise(False)
         due = self.trickle.poll(now)
         if due:
             self._advertise(due == URGENT)
@@ -443,6 +465,7 @@ class Dodag:
         t = self._base_timer()
         for u in (
             self.trickle.timer(),
+            self._beacon_at,
             self._check_at,
             self._solicit_at,
             self._poison_at,
@@ -459,6 +482,7 @@ class Dodag:
         self._started = True
         if self.root:
             self.trickle.reset(now, True)
+            self._beacon_at = now + jittered(self.engine.neighbours.period_ms, self.engine.random)
         else:
             self._solicit_at = now + randbelow(self.engine.random, self.imin_ms + 1)
 
@@ -510,14 +534,18 @@ class Dodag:
             self.changed(events, now)
 
     def _watch(self):
-        # Next time a member of the parent set falls silent, or the hold ends.
+        # Next time a member of the parent set falls silent or its failures
+        # age out (same limit, `NeighbourTable.expire`), or the hold ends.
         p = self.parents
         t = p.hold_until
-        limit = SILENCE_PERIODS * self.engine.neighbours.period_ms
+        limit = silence_ms(self.engine.neighbours.period_ms)
         for a in p.members():
             n = self.engine.neighbours.get(a)
-            if n is not None and (t is None or n.heard + limit < t):
-                t = n.heard + limit
+            if n is None:
+                continue
+            for u in (n.heard, n.fail_at):
+                if u is not None and (t is None or u + limit < t):
+                    t = u + limit
         self._check_at = t
 
     def _poison(self, now):
@@ -546,8 +574,11 @@ class Dodag:
         return entry is not None and self.engine.queue.holds(entry[0], entry[1])
 
     def _advertise(self, urgent):
-        """Queue an advertisement (unless one is still queued)."""
-        if self._queued(self._advert):
+        """Queue an advertisement, unless one is still queued (raised to urgent if needed)."""
+        entry = self._advert
+        if self._queued(entry):
+            if urgent:  # a queued root beacon (priority 2) takes priority 1
+                self.engine.queue.promote(entry[0], entry[1], port_priority(DODAG_INFO, True))
             return
         msg = Message(LINK_LOCAL, 0, DODAG_INFO, self._buf)
         if self._offer(msg, urgent):

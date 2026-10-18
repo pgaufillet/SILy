@@ -14,9 +14,10 @@
 parent. After a change of preferred parent, the queued upward messages not
 waiting for an acknowledgement follow the new parent
 (`mesh.txqueue.TxQueue.redirect`), and the presence report leaves at once.
-After a detach they do not go to the former parent: class 1/2 ones are held
-(§12 holding during repair, resumed on the next parent), class 0 ones are
-dropped (counted as ``no_route`` by the link).
+After a detach they do not go to the former parent: class 1/2 ones are held,
+those waiting for an acknowledgement included (not retried towards a
+parent of rank 255; §12 holding during repair, resumed on the next parent),
+class 0 ones are dropped (counted as ``no_route`` by the link).
 Forwarded presence, topology and node information reports replace an older
 report of the same origin still queued (class 0 replace by newer, §12): the
 relay aggregates the reports of its subtree into the frames it sends anyway
@@ -32,10 +33,12 @@ message received from a sender of the same DODAG version whose rank is not
 higher than this node's (finite) rank reveals an inconsistency: the node
 calls `Dodag.rank_error` (counted, Trickle reset, presence flag), drops a
 class 0 message (``rank_dropped``) and forwards a class 1/2 one, unless the
-duplicate cache already holds it: then it has looped and is dropped and
-counted (``loops``; the link acknowledges it, so its sender stops). An
-upward message whose origin is this node has come back: dropped (taken, so
-acknowledged) and counted as a loop. Across versions, ranks are not
+duplicate cache already holds it and the node still holds a copy: then it
+has looped and is dropped and counted (``loops``; the link acknowledges it,
+so its sender stops). An upward message whose origin is this node has come
+back, a loop (counted): dropped (taken, so acknowledged) while the node
+still holds its copy or the message is class 0, otherwise forwarded again
+(custody, §12: no copy would remain). Across versions, ranks are not
 compared (§9).
 
 **Root**: the reports (ports 1, 2, 5) are decoded and handed to
@@ -56,6 +59,7 @@ from mesh.frame import FIRST_HOP, RANK_INFINITE, UPWARD
 from mesh.link import DELIVERED, NOT_TAKEN
 from mesh.parents import PARENT_CHANGED
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
+from mesh.reliable import identity
 from mesh.reports import (
     Reporter,
     decode_node_info,
@@ -75,7 +79,7 @@ class Counters:
     """Routing counters since boot (§13; rank errors are counted by `Dodag`)."""
 
     def __init__(self):
-        self.loops = 0  # upward messages that came back (dropped)
+        self.loops = 0  # upward messages that came back: own, or inconsistent duplicates
         self.rank_dropped = 0  # class 0 messages dropped on a rank inconsistency
         self.redirected = 0  # queued upward messages sent to a new preferred parent
         self.reports = 0  # root: reports received and decoded
@@ -159,8 +163,12 @@ class Routing:
                 self.counters.rank_dropped += 1
                 return NOT_TAKEN
         if msg.origin == self.engine.address:
+            # Back from a loop: dropped while still held (custody, §12),
+            # otherwise taken again.
             self.counters.loops += 1
-            return DELIVERED
+            key = identity(msg, header.source, None)
+            if not msg.cls or self.engine.reliable.holding(key, header.source):
+                return DELIVERED
         return self._base_forward(msg, header, now, not msg.cls and msg.port in _REPORTS)
 
     def _repeated(self, msg, header, now):
@@ -176,7 +184,8 @@ class Routing:
             if hop is not None:
                 self.counters.redirected += e.queue.redirect(_upward, hop)
             else:
-                for slot, msg in e.queue.select(_upward):
+                # Waiting copies too: not retried towards the former parent.
+                for slot, msg in e.queue.select(_upward, True):
                     if msg.cls:
                         e.reliable.hold(slot, msg, now)
                     else:

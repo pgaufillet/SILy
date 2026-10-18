@@ -17,23 +17,23 @@ builds and queues it (`mesh.dodag`).
   solicitation, a neighbour of an older version, a new version: version and
   parameters travel only in port 9 messages), the next decision counts port 9
   messages only: own (``transmitted(True)``) and heard (``heard(True)``).
-- **At Imax** (intervals reached by doubling): a node sends nothing, since
-  its presence frame, sent every presence period, advertises anyway (§9: "in
-  steady state Trickle sends nothing"); the root (``beacon``) sends its
-  beacon in every such interval, never suppressed (§9, §16).
+- **At Imax** (intervals reached by doubling): nothing is sent, since a
+  node's presence frame, sent every presence period, advertises anyway (§9:
+  "in steady state Trickle sends nothing"). The root beacon (§16) is not a
+  Trickle advertisement: `mesh.dodag` sends it on its own periodic timer,
+  which Trickle resets neither postpone nor suppress.
 - **Reset** (`reset`): I = Imin and a new interval starts, unless I already
   equals Imin and the advertisement of the current interval is still to come
   (the header and payload are built at transmission, so it carries the new
   state; restarting would only postpone it: RFC 6206 rule 6).
 
-`poll` returns `URGENT` for an advertisement below Imax (after a reset:
-priority 1, §6), `PERIODIC` for the root beacon at Imax (priority 2), 0
-otherwise. A stopped timer (``interval`` None: a detached node) decides
-nothing; `reset` starts it.
+`poll` returns `URGENT` when an advertisement is due (every one follows a
+reset: priority 1, §6), 0 otherwise. A stopped timer (``interval`` None: a
+detached node) decides nothing; `reset` starts it.
 
 Readings where §9 is silent: what "Imax = the presence period, in steady
-state Trickle sends nothing" means for a node (no advertisement at Imax, as
-above, while the root beacons); which frames suppress an advertisement that
+state Trickle sends nothing" means (no advertisement at Imax, the root
+included: its beacon has its own timer); which frames suppress an advertisement that
 answers a need for the DODAG information (port 9 ones only: a neighbour
 cannot adopt a version from a frame header, §9); the reset that keeps a
 pending advertisement.
@@ -44,9 +44,8 @@ from mesh.platform import randbelow
 K = 2  # redundancy constant (§9)
 IMIN_SLOTS = 32  # Imin in slots (§8, §9)
 
-# poll results.
+# poll result.
 URGENT = 1  # advertisement after a reset (port 9 priority 1)
-PERIODIC = 2  # root beacon at Imax (port 9 priority 2)
 
 
 class Trickle:
@@ -54,7 +53,7 @@ class Trickle:
 
     imin_ms, imax_ms: shortest and longest interval (imax below imin is
     raised to imin); random: a `mesh.platform.Random`; k: redundancy
-    constant; beacon: True on the root (advertises at Imax).
+    constant.
 
     Read: ``interval`` (ms, None when stopped), ``start_at``, ``send_at``,
     ``end_at``, ``count`` (frames of the own version heard in the interval),
@@ -62,10 +61,9 @@ class Trickle:
     ``resets`` (triggers), ``sends``, ``suppressed``.
     """
 
-    def __init__(self, imin_ms, imax_ms, random, k=K, beacon=False):
+    def __init__(self, imin_ms, imax_ms, random, k=K):
         self.random = random
         self.k = k
-        self.beacon = beacon
         self.imin = 1
         self.imax = 1
         self.configure(imin_ms, imax_ms)
@@ -145,7 +143,7 @@ class Trickle:
     # --- Time --------------------------------------------------------------------------
 
     def poll(self, now):
-        """Advance to now; return `URGENT` or `PERIODIC` if an advertisement is due, else 0.
+        """Advance to now; return `URGENT` if an advertisement is due, else 0.
 
         A late poll catches up interval by interval, one advertisement at most.
         """
@@ -187,12 +185,9 @@ class Trickle:
                 self.suppressed += 1
                 return 0
         elif self.at_imax():
-            if not self.beacon:
-                return 0
-            self.sends += 1
-            return PERIODIC
+            return 0
         elif self.sent or self.count >= self.k:
             self.suppressed += 1
             return 0
         self.sends += 1
-        return PERIODIC if self.at_imax() else URGENT
+        return URGENT

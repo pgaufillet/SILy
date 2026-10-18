@@ -2,15 +2,15 @@
 
 import unittest
 
-from mesh.trickle import PERIODIC, URGENT, K, Trickle
+from mesh.trickle import URGENT, K, Trickle
 from sim.prng import XorShift32
 
 IMIN = 1600
 IMAX = 30000
 
 
-def _trickle(beacon=False, seed=1, imin=IMIN, imax=IMAX):
-    return Trickle(imin, imax, XorShift32(seed), beacon=beacon)
+def _trickle(seed=1, imin=IMIN, imax=IMAX):
+    return Trickle(imin, imax, XorShift32(seed))
 
 
 def _intervals(t, count):
@@ -181,18 +181,8 @@ class AtImax(unittest.TestCase):
         self.assertEqual([d for _, _, _, d in _intervals(t, 5)], [0] * 5)
         self.assertEqual(t.sends, sends)
 
-    def test_root_beacons_at_imax_unsuppressed(self):
-        t = _trickle(beacon=True)
-        self._at_imax(t)
-        t.heard()
-        t.heard()
-        t.transmitted()
-        self.assertEqual(t.poll(t.send_at), PERIODIC)
-        t.poll(t.end_at)
-        self.assertEqual([d for _, _, _, d in _intervals(t, 3)], [PERIODIC] * 3)
-
-    def test_root_below_imax_is_urgent_and_suppressible(self):
-        t = _trickle(beacon=True)
+    def test_below_imax_urgent_and_suppressible(self):
+        t = _trickle()
         t.reset(0)
         self.assertEqual(t.poll(t.send_at), URGENT)
         t.poll(t.end_at)
@@ -210,11 +200,13 @@ class AtImax(unittest.TestCase):
         self.assertEqual(t.poll(t.send_at), 0)
 
     def test_information_needed_sent_at_imax(self):
+        # Every Trickle advertisement follows a reset: priority 1 (the root
+        # beacon, priority 2, has its own timer, `mesh.dodag`).
         t = _trickle(imin=IMAX, imax=IMAX)
         t.reset(0)
         t.poll(t.end_at)
         t.need_info = True
-        self.assertEqual(t.poll(t.send_at), PERIODIC)
+        self.assertEqual(t.poll(t.send_at), URGENT)
 
 
 class Reset(unittest.TestCase):

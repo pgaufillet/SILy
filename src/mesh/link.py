@@ -28,10 +28,12 @@ round robin by origin, aggregation per next hop, within the frame limit and
 the allowances) and senses the channel. Idle: it builds the header, seals the
 frame (`Security.seal`, new frame counter), charges its time on air (TX
 start), commits the selection and transmits; ``TX_DONE`` charges the excess
-of the measured duration. Busy: random backoff of [1, CW] slots (slot = time
-on air of a presence frame at the SF; CW 4, doubling up to 32), then packs and
-senses again. After `MAX_ATTEMPTS` busy senses the engine gives up: the
-priority-2/3 reports of the frame are dropped; the other messages (class 1/2,
+of the measured duration. A charge that leaves use above 80 % of the budget
+sets ``duty_high`` (presence flag bit 2, §11; the reporter clears it).
+Busy: random backoff of [1, CW] slots (slot = time on air of a presence
+frame at the SF; CW 4, doubling up to 32), then packs and senses again.
+After `MAX_ATTEMPTS` busy senses the engine gives up: the priority-2/3
+reports of the frame are dropped; the other messages (class 1/2,
 priority-1 datagrams) stay queued and a new procedure starts after one more
 backoff of [1, 32] slots. Messages the allowance refuses otherwise stay
 queued; the engine wakes up when the window next releases airtime.
@@ -48,9 +50,12 @@ one goes to `overheard` (passive acknowledgements). Each message is
 delivered to its port's handler when this node is its destination, otherwise
 passed to `forward` (next hop from the injected ``next_hop`` function, after
 a random delay of at most one slot, §7). A class 1/2 message already in the
-duplicate cache is neither delivered nor forwarded again; the frame then
-gets an explicit acknowledgement, as when it carries a class 1/2 message
-delivered here or held (`mesh.reliable`).
+duplicate cache is not delivered again; a node other than its destination
+drops it only while it holds a copy (custody, `Reliable.holding`), and
+otherwise takes it again (forwarded or held, counted ``retaken``: a loop, or
+a retransmission after a lost acknowledgement, which the destination then
+filters). Either way the frame gets an explicit acknowledgement, as when it
+carries a class 1/2 message delivered here or held (`mesh.reliable`).
 
 **Extension points** (minimal defaults, overridden or replaced by the later
 steps): `heard` (neighbour table), `overheard` (passive acknowledgements),
@@ -59,7 +64,7 @@ steps): `heard` (neighbour table), `overheard` (passive acknowledgements),
 `give_up` (busy channel), `expand` (first-hop compression undone on every
 message addressed to this node: origin, and port fields such as the
 presence report's parent), `repeated` (a class 1/2 message found in the
-duplicate cache: routing tells a loop from a retransmission), `forward`
+duplicate cache and dropped: routing tells a loop from a retransmission), `forward`
 (routing: data-path validation, replace by newer, source routes; returns
 `QUEUED`, `HELD`, `DELIVERED` or `NOT_TAKEN`, on which class 1 acknowledges
 or not), ``next_hop`` and ``reroute`` (routing: next hop, next hop after
@@ -112,6 +117,7 @@ CW_MIN = 4
 CW_MAX = 32
 MAX_ATTEMPTS = 6  # carrier senses of one access procedure
 PRESENCE_FRAME = 17  # bytes of a presence frame (§11 sizes): the backoff slot
+DUTY_HIGH_PERCENT = 80  # duty-cycle use flagged above (§11 presence flag bit 2)
 
 MAX_PAYLOAD = 200  # announced maximum application payload (MP6)
 SENDERS = 32  # entries of the per-address counters
@@ -198,6 +204,7 @@ class Counters:
         self.ack_withheld = 0  # frames not acknowledged: a class 1/2 message refused
         self.malformed_acks = 0
         self.duplicates = 0  # class 1/2 messages received again: acknowledged, dropped
+        self.retaken = 0  # duplicates no longer held here: taken again, acknowledged (custody)
         self.errors_sent = 0  # port 4 errors about forwarded messages
         self.errors_received = 0  # errors about own messages (failure callback)
         self.errors_forwarded = 0  # root: errors forwarded to the origin
@@ -315,6 +322,7 @@ class LinkEngine(Core):
         self.counters = Counters()
         self.senders = SenderCounters()
         self.address_conflict = False  # presence flag bit 5; the reporter clears it
+        self.duty_high = False  # presence flag bit 2 (`_charged`); the reporter clears it
         self._failure = None
         self._handlers = [None] * 256
         self._seq = randbelow(random, 0x10000)
@@ -666,6 +674,7 @@ class LinkEngine(Core):
             self._state = IDLE
             return
         self.dutycycle.start(now, sel.toa_ms)
+        self._charged(now)
         c = self.counters
         c.tx_frames += 1
         for m in sel.messages:
@@ -682,8 +691,17 @@ class LinkEngine(Core):
             self.counters.unexpected += 1
             return
         self.dutycycle.done(now, duration_ms)
+        self._charged(now)
         self._state = IDLE
         self._dirty = True
+
+    def _charged(self, now):
+        # Use only grows at a charge: checked there, it is seen whenever it
+        # exceeds 80 % of the budget (§11 presence flag bit 2, kept until the
+        # next presence goes on air, even when presence itself is refused).
+        dc = self.dutycycle
+        if dc.used(now) * 100 > DUTY_HIGH_PERCENT * dc.budget_ms:
+            self.duty_high = True
 
     def _exhausted(self):
         # The board stops transmitting (§14): own class 1/2 messages fail.
@@ -750,7 +768,10 @@ class LinkEngine(Core):
                 continue
             # Class 1/2 (§12): duplicate cache, then one explicit
             # acknowledgement for the frame unless forwarding acknowledges.
-            if rel.duplicate(key, now):
+            # Custody: a node other than the destination drops a duplicate
+            # only while it holds a copy; one it handed over is taken again.
+            dup = rel.duplicate(key, now)
+            if dup and (self._final(m) or rel.holding(key, h.source)):
                 self.repeated(m, h, now)
                 ack = True
                 continue
@@ -759,7 +780,9 @@ class LinkEngine(Core):
                 refused = True
                 continue
             rel.remember(key, now)
-            if outcome != QUEUED:
+            if dup:
+                c.retaken += 1
+            if dup or outcome != QUEUED:
                 ack = True
         if refused:
             # One entry would acknowledge the refused message too: none, and
@@ -769,6 +792,11 @@ class LinkEngine(Core):
                 c.ack_withheld += 1
         elif ack:
             rel.acknowledge(h.source, h.counter, now)
+
+    def _final(self, m):
+        # This node is the destination of m (`_accept` delivers it here).
+        dest = destination(m)
+        return dest == self.address or dest == BROADCAST
 
     def _accept(self, m, h, now):
         """Deliver or forward a received message; return `DELIVERED`, `QUEUED`..."""

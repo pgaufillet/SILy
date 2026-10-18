@@ -3,7 +3,7 @@
 import unittest
 
 from mesh.frame import DOWNWARD, RANK_INFINITE, ROOT, UPWARD, Message
-from mesh.neighbours import NeighbourTable
+from mesh.neighbours import ACK_MIN, NeighbourTable
 from mesh.parents import (
     ATTACHED,
     DETACHED,
@@ -47,10 +47,15 @@ class Net:
         self._counters[address] = counter
         return self.table.heard(address, counter, rank, version, -80, _snr(margin), now)
 
-    def etx(self, address, acked, total):
-        """Give address an ETX of total / acked through acknowledgement samples."""
-        for i in range(total):
-            self.table.acked(address, i < acked)
+    def etx(self, address, acked, total, now=0):
+        """Give address an ETX of total / acked through acknowledgement samples at now.
+
+        At least `ACK_MIN` samples (acked and total scaled): fewer give the
+        d_in estimate (§9).
+        """
+        k = (ACK_MIN + total - 1) // total
+        for i in range(k * total):
+            self.table.acked(address, i < k * acked, now)
 
     def flagged(self):
         return sorted(n.address for n in self.table.entries() if n.parent)
@@ -100,10 +105,11 @@ class Candidates(unittest.TestCase):
         self.net.hear(B, 8, 10, version=1)
         self.assertIsNone(self.cost(B, 10))
 
-    def test_heard_within_two_periods(self):
+    def test_heard_within_the_silence_limit(self):
+        # Silent from 2.5 periods on (strict, §9).
         self.net.hear(B, 8, 100)
-        self.assertEqual(self.cost(B, 100 + 2 * _PERIOD - 1), 16)
-        self.assertIsNone(self.cost(B, 100 + 2 * _PERIOD))
+        self.assertEqual(self.cost(B, 100 + 5 * _PERIOD // 2 - 1), 16)
+        self.assertIsNone(self.cost(B, 100 + 5 * _PERIOD // 2))
 
     def test_eligible_link_only(self):
         self.net.hear(B, 8, 10, margin=20)  # below 3 dB
@@ -166,10 +172,10 @@ class ParentSet(unittest.TestCase):
         p = Parents(net.table)
         p.recompute(0)
         self.assertEqual(p.members(), (A, B, C))
-        # C silent for 2 periods: D takes its place, C loses its flag.
+        # C silent for 2.5 periods: D takes its place, C loses its flag.
         for address, rank in ((A, 4), (B, 6), (D, 10)):
-            net.hear(address, rank, 1500)
-        p.recompute(2000)
+            net.hear(address, rank, 2000)
+        p.recompute(2500)
         self.assertEqual(p.members(), (A, B, D))
         self.assertEqual(net.flagged(), sorted((A, B, D)))
         self.assertFalse(net.table.get(C).parent)
@@ -238,11 +244,11 @@ class SwitchThreshold(unittest.TestCase):
 
     def test_preferred_lost_switches(self):
         self.net.hear(B, 10, 100)
-        self.net.etx(B, 1, 2)  # path cost 26, worse than A
+        self.net.etx(B, 1, 2, 100)  # path cost 26, worse than A
         self.p.recompute(100)
         self.assertEqual(self.p.members(), (A, B))
-        self.net.hear(B, 10, 1900)
-        events = self.p.recompute(2000)  # A silent for 2 periods
+        self.net.hear(B, 10, 2400)
+        events = self.p.recompute(2500)  # A silent for 2.5 periods
         self.assertEqual(self.p.preferred, B)
         # A change of preferred parent advertises at once, even 2 apart.
         self.assertEqual(self.p.rank, 26)
@@ -295,9 +301,12 @@ class BoundedIncrease(unittest.TestCase):
         net.etx(B, 1, 4)  # path cost 47
         p = self.p = Parents(net.table)
         self.first = (p.recompute(0), p.rank, p.lowest, p.members())
-        # The root falls silent: local repair through B, rank 47.
-        net.hear(B, 15, 1500)
-        self.second = (p.recompute(2000), p.rank, p.lowest, p.members())
+        # The root falls silent (2.5 periods): local repair through B, rank
+        # 47. B's failures are renewed so that they do not age out (§9)
+        # before the tests below end.
+        net.hear(B, 15, 2400)
+        net.etx(B, 1, 4, 2400)
+        self.second = (p.recompute(2500), p.rank, p.lowest, p.members())
 
     def test_local_repair_keeps_l(self):
         self.assertEqual(self.first, (PARENT_CHANGED | RANK_CHANGED | ATTACHED, 16, 16, (ROOT, B)))
@@ -307,15 +316,15 @@ class BoundedIncrease(unittest.TestCase):
         self.assertEqual(self.p.bound(), 16 + MAX_RANK_INCREASE)
 
     def test_path_cost_l_plus_56_accepted(self):
-        self.net.hear(D, 40, 3500)
-        self.net.etx(D, 1, 4)  # path cost 72 = L + 56
-        self.p.recompute(4000)
+        self.net.hear(D, 40, 4400)
+        self.net.etx(D, 1, 4, 4400)  # path cost 72 = L + 56
+        self.p.recompute(4900)
         self.assertEqual((self.p.rank, self.p.members()), (72, (D,)))
 
     def test_path_cost_above_l_plus_56_detaches(self):
-        self.net.hear(C, 46, 3500)
-        self.net.etx(C, 1, 4)  # path cost 78 > L + 56
-        events = self.p.recompute(4000)  # B silent
+        self.net.hear(C, 46, 4400)
+        self.net.etx(C, 1, 4, 4400)  # path cost 78 > L + 56
+        events = self.p.recompute(4900)  # B silent
         self.assertEqual(self.p.rank, RANK_INFINITE)
         self.assertEqual(self.p.members(), ())
         self.assertIsNone(self.p.lowest)
@@ -323,17 +332,17 @@ class BoundedIncrease(unittest.TestCase):
         self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
         self.assertEqual(self.net.flagged(), [])
         # Rejoin through a neighbour heard after the poison, at any rank: L restarts.
-        self.net.hear(C, 46, 4100)
-        events = self.p.recompute(4100)
+        self.net.hear(C, 46, 5000)
+        events = self.p.recompute(5000)
         self.assertEqual((self.p.rank, self.p.lowest, self.p.members()), (78, 78, (C,)))
         self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | ATTACHED)
 
     def test_bound_prefers_a_usable_candidate(self):
-        self.net.hear(C, 46, 3500)
-        self.net.etx(C, 1, 4)  # 78: beyond the bound
-        self.net.hear(D, 40, 3500)
-        self.net.etx(D, 1, 4)  # 72
-        self.p.recompute(4000)
+        self.net.hear(C, 46, 4400)
+        self.net.etx(C, 1, 4, 4400)  # 78: beyond the bound
+        self.net.hear(D, 40, 4400)
+        self.net.etx(D, 1, 4, 4400)  # 72
+        self.p.recompute(4900)
         self.assertEqual((self.p.rank, self.p.members()), (72, (D,)))
 
     def test_max_increase_is_a_parameter(self):
@@ -433,7 +442,7 @@ class NextParent(unittest.TestCase):
 
 
 class Detach(unittest.TestCase):
-    def test_hold_then_neighbours_heard_after_poison(self):
+    def test_hold_until_the_solicitation_then_neighbours_heard_after_it(self):
         net = Net()
         net.hear(A, 8, 900)
         net.hear(B, 16, 900)
@@ -444,12 +453,52 @@ class Detach(unittest.TestCase):
         self.assertEqual(net.flagged(), [])
         net.hear(B, 16, 1100)
         self.assertEqual(p.recompute(1499), 0)  # holding
+        self.assertFalse(p.solicited(1499))  # a solicitation within the hold ends nothing
         self.assertEqual(p.rank, RANK_INFINITE)
-        events = p.recompute(1500)
-        # A, not heard since the poison, is no candidate.
-        self.assertEqual((p.members(), p.rank), ((B,), 24))
+        # The hold's time is over: still nothing selected until the
+        # solicitation goes on air (B, heard during the hold, may be a
+        # child that lost the poison).
+        self.assertEqual(p.recompute(1500), 0)
+        self.assertEqual(p.recompute(3000), 0)
+        self.assertEqual((p.rank, p.poisoned_at), (RANK_INFINITE, 1000))
+        self.assertEqual(p.next_parent(A, 3000), HOLD)
+        self.assertTrue(p.solicited(3100))
+        self.assertEqual(p.poisoned_at, 3100)
+        self.assertEqual(p.recompute(3100), 0)  # B heard before the solicitation
+        net.hear(A, 8, 3200)
+        net.hear(B, 16, 3200)
+        events = p.recompute(3200)
+        self.assertEqual((p.members(), p.rank), ((A,), 16))
         self.assertTrue(events & ATTACHED)
         self.assertIsNone(p.poisoned_at)
+        self.assertFalse(p.solicited(3300))  # attached: nothing to end
+
+    def test_solicitation_before_the_selection_ends_the_hold(self):
+        # The solicitation may go on air in the step that ends the hold,
+        # before any selection: it ends the hold all the same.
+        net = Net()
+        net.hear(A, 8, 900)
+        p = Parents(net.table, hold_ms=500)
+        p.recompute(900)
+        p.detach(1000)
+        net.hear(A, 8, 1400)
+        self.assertTrue(p.solicited(1500))
+        self.assertEqual(p.recompute(1500), 0)
+        net.hear(A, 8, 1600)
+        self.assertTrue(p.recompute(1600) & ATTACHED)
+        self.assertEqual(p.preferred, A)
+
+    def test_new_version_ends_the_hold(self):
+        net = Net()
+        net.hear(A, 8, 900)
+        p = Parents(net.table, hold_ms=500)
+        p.recompute(900)
+        p.detach(1000)
+        p.recompute(1600)
+        self.assertTrue(p.soliciting)
+        net.hear(B, 16, 1700, version=1)
+        self.assertTrue(p.on_new_version(1, 1700) & ATTACHED)
+        self.assertEqual((p.preferred, p.soliciting), (B, False))
 
     def test_detach_without_route_has_no_rank_events(self):
         p = Parents(Net().table)
@@ -521,7 +570,7 @@ def _reference(p, now):
     for n in table.entries():
         if n.version != p.version or n.rank >= p.rank or not n.eligible():
             continue
-        if now - n.heard >= 2 * _PERIOD:
+        if now - n.heard >= 5 * _PERIOD // 2:
             continue
         if p.poisoned_at is not None and n.heard <= p.poisoned_at:
             continue
@@ -583,7 +632,7 @@ class _Scenario:
             self.net.hear(address, rank, self.now, version, margin, 1 + self.below(3))
         elif k < 60:
             address = self.addresses[self.below(len(self.addresses))]
-            self.net.table.acked(address, rng.chance(0.7))
+            self.net.table.acked(address, rng.chance(0.7), self.now)
         elif k < 95:
             if self.drops:
                 p.recompute(self.now)
@@ -667,8 +716,8 @@ class Properties(unittest.TestCase):
                     net.hear(address, rank, 0, margin=margin)
                     net.hear(address, rank, 0, margin=margin, gap=gap)
                     if nack:
-                        net.table.acked(address, False)
-                        net.table.acked(address, True)
+                        net.table.acked(address, False, 0)
+                        net.table.acked(address, True, 0)
                 p = Parents(net.table)
                 p.recompute(0)
                 results.append((p.rank, p.members()))

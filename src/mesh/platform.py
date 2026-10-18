@@ -11,6 +11,9 @@ the simulator.
 Uses (§6, §14): the frame counter and class 2 sender sequences go to storage
 (NVS), the replay table and the duty-cycle window to retained memory (RTC
 memory).
+
+Helpers on a random source: `randbelow` (uniform draw), `jittered` (a period
+jittered by ±10 %, §7: presence, topology and root beacon timers).
 """
 
 
@@ -99,3 +102,12 @@ def randbelow(rng, n):
         r = rng.getrandbits(bits)
         if r < n:
             return r
+
+
+JITTER_PERCENT = 10  # periodic timers jittered by +-10 % (MESH_DESIGN §7)
+
+
+def jittered(period, rng):
+    """Return period jittered uniformly by +-10 % from rng (§7 periodic timers)."""
+    spread = period * JITTER_PERCENT // 100
+    return period - spread + randbelow(rng, 2 * spread + 1)

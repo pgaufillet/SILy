@@ -315,7 +315,7 @@ class Boot(_Case):
         b.imin = imin
         t, h = self.assertAdvertWithin(b, start, version=3, rank=24)
         self.assertEqual(b.port9(t)[0][2], bytes(encode_info(info)))
-        b.advance(start + 30000)  # P still a parent (2 presence periods: 40 s)
+        b.advance(start + 30000)  # P still a parent (2.5 presence periods: 50 s)
         self.assertEqual(len(b.solicitations(start)), 0)
 
     def test_no_parent_before_adoption(self):
@@ -572,9 +572,9 @@ class Resets(_Case):
             b.rx(self.q.frame(20, 3))
             if b.engine.rank != 24:
                 break
-        # Switched to Q at P's silence deadline (2 presence periods).
+        # Switched to Q at P's silence deadline (2.5 presence periods).
         self.assertEqual((b.dodag.parents.preferred, b.engine.rank), (Q, 28))
-        start = last_p + 2 * PERIOD
+        start = last_p + 5 * PERIOD // 2
         self.assertEqual(b.dodag.counters.poisons, 0)
         t, h = self.assertAdvertWithin(b, start, rank=28)
 
@@ -582,7 +582,7 @@ class Resets(_Case):
         b = self.attached(3)
         b.steady([(self.p, 16, 3)])
         last_p = b.now
-        detach = last_p + 2 * PERIOD
+        detach = last_p + 5 * PERIOD // 2  # silence limit (§9)
         b.advance(detach + 100)
         d = b.dodag
         self.assertEqual((d.counters.poisons, b.engine.rank), (1, RANK_INFINITE))
@@ -593,18 +593,47 @@ class Resets(_Case):
         self.assertEqual(len(sent), 1)
         self.assertTrue(sent[0][0] - detach < DESYNC_SLOTS * b.engine.slot_ms + 100)
         self.assertEqual(sent[0][1].rank, RANK_INFINITE)
-        # Q heard during the hold: no selection before 2 Imin.
+        # Q heard during the hold: no selection before 2 Imin, nor at its
+        # end (Q may be a child that lost the poison): a solicitation first.
         b.advance(detach + b.imin)
         b.rx(self.q.frame(20, 3))
         self.assertEqual(b.engine.rank, RANK_INFINITE)
         b.advance(detach + 2 * b.imin - 1)
         self.assertEqual(b.engine.rank, RANK_INFINITE)
-        b.advance(detach + 2 * b.imin)
-        # Rejoined through Q, heard after the poison, at once: no solicitation.
+        late = DESYNC_SLOTS * b.engine.slot_ms + 100
+        b.advance(detach + 2 * b.imin + late)
+        sol = b.solicitations(detach)
+        self.assertEqual(len(sol), 1)
+        self.assertEqual((d.parents.preferred, b.engine.rank), (None, RANK_INFINITE))
+        self.assertEqual(d.parents.poisoned_at, sol[0][0])
+        # Rejoined through Q, heard after the solicitation.
+        b.rx(self.q.frame(20, 3))
         self.assertEqual((d.parents.preferred, b.engine.rank), (Q, 28))
-        self.assertEqual(b.solicitations(detach), [])
         # First parent after the detach: Trickle reset.
-        self.assertAdvertWithin(b, detach + 2 * b.imin, rank=28)
+        self.assertAdvertWithin(b, b.now, rank=28)
+
+    def test_detached_until_the_solicitation_goes_on_air(self):
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        detach = b.now + 5 * PERIOD // 2  # silence limit (§9)
+        b.advance(detach + DESYNC_SLOTS * b.engine.slot_ms + 100)
+        self.assertEqual(len(b.adverts(detach)), 1)  # the poison
+        # The duty-cycle window is spent: the solicitation waits.
+        dc = b.engine.dutycycle
+        dc.start(b.now, dc.budget_ms)
+        dc.done(b.now, dc.budget_ms)
+        b.advance(detach + 2 * b.imin + 2 * PERIOD)
+        b.rx(self.q.frame(20, 3))
+        self.assertEqual(b.solicitations(detach), [])
+        self.assertEqual((b.dodag.parents.preferred, b.engine.rank), (None, RANK_INFINITE))
+        # The window releases airtime: the solicitation leaves, then Q's
+        # next frame is a candidate.
+        b.advance(b.now + 3600000 + PERIOD)
+        sol = b.solicitations(detach)
+        self.assertTrue(sol)
+        self.assertEqual((b.engine.rank, b.dodag.parents.poisoned_at), (RANK_INFINITE, sol[0][0]))
+        b.rx(self.q.frame(20, 3))
+        self.assertEqual((b.dodag.parents.preferred, b.engine.rank), (Q, 28))
 
     def test_parent_poison_detaches_its_child_at_once(self):
         b = self.attached(3)
@@ -620,7 +649,7 @@ class Resets(_Case):
     def test_poison_hold_then_solicit(self):
         b = self.attached(3)
         b.steady([(self.p, 16, 3)])
-        detach = b.now + 2 * PERIOD
+        detach = b.now + 5 * PERIOD // 2  # silence limit (§9)
         b.advance(detach + 2 * b.imin + 300)
         sol = b.solicitations(detach)
         self.assertEqual(len(sol), 1)
@@ -660,6 +689,45 @@ class Root(_Case):
         self.assertTrue(4 <= len(sent) <= 6, len(sent))
         self.assertEqual(b.port9(start)[0][2], bytes(encode_info(INFO)))
         self.assertEqual(sent[0][1].rank, 0)
+
+    def test_beacon_not_postponed_by_trickle_resets(self):
+        # A solicitation every second keeps the root's Trickle timer at Imin,
+        # every advertisement suppressed by 2 port 9 messages heard: the
+        # beacon still leaves every presence period +-10 % (§7, §16).
+        b = self.root()
+        b.steady([(self.p, 8, 5), (self.q, 8, 5)])
+        start = b.now
+        for _ in range(5 * PERIOD // 1000):
+            b.advance(b.now + 1000)
+            b.rx(self.s.solicitation(5))
+            b.rx(self.p.info(8, 5))
+            b.rx(self.q.info(8, 5))
+        self.assertEqual(b.dodag.trickle.interval, b.imin)
+        times = [start] + [t for t, _ in b.adverts(start)]
+        gaps = [u - t for t, u in zip(times, times[1:])]
+        self.assertTrue(4 <= len(gaps) <= 6, gaps)
+        self.assertTrue(max(gaps) <= PERIOD * 11 // 10 + 200, gaps)
+        self.assertTrue(min(gaps[1:]) >= PERIOD * 9 // 10, gaps)
+        self.assertTrue(b.dodag.trickle.suppressed >= 5 * PERIOD // b.imin, gaps)
+
+    def test_urgent_advertisement_raises_a_queued_beacon(self):
+        # A Trickle advertisement (priority 1) due while the beacon
+        # (priority 2) still waits in the queue merges with it at priority 1:
+        # with 90 % of the budget used, priority 2 is refused (and dropped,
+        # §6), priority 1 still goes.
+        b = self.root()
+        b.steady([(self.p, 8, 5)])
+        start = b.now
+        dc = b.engine.dutycycle
+        dc.start(start, dc.budget_ms * 9 // 10)
+        dc.done(start, dc.budget_ms * 9 // 10)
+        adverts = b.dodag.counters.adverts
+        b.dodag._advertise(False)  # the beacon, not yet on air
+        b.dodag._advertise(True)  # a reset's advertisement in the same step
+        b.wake()
+        b.advance(start + 500)
+        self.assertEqual(len(b.adverts(start)), 1)
+        self.assertEqual(b.dodag.counters.adverts, adverts + 1)
 
     def test_boot_advertises(self):
         b = self.root()

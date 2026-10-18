@@ -481,6 +481,39 @@ class Redirect(unittest.TestCase):
         )
         self.assertEqual(q.redirect(lambda m: True, _OTHER), 0)
 
+    def test_select_waiting_entries_on_demand(self):
+        q = TxQueue(8)
+        waiting = _up(0x32, cls=1)
+        q.offer(waiting, _PARENT)
+        s_wait = q.slot
+        _send(q)
+        idle = _up(0x30, cls=1)
+        q.offer(idle, _PARENT)
+        s_idle = q.slot
+        q.offer(_up(0x31), _PARENT)
+        reliable = lambda m: m.cls == 1  # noqa: E731
+        self.assertEqual(q.select(reliable), [(s_idle, idle)])
+        both = sorted([(s_wait, waiting), (s_idle, idle)])
+        self.assertEqual(sorted(q.select(reliable, True)), both)
+
+
+class Promote(unittest.TestCase):
+    def test_raised_priority_goes_first_and_keeps_its_age(self):
+        dc = DutyCycle(_BUDGET)
+        q = TxQueue(8)
+        beacon = Message(frame.LINK_LOCAL, 0, ports.DODAG_INFO, b"b" * 8)
+        q.offer(beacon, frame.BROADCAST, local=True)  # priority 2
+        slot = q.slot
+        urgent = _up(0x30, port=_APP_HIGH)  # priority 1, another next hop
+        q.offer(urgent, _PARENT)
+        self.assertEqual(q.pack(0, dc, frame.MAX_FRAME, _toa).messages, [urgent])
+        self.assertTrue(q.promote(slot, beacon, 1))
+        self.assertEqual(q.pack(0, dc, frame.MAX_FRAME, _toa).messages, [beacon])
+        # Never lowered; a stale handle is ignored.
+        self.assertTrue(q.promote(slot, beacon, 3))
+        self.assertEqual(_send(q), [beacon])
+        self.assertFalse(q.promote(slot, beacon, 1))
+
 
 class Dropping(unittest.TestCase):
     def test_ready_excludes_waiting_messages(self):

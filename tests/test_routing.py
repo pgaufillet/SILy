@@ -112,36 +112,78 @@ class DataPathValidation(unittest.TestCase):
         self.assertEqual(line.relay.routing.dodag.counters.rank_errors, 0)
         self.assertEqual(line.root.inbox_from(APP), [(N, b"old")])
 
-    def test_duplicate_with_rank_error_is_a_loop(self):
+    def test_duplicate_held_with_rank_error_is_a_loop(self):
         line = Line(5)
-        msg = Message(UPWARD, 1, APP, b"m", origin=X, seq=40)
-        line.send_from_node(msg)
-        line.run(3000)
-        self.assertEqual(line.root.inbox_from(APP), [(X, b"m")])
         relay = line.relay
+        line.net.medium.cut(R, ROOT)  # R keeps its copy: no acknowledgement
+        line.send_from_node(Message(UPWARD, 1, APP, b"m", origin=X, seq=40))
+        line.run(1000)
+        self.assertEqual(relay.engine.reliable.pending(), 1)
         # The same message again from a consistent sender: a retransmission.
         line.send_from_node(Message(UPWARD, 1, APP, b"m", origin=X, seq=40))
-        line.run(3000)
+        line.run(500)
         self.assertEqual(relay.engine.counters.duplicates, 1)
         self.assertEqual(relay.routing.counters.loops, 0)
         # Again from a sender whose rank is not higher: it came back, a loop.
         line.send_from_node(Message(UPWARD, 1, APP, b"m", origin=X, seq=40), rank=8)
-        line.run(3000)
+        line.run(500)
         self.assertEqual(relay.engine.counters.duplicates, 2)
         self.assertEqual(relay.routing.counters.loops, 1)
         self.assertEqual(relay.routing.dodag.counters.rank_errors, 1)
-        # Dropped (acknowledged): the root got it once, N holds nothing.
+        # Dropped (acknowledged): N holds nothing, R one copy; the root gets
+        # it once the link is back.
+        self.assertEqual((len(line.node.engine.queue), relay.engine.counters.retaken), (0, 0))
+        line.net.medium.restore(R, ROOT)
+        line.run(10000)
         self.assertEqual(line.root.inbox_from(APP), [(X, b"m")])
-        self.assertEqual(len(line.node.engine.queue), 0)
 
-    def test_own_message_back_is_a_loop(self):
+    def test_duplicate_handed_over_is_taken_again(self):
+        # Custody (§12): R no longer holds a message it forwarded; a
+        # duplicate (a retransmission after a lost acknowledgement, or a
+        # loop) is forwarded again and acknowledged; the root filters it.
+        line = Line(11)
+        msg = Message(UPWARD, 1, APP, b"m", origin=X, seq=41)
+        line.send_from_node(msg)
+        line.run(3000)
+        self.assertEqual(line.root.inbox_from(APP), [(X, b"m")])
+        relay = line.relay
+        line.send_from_node(Message(UPWARD, 1, APP, b"m", origin=X, seq=41))
+        line.run(3000)
+        c = relay.engine.counters
+        self.assertEqual((c.duplicates, c.retaken), (0, 1))
+        self.assertEqual(line.node.engine.counters.acks_explicit, 1)
+        self.assertEqual((len(line.node.engine.queue), line.node.engine.counters.retries), (0, 0))
+        self.assertEqual(line.root.inbox_from(APP), [(X, b"m")])
+        self.assertEqual(line.root.engine.counters.duplicates, 1)
+
+    def test_own_message_back_while_held_is_dropped(self):
+        line = Line(6)
+        relay = line.relay
+        line.net.medium.cut(R, ROOT)
+        seq = relay.submit(APP, 1, ROOT, b"mine")
+        line.run(1000)
+        self.assertEqual(relay.engine.reliable.pending(), 1)
+        line.send_from_node(Message(UPWARD, 1, APP, b"mine", origin=R, seq=seq))
+        line.run(500)
+        self.assertEqual(relay.routing.counters.loops, 1)
+        rel = relay.engine.reliable
+        self.assertEqual(rel.pending() + rel.held(), 1)  # not taken again
+        # Taken: acknowledged, so its sender stops; R's own copy goes on.
+        self.assertEqual(len(line.node.engine.queue), 0)
+        self.assertEqual(line.node.engine.counters.retries, 0)
+        line.net.medium.restore(R, ROOT)
+        line.run(10000)
+        self.assertEqual(line.root.inbox_from(APP), [(R, b"mine")])
+
+    def test_own_message_back_after_handed_over_is_taken_again(self):
+        # R holds no copy of its message (sequence 3): back from a loop, it
+        # is forwarded again (custody, §12), counted as a loop.
         line = Line(6)
         line.send_from_node(Message(UPWARD, 1, APP, b"mine", origin=R, seq=3))
         line.run(5000)
         r = line.relay.routing
         self.assertEqual(r.counters.loops, 1)
-        self.assertEqual(line.root.inbox_from(APP), [])
-        # Taken: acknowledged, so its sender stops.
+        self.assertEqual(line.root.inbox_from(APP), [(R, b"mine")])
         self.assertEqual(len(line.node.engine.queue), 0)
         self.assertEqual(line.node.engine.counters.retries, 0)
 
@@ -217,3 +259,20 @@ class LocalRepair(unittest.TestCase):
         self.assertEqual(d.counters.adverts, adverts + 1)
         self.assertEqual(n.engine.reliable.held(), 1)
         self.assertTrue(reroutes[0] - start < 3000)
+
+    def test_detach_holds_waiting_copies(self):
+        # N's message waits for R's acknowledgement when R poisons: N
+        # detaches and holds it, instead of retrying it towards a parent of
+        # rank 255 (§9 detach, §12 holding during repair).
+        line = Line(12)
+        n = line.node
+        line.net.medium.cut(N, R)  # R never gets it
+        n.submit(APP, 1, ROOT, b"w")
+        line.run(300)
+        rel = n.engine.reliable
+        self.assertEqual((rel.pending(), rel.held()), (1, 0))
+        line.relay.routing.parents.detach(line.net.now)
+        line.relay.node.wake()
+        line.run(rel.timeout_ms(R) + 1000)  # its timeout passed, within the hold
+        self.assertEqual(n.engine.rank, RANK_INFINITE)
+        self.assertEqual((rel.pending(), rel.held(), n.engine.counters.retries), (0, 1, 0))

@@ -17,6 +17,7 @@ from mesh.reliable import (
     ACK_BATCH,
     ATTEMPTS,
     ERROR_SIZE,
+    HOLD,
     DuplicateCache,
     decode_acks,
     decode_error,
@@ -221,6 +222,140 @@ class Timeouts(unittest.TestCase):
         frames, now = _run(e, end, end + e.reliable.timeout_ms(R))
         self.assertEqual(len(frames), 1)  # the second attempt
         self.assertEqual(e.counters.retries, 1)
+
+
+class LinkSamples(unittest.TestCase):
+    """§9: one p_ack sample per frame, whatever the messages it carries."""
+
+    def _frame_to_r(self, count=3):
+        # N, with R in its table, sends count class 1 messages in one frame to R.
+        n = _engine(N, R)
+        r = _engine(R, ROOT, seed=2)
+        r.reliable.acknowledge(X, 0, 0)  # any frame of R: R in N's table
+        (hello,), _ = _run(r, 0)
+        _rx(n, 0, hello)
+        for i in range(count):
+            n.submit(20 + i, 1, ROOT, b"m%d" % i)
+        (f,), now = _run(n, 100)
+        self.assertEqual(len(_messages(_KEY, f)[1]), count)
+        return n, r, f, now
+
+    def test_one_sample_per_explicitly_acknowledged_frame(self):
+        n, r, f, now = self._frame_to_r()
+        r.reliable.acknowledge(N, frame.decode_header(f, len(f)).counter, now)
+        (ack,), now = _run(r, now)
+        _rx(n, now, ack)
+        self.assertEqual((n.counters.acks_explicit, len(n.queue)), (3, 0))
+        entry = n.neighbours.get(R)
+        self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 1))
+
+    def test_one_sample_per_passively_acknowledged_frame(self):
+        n, r, f, now = self._frame_to_r()
+        actions = _rx(r, now, f)
+        # The 3 forwarded in one frame, after the relay's random delay (§7).
+        (fwd,), now = _run(r, now, now + 2 * r.slot_ms, actions)
+        self.assertEqual(len(_messages(_KEY, fwd)[1]), 3)
+        _rx(n, now, fwd)  # overheard (to the root)
+        self.assertEqual((n.counters.acks_passive, len(n.queue)), (3, 0))
+        entry = n.neighbours.get(R)
+        self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 1))
+
+    def test_one_failure_per_timed_out_frame(self):
+        n, r, f, end = self._frame_to_r()
+        timeout = end + n.reliable.timeout_ms(R)
+        frames, now = _run(n, end, timeout)
+        self.assertEqual(len(frames), 1)  # the second attempt, the 3 together
+        self.assertEqual(n.counters.retries, 3)
+        entry = n.neighbours.get(R)
+        self.assertEqual((entry.ack_count, entry.acknowledged(), entry.fail_at), (1, 0, timeout))
+
+    def test_one_lost_acknowledgement_keeps_the_d_in_estimate(self):
+        # Fewer than 4 samples: ETX from d_in (R heard at 100 %), not 2 (§9).
+        n, r, f, end = self._frame_to_r(1)
+        _run(n, end, end + n.reliable.timeout_ms(R))
+        entry = n.neighbours.get(R)
+        self.assertEqual((entry.ack_count, entry.acknowledged(), entry.d_in()), (1, 0, 100))
+        self.assertEqual(entry.etx(), 128)
+
+
+def _copies(engine):
+    """Class 1/2 entries of the engine's queue (queued, waiting or held)."""
+    return len(engine.queue.select(lambda m: m.cls, True))
+
+
+class Custody(unittest.TestCase):
+    """§12 custody: a node other than the destination drops a duplicate only
+    while it holds a copy (`Reliable.holding`); one it handed over is taken
+    again and acknowledged; the destination always filters."""
+
+    def test_holding_queued_waiting_held(self):
+        n = _engine(N, R, reroute=lambda msg, hop: HOLD)
+        seq = n.submit(20, 1, ROOT, b"x")
+        key = (N, ROOT, 20, seq)
+        rel = n.reliable
+        self.assertTrue(rel.holding(key))  # queued
+        self.assertFalse(rel.holding((N, ROOT, 20, seq + 1)))
+        frames, now = _run(n, 0)
+        self.assertEqual((len(frames), rel.pending()), (1, 1))
+        self.assertTrue(rel.holding(key))  # waiting
+        self.assertTrue(rel.holding(key, X))
+        # Back from R itself, whose acknowledgement it waits for: R has it.
+        self.assertFalse(rel.holding(key, R))
+        frames, now = _run(n, now, now + ATTEMPTS * rel.timeout_ms(R) + 1000)
+        self.assertEqual((rel.pending(), rel.held()), (0, 1))
+        self.assertTrue(rel.holding(key, R))  # held
+        ((slot, msg),) = n.queue.select(lambda m: True, True)
+        n.queue.remove(slot, msg)  # failed, or acknowledged
+        self.assertFalse(rel.holding(key))
+
+    def _forwarded(self):
+        # N's class 1 message forwarded by R and acknowledged by the root.
+        n = _engine(N, R)
+        r = _engine(R, ROOT, seed=2)
+        root = _engine(ROOT, None, seed=3)
+        n.submit(20, 1, ROOT, b"x")
+        (f,), now = _run(n, 0)
+        actions = _rx(r, now, f)
+        self.assertTrue(r.reliable.holding(identity(_messages(_KEY, f)[1][0], N, R)))
+        (fwd,), now = _run(r, now, now + 2 * r.slot_ms, actions)
+        _rx(root, now, fwd)
+        (ack,), now = _run(root, now, now + root.reliable.batch_ms)
+        _rx(r, now, ack)
+        self.assertEqual(len(r.queue), 0)
+        return n, r, root, f, now
+
+    def test_duplicate_held_is_dropped(self):
+        n = _engine(N, R)
+        r = _engine(R, ROOT, seed=2)
+        n.submit(20, 1, ROOT, b"x")
+        (f,), now = _run(n, 0)
+        _rx(r, now, f)  # queued at R, not yet on air
+        (again,), now = _run(n, now, now + n.reliable.timeout_ms(R))  # no acknowledgement
+        actions = _rx(r, now, again)
+        self.assertEqual((r.counters.duplicates, r.counters.retaken, _copies(r)), (1, 0, 1))
+        frames, _ = _run(r, now, None, actions)
+        ports_sent = [m.port for g in frames for m in _messages(_KEY, g)[1]]
+        self.assertEqual(ports_sent.count(20), 1)  # forwarded once
+        self.assertTrue(ports.ACK in ports_sent, ports_sent)  # acknowledged
+
+    def test_duplicate_handed_over_is_taken_again_and_acknowledged(self):
+        n, r, root, f, now = self._forwarded()
+        # N missed R's forward (its passive acknowledgement): it retries.
+        (again,), now = _run(n, now, now + n.reliable.timeout_ms(R))
+        actions = _rx(r, now, again)
+        c = r.counters
+        self.assertEqual((c.duplicates, c.retaken, _copies(r)), (0, 1, 1))
+        frames, now = _run(r, now, now + 2 * r.slot_ms, actions)
+        ports_sent = sorted(m.port for g in frames for m in _messages(_KEY, g)[1])
+        self.assertEqual(ports_sent, [ports.ACK, 20])  # explicit acknowledgement, forward
+        ack = [g for g in frames if _messages(_KEY, g)[1][0].port == ports.ACK][0]
+        _rx(n, now, ack)
+        self.assertEqual(len(n.queue), 0)
+        # The destination filters it although it holds no copy.
+        fwd = [g for g in frames if _messages(_KEY, g)[1][0].port == 20][0]
+        delivered = root.counters.delivered
+        _rx(root, now, fwd)
+        self.assertEqual((root.counters.duplicates, root.counters.delivered), (1, delivered))
 
 
 class Rules(unittest.TestCase):

@@ -168,8 +168,17 @@ class Jitter(unittest.TestCase):
 class Line:
     """root — R — N with routing; reports received by the root in ``reports``."""
 
-    def __init__(self, seed, info=INFO, extension=None, tails=None, node_info=None):
-        net = Network(seed, _KEY)
+    def __init__(
+        self,
+        seed,
+        info=INFO,
+        extension=None,
+        tails=None,
+        node_info=None,
+        budget_ms=None,
+        window_ms=None,
+    ):
+        net = Network(seed, _KEY, budget_ms=budget_ms, window_ms=window_ms)
         self.net = net
         self.reports = []  # (time, port, origin, report)
         self.ext_calls = 0
@@ -242,19 +251,24 @@ class Presences(unittest.TestCase):
         self.assertEqual(line.root.routing.counters.malformed, 0)
 
     def test_periodic_with_jitter_and_first_report_flag(self):
-        line = Line(4)
+        generated = []
+        line = Line(4, extension=lambda: generated.append(line.net.now) or b"")
         line.formed()
         line.net.run(line.net.now + 12 * PERIOD)
         times = [t for t, r in line.of(PRESENCE, N)]
         flags = [r.flags for t, r in line.of(PRESENCE, N)]
         self.assertEqual(flags[0], FIRST_REPORT)
         self.assertEqual(set(flags[1:]), set((0,)))
-        gaps = [b - a for a, b in zip(times, times[1:])]
+        gaps = [b - a for a, b in zip(generated, generated[1:])]
         self.assertTrue(len(gaps) >= 12, gaps)
-        # +-10 % around the period (plus channel access of two hops).
-        self.assertTrue(min(gaps) >= 9000 - 300 and max(gaps) <= 11000 + 300, gaps)
+        # +-10 % around the period.
+        self.assertTrue(min(gaps) >= 9000 and max(gaps) <= 11000, gaps)
         self.assertTrue(max(gaps) - min(gaps) > 300, gaps)  # jittered, not fixed
-        self.assertEqual(line.node.routing.reporter.counters.presence, len(times))
+        self.assertEqual(line.node.routing.reporter.counters.presence, len(generated))
+        # Every one reaches the root, but those lost to a collision at R (the
+        # root and N are hidden from each other, §8).
+        lost = len(generated) - len(times)
+        self.assertTrue(0 <= lost <= line.net.medium.stats(R).rx_collision, (lost, times))
 
     def test_flags_since_last_report(self):
         line = Line(5)
@@ -269,7 +283,13 @@ class Presences(unittest.TestCase):
         f = rep.flags(now)
         self.assertEqual(f, QUEUE_OVERFLOW | ADDRESS_CONFLICT | AUTH_FAILURES | RANK_ERRORS)
         self.assertEqual((e.queue.overflow, e.address_conflict), (False, False))
-        # Nothing new since: no flag (the last presence has left the queue).
+        # Kept until a presence carrying them goes on air.
+        self.assertEqual(rep.flags(now), f)
+        rep._send_presence(now)
+        line.node.node.wake()
+        line.net.run(now + 1000)
+        now = line.net.now
+        # Nothing new since: no flag.
         self.assertEqual(rep.flags(now), 0)
         # Current state flags: next key loaded, duty-cycle use above 80 %.
         e.security.keys.set(1, bytes(16))
@@ -280,6 +300,41 @@ class Presences(unittest.TestCase):
         self.assertEqual(rep.flags(now), NEXT_KEY | DUTY_HIGH)
         e.security.keys.set(1, None)
         self.assertEqual(rep.flags(now), DUTY_HIGH)
+
+    def test_duty_cycle_flag_survives_refused_presence(self):
+        # Bit 2 (§11): duty-cycle use above 80 % since the last report. Above
+        # 80 %, presence (priority 2) is refused: the flag goes with the next
+        # presence on air once use has fallen, and only with that one.
+        line = Line(14, budget_ms=4000, window_ms=60000)
+        line.formed()
+        e = line.node.engine
+        dc = e.dutycycle
+        start = line.net.now
+        size = e.toa_ms(frame.OVERHEAD + 2 + 2 + 200)  # one 200 B message per frame
+        count = (dc.budget_ms * 85 // 100 - dc.used(start)) // size + 1
+        for _ in range(count):
+            self.assertTrue(line.node.submit(20, 0, ROOT, bytes(200)) >= 0)  # priority 1
+        high = []
+
+        def watch():
+            if dc.used(line.net.now) * 100 > 80 * dc.budget_ms:
+                high.append(line.net.now)
+            line.net.at(line.net.now + 100, watch)
+
+        line.net.at(start, watch)
+        line.net.run(start + 2 * 60000)
+        self.assertTrue(high and high[-1] - high[0] > 2 * PERIOD, high[-1:])
+        self.assertTrue(e.counters.duty_dropped >= 1)  # presence refused meanwhile
+        own = []
+        for t, _, msgs, _ in line.frames(N):
+            for m in msgs:
+                if m.port == PRESENCE and t > start:
+                    own.append((t, decode_presence(m.payload, parent=False).flags))
+        while_high = [t for t, f in own if high[0] <= t <= high[-1]]
+        self.assertEqual(while_high, [])
+        after = [f for t, f in own if t > high[-1]]
+        self.assertTrue(len(after) >= 2, own)
+        self.assertEqual((after[0] & DUTY_HIGH, after[1] & DUTY_HIGH), (DUTY_HIGH, 0))
 
     def test_flags_reach_the_root(self):
         line = Line(6)
@@ -351,6 +406,52 @@ class Presences(unittest.TestCase):
         line.net.run(healed + 2 * PERIOD)
         self.assertTrue(line.node.routing.attached)
         self.assertTrue(line.of(PRESENCE, N)[-1][0] > healed)
+
+
+class PresenceAcknowledgement(unittest.TestCase):
+    """§9: presence reports feed the parent's acknowledgement window, matched
+    by origin when the parent forwards them; not when the parent is the root."""
+
+    def test_forward_overheard_one_sample_per_presence(self):
+        line = Line(15)
+        line.formed()
+        line.net.run(line.net.now + 6 * PERIOD)
+        rep = line.node.routing.reporter.counters
+        entry = line.node.engine.neighbours.get(R)
+        self.assertTrue(rep.presence_acked >= 6, rep.presence_acked)
+        self.assertEqual(entry.ack_count, rep.presence_acked + rep.presence_unacked)
+        self.assertEqual(entry.acknowledged(), rep.presence_acked)
+        # R's parent is the root: no sample of its presence.
+        r = line.relay
+        self.assertEqual(r.routing.reporter.counters.presence_acked, 0)
+        self.assertEqual(r.routing.reporter.counters.presence_unacked, 0)
+        self.assertEqual(r.engine.neighbours.get(ROOT).ack_count, 0)
+
+    def test_parent_that_does_not_hear_the_node_is_left(self):
+        # N hears R at 100 % but R no longer hears N, without class 1
+        # traffic: the lost presence forwards make R's ETX exceed 4 (MP12),
+        # and N leaves it (its only parent: it detaches).
+        line = Line(16)
+        line.formed()
+        entry = line.node.engine.neighbours.get(R)
+        samples = entry.ack_count
+        self.assertTrue(samples >= 1 and entry.acknowledged() == samples)
+        cut = line.net.now
+        line.net.medium.cut(N, R)  # N -> R only
+        log = []
+
+        def watch():
+            if not log and not line.node.routing.attached:
+                log.append(line.net.now)
+            line.net.at(line.net.now + 50, watch)
+
+        line.net.at(cut, watch)
+        # 3 failures per success leave ETX 4 (eligible); one more is needed,
+        # one per presence period (+10 % jitter).
+        line.net.run(cut + (3 * samples + 2) * 11 * PERIOD // 10 + 2000)
+        self.assertTrue(log, (entry.ack_count, entry.acknowledged()))
+        self.assertTrue(line.node.routing.reporter.counters.presence_unacked >= 3 * samples + 1)
+        self.assertEqual(entry.d_in(), 100)
 
 
 class Topologies(unittest.TestCase):

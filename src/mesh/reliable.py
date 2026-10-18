@@ -20,9 +20,13 @@ next hop acknowledges it:
 Timeout (§9, §12): from the end of the frame, the time on air of a frame of
 the frame limit (255 B) + 6 slots; towards the root, its batching delay
 (20 times the time on air of an 8-entry acknowledgement frame: at most 5 %
-of the channel, §16) + that frame + 6 slots. Each acknowledgement feeds the
-next hop's p_ack (`NeighbourTable.acked`, true), each timeout too (false).
-After `ATTEMPTS` (3) transmissions to one next hop, the injected
+of the channel, §16) + that frame + 6 slots. The next hop's p_ack
+(`NeighbourTable.acked`, §9) gets **one sample per frame** (next hop, frame
+counter low 16 bits), whatever the number of class 1/2 messages the frame
+carries: a success at the first acknowledgement of one of them (one
+explicit entry acknowledges them all; a passive one proves the frame was
+received), a failure when the last of them still pending times out without
+any acknowledged. After `ATTEMPTS` (3) transmissions to one next hop, the injected
 ``engine.reroute(msg, hop)`` ("next hop after failure"; routing's parent
 set later) returns another next hop (fresh attempts), `HOLD` (no route for
 now: held) or None (no alternative: the message fails, reason 1).
@@ -42,17 +46,29 @@ never generated, only counted (``errors_dropped``).
 **Receiver** (`mesh.link.LinkEngine._receive`): every class 1/2 message
 received is looked up in the duplicate cache (`DUPLICATES` = 128 entries,
 oldest evicted, an entry ignored after `DUPLICATE_PERIODS` = 2 presence
-periods). The frame gets one explicit acknowledgement entry when it carries
-a duplicate (not forwarded again), a message delivered here or a message
-held; the root batches up to `ACK_BATCH` (8) entries per frame for at most
-its batching delay, any other node sends at once. A forwarded message
+periods). **Custody** (§12): a duplicate is dropped at its destination, and
+elsewhere only while the node holds a copy (`holding`: queued, waiting or
+held); a node that has handed it over takes it again as a new arrival
+(it came back through a loop, or its sender missed the acknowledgement:
+the destination filters the extra copy). The frame gets one explicit
+acknowledgement entry when it carries a duplicate (dropped or taken
+again), a message delivered here or a message held; the root batches up
+to `ACK_BATCH` (8) entries per frame for at most its batching delay, any
+other node sends at once. A forwarded message
 queued normally is acknowledged passively when the relay forwards it; if it
 has not gone on air within half a timeout (queue, duty cycle, busy channel),
 the relay acknowledges it explicitly (`owe`). A frame with a class 1/2
 message the relay refused (queue full or quota) gets no explicit
 acknowledgement at all, since the entry would cover the refused message too.
 
-Readings where §11/§12 are silent: the identity of a link-local message
+Readings where §11/§12 are silent: a copy waiting for the acknowledgement
+of the node it comes back from is not held (that node took it; its
+acknowledgement, not atomic with the reception, may still release the
+copy: with both the copy and the returned message dropped, none would
+remain); the sample of a frame whose messages
+end differently (acknowledged if any was: the frame was received; a
+message removed from the queue while pending, by a redirect or a hold,
+leaves the frame to its other messages); the identity of a link-local message
 (`identity`), no explicit acknowledgement for a frame with a refused
 message (above), errors of a relay without route held like any class 1
 message (`Reliable.fail`), a held message's holding counted from the first
@@ -96,6 +112,10 @@ NO_HOP = BROADCAST  # next hop field of an error without next hop (reason 3)
 _IDLE = 0  # queued, not waiting for an acknowledgement
 _PENDING = 1  # sent, waiting for an acknowledgement
 _HELD = 2  # held during repair
+
+
+def _classed(msg):
+    return msg.cls != 0
 
 
 def encode_acks(entries):
@@ -261,6 +281,7 @@ class Reliable:
         self._state = bytearray(n)
         self._hop = [0] * n  # next hop of the last transmission
         self._ctr = [0] * n  # its frame counter, low 16 bits
+        self._sampled = bytearray(n)  # that frame already has its p_ack sample
         self._due = [None] * n  # acknowledgement timeout
         self._key = [None] * n  # identity, while pending
         self._since = [None] * n  # first time held
@@ -307,6 +328,26 @@ class Reliable:
     def remember(self, key, now):
         """Record a received identity (delivered, queued or held)."""
         self.duplicates.add(key, now)
+
+    def holding(self, key, source=None):
+        """Return True if this node holds a copy of identity key (queued, waiting or held).
+
+        Custody (§12): a node other than the destination drops a duplicate
+        only while it holds it. source: link source of the duplicate; a copy
+        waiting for source's acknowledgement does not count, since source has
+        taken it (its acknowledgement may still be on its way) and gives it
+        back. Own link-local messages are never matched (a received
+        link-local identity names its link source, never this node).
+        """
+        own = self.engine.address
+        for slot, msg in self.queue.select(_classed, True):
+            if identity(msg, own, BROADCAST) != key:
+                continue
+            if self._msg[slot] is msg and self._state[slot] == _PENDING:
+                if self._hop[slot] == source:
+                    continue
+            return True
+        return False
 
     # --- Slots -------------------------------------------------------------------
 
@@ -358,6 +399,7 @@ class Reliable:
             self._state[slot] = _PENDING
             self._hop[slot] = dest
             self._ctr[slot] = c16
+            self._sampled[slot] = 0
             self._due[slot] = due
             self._key[slot] = key
             self._keys[key] = slot
@@ -394,6 +436,19 @@ class Reliable:
                 ):
                     self._acknowledged(slot, False)
 
+    def _same_frame(self, slot):
+        # The other pending slots sent in the frame of slot, not yet sampled.
+        hop = self._hop[slot]
+        ctr = self._ctr[slot]
+        state = self._state
+        sampled = self._sampled
+        out = []
+        for i in range(self.queue.size):
+            if i != slot and state[i] == _PENDING and not sampled[i]:
+                if self._hop[i] == hop and self._ctr[i] == ctr:
+                    out.append(i)
+        return out
+
     def _acknowledged(self, slot, passive):
         msg = self._msg[slot]
         hop = self._hop[slot]
@@ -402,7 +457,11 @@ class Reliable:
             c.acks_passive += 1
         else:
             c.acks_explicit += 1
-        self.engine.neighbours.acked(hop, True)
+        if not self._sampled[slot]:
+            # One sample per frame (§9): the frame's other messages give none.
+            self.engine.neighbours.acked(hop, True, self.engine.now)
+            for i in self._same_frame(slot):
+                self._sampled[i] = 1
         self.queue.remove(slot, msg)
         self._clear(slot)
 
@@ -410,7 +469,9 @@ class Reliable:
         queue = self.queue
         msg = self._msg[slot]
         hop = self._hop[slot]
-        self.engine.neighbours.acked(hop, False)
+        if not self._sampled[slot] and not self._same_frame(slot):
+            # A failure once the frame's last pending message times out.
+            self.engine.neighbours.acked(hop, False, now)
         self._due[slot] = None
         self._state[slot] = _IDLE
         if queue.attempts(slot, msg) < ATTEMPTS:
@@ -437,6 +498,8 @@ class Reliable:
         now: None outside a step (a submission): the holding starts at the
         next step.
         """
+        if self._msg[slot] is msg and self._state[slot] == _HELD:
+            return  # already held: its holding goes on
         if not self.queue.hold(slot, msg):
             return
         self._bind(slot, msg)

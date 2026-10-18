@@ -12,14 +12,22 @@ link destination (the channel is shared, §9). Per neighbour:
   above the last one (possible only when the replay table has evicted the
   sender, §14) is ignored by the table;
 - **acknowledgement window** ``p_ack``: acknowledged / sent over the last 16
-  messages sent through this neighbour, fed by class 1 and passive
-  acknowledgements (`NeighbourTable.acked`);
+  samples of the link, one per frame sent through this neighbour (class 1
+  explicit or passive acknowledgement or timeout, passive acknowledgement of
+  a presence report; `NeighbourTable.acked`). **Failure ageing**: once the
+  newest failure (``fail_at``) is `silence_ms` old (2.5 presence periods),
+  the failures leave the window and its successes are kept (`expire`), so
+  that a link that failed during a cut and is heard again does not stay
+  above ETX 4 for ever;
 - **ETX** in units of 1/`ETX_ONE`: ``1 / p_ack`` once the link has
-  acknowledgement samples (the link is used: both directions tested),
-  ``1 / d_in²`` before (symmetry assumed). With samples but no success,
-  ``p_ack`` = 0 gives ETX = samples + 1 (as if the next one succeeded)
-  rather than infinity, so that one lost acknowledgement does not exclude a
-  parent at once;
+  `ACK_MIN` (4) acknowledgement samples (the link is used: both directions
+  tested), ``1 / d_in²`` before (symmetry assumed). **Latch**: once the
+  entry has held `ACK_MIN` samples, ``p_ack`` is used whenever the window
+  is not empty (after an ageing too), so that the estimate does not jump
+  between ``d_in`` and ``p_ack`` when a failure ages out; a new entry
+  clears it. With samples but no success, ``p_ack`` = 0 gives ETX =
+  samples + 1 (as if the next one succeeded) rather than infinity, so that
+  one lost acknowledgement does not exclude a parent at once;
 - **margin**: link SNR above the demodulation limit of the SF (§5), in
   tenths of dB, averaged over its last 8 frames (fewer before 8). The link
   SNR is the packet SNR, or RSSI minus the noise floor at SNR >= +5 dB when
@@ -33,9 +41,17 @@ Bounds (MP13): the entries are allocated at construction and reused. A new
 neighbour in a full table evicts the stalest entry that is not a parent; if
 every entry is a parent the frame is not recorded (``refused``). An entry
 not heard for 4 presence periods is removed by `expire` (also run by
-`heard`): readers call ``expire(now)`` before reading. Entries keep their
+`heard`), which also ages the failures: readers call ``expire(now)`` before
+reading. Entries keep their
 slot while they live, so that a slot index is a stable offset for paged
 reading (§13 management query).
+
+**Silence limit** (`silence_ms`, §9): 2.5 presence periods (strict: a
+neighbour heard less than that ago is not silent). Parents use it for
+candidates and silent members (`mesh.parents`, `mesh.dodag`), the table for
+failure ageing. With a periodic sender jittered by ±10 % it tolerates one
+lost frame while the on-air delay of its frames varies by up to T/4, and
+detects two lost frames when that variation stays below T/5 (§9).
 
 Integer arithmetic only; the presence period is injected (``period_ms``,
 §16 default of the SF until the DODAG information sets it, §9).
@@ -49,6 +65,8 @@ CAPACITY = 64  # entries (MP13)
 WINDOW = 16  # counter values of the reception window, messages of p_ack
 MARGIN_FRAMES = 8  # frames of the margin average
 EXPIRY_PERIODS = 4  # presence periods without a frame before removal
+SILENCE_HALVES = 5  # silence limit in half presence periods (2.5 periods, §9)
+ACK_MIN = 4  # acknowledgement samples before p_ack replaces d_in (then latched)
 ETX_ONE = 128  # fixed-point unit of the ETX
 ETX_MAX = 4 * ETX_ONE  # eligibility limit (ETX <= 4)
 MARGIN_LOW = 30  # tenths of dB: an eligible link becomes ineligible below
@@ -67,6 +85,11 @@ _INT16 = 32767
 def presence_ms(sf):
     """Return the default presence period of sf in ms (§16)."""
     return PRESENCE_S[sf - SF_MIN] * 1000
+
+
+def silence_ms(period_ms):
+    """Return the silence limit of a presence period: 2.5 periods (ms, §9)."""
+    return SILENCE_HALVES * period_ms // 2
 
 
 def popcount16(x):
@@ -92,7 +115,8 @@ class Neighbour:
     address; heard (ms, last frame); rank, version (of its last frame);
     counter (last frame counter); parent (set by routing); rx_bits,
     rx_span (reception window); ack_bits, ack_count (acknowledgement
-    window); margin_ok (hysteresis state).
+    window), fail_at (ms, newest failure still in it, or None), latched
+    (`ACK_MIN` samples reached once); margin_ok (hysteresis state).
     """
 
     def __init__(self):
@@ -111,6 +135,8 @@ class Neighbour:
         self.rx_span = 1
         self.ack_bits = 0
         self.ack_count = 0
+        self.fail_at = None
+        self.latched = False
         self.m_count = 0
         self.m_next = 0
         self.m_sum = 0
@@ -151,17 +177,28 @@ class Neighbour:
             return None
         return (popcount16(self.ack_bits) * 100 + n // 2) // n
 
-    def _ack(self, ok):
+    def _ack(self, ok, now):
         self.ack_bits = ((self.ack_bits << 1) | (1 if ok else 0)) & _MASK
         if self.ack_count < WINDOW:
             self.ack_count += 1
+        if self.ack_count >= ACK_MIN:
+            self.latched = True
+        if not ok:
+            self.fail_at = now
+
+    def _age(self):
+        # Failures removed, successes kept (as the newest samples).
+        n = popcount16(self.ack_bits)
+        self.ack_count = n
+        self.ack_bits = (1 << n) - 1
+        self.fail_at = None
 
     # --- ETX, margin, eligibility ----------------------------------------------
 
     def etx(self):
         """Return the ETX in units of 1/ETX_ONE (rounded), per §9."""
         n = self.ack_count
-        if n:
+        if n >= ACK_MIN or (n and self.latched):
             acked = popcount16(self.ack_bits)
             if not acked:
                 return (n + 1) * ETX_ONE
@@ -220,7 +257,8 @@ class NeighbourTable:
     presence period (expiry after `EXPIRY_PERIODS`); capacity: entries.
     ``noise_floor``: measured noise floor (dBm) or None. Counters:
     ``evictions``, ``expired``, ``refused`` (new neighbour, every entry a
-    parent), ``stale`` (frames with a counter not above the last one).
+    parent), ``stale`` (frames with a counter not above the last one),
+    ``aged`` (failure ageings).
     """
 
     def __init__(self, sf, period_ms=None, capacity=CAPACITY):
@@ -234,6 +272,7 @@ class NeighbourTable:
         self.expired = 0
         self.refused = 0
         self.stale = 0
+        self.aged = 0
         self._slots = [None] * capacity
         self._free = [Neighbour() for _ in range(capacity)]
         self._index = {}  # address -> slot
@@ -278,15 +317,20 @@ class NeighbourTable:
         n.parent = bool(flag)
         return True
 
-    def acked(self, address, ok):
-        """Record one message sent through address, acknowledged or not (p_ack).
+    def acked(self, address, ok, now):
+        """Record one sample of address at now: a frame acknowledged or not (p_ack).
 
-        Returns False if address is not in the table (nothing recorded).
+        Returns False if address is not in the table (nothing recorded). A
+        failure ages out `silence_ms` after now unless a newer one follows.
         """
         n = self.get(address)
         if n is None:
             return False
-        n._ack(ok)
+        n._ack(ok, now)
+        if not ok:
+            end = now + silence_ms(self.period_ms)
+            if end < self._next_expiry:
+                self._next_expiry = end
         return True
 
     def heard(self, address, counter, rank, version, rssi, snr, now):
@@ -326,10 +370,14 @@ class NeighbourTable:
         return True
 
     def expire(self, now):
-        """Remove the entries not heard for 4 presence periods; return their number."""
+        """Remove the entries not heard for 4 presence periods; return their number.
+
+        Also ages the failures `silence_ms` old (``aged`` counts the entries).
+        """
         if now < self._next_expiry:
             return 0
         limit = EXPIRY_PERIODS * self.period_ms
+        silence = silence_ms(self.period_ms)
         removed = 0
         nxt = now + limit
         for i in range(self.capacity):
@@ -341,8 +389,16 @@ class NeighbourTable:
                 del self._index[n.address]
                 self._release(i)
                 removed += 1
-            elif end < nxt:
+                continue
+            if end < nxt:
                 nxt = end
+            if n.fail_at is not None:
+                end = n.fail_at + silence
+                if now >= end:
+                    n._age()
+                    self.aged += 1
+                elif end < nxt:
+                    nxt = end
         self._next_expiry = nxt
         self.expired += removed
         return removed

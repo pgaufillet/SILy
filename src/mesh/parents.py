@@ -9,13 +9,15 @@ infinite: no route or poisoned).
   neighbour = its rank + link cost; above 254 the neighbour is not usable.
 - **Candidates**: neighbours of the node's DODAG version, of rank strictly
   lower than the node's advertised rank (any finite rank without route),
-  heard within the last `SILENCE_PERIODS` (2) presence periods, through an
-  eligible link (`Neighbour.eligible`), whose path cost is at most the
-  **bound** min(254, L + max_increase): L is the lowest rank advertised in
-  this DODAG version, max_increase 56 by default (MaxRankIncrease, carried
+  heard within the silence limit (`mesh.neighbours.silence_ms`: 2.5
+  presence periods, strict), through an eligible link
+  (`Neighbour.eligible`), whose path cost is at most the **bound**
+  min(254, L + max_increase): L is the lowest rank advertised in this DODAG
+  version, max_increase 56 by default (MaxRankIncrease, carried
   by the DODAG information, §9). A neighbour dropped after failed attempts
   (`next_parent`) is no candidate until a new frame of it is heard; after a
-  detach, only neighbours heard after the poison are.
+  detach, only neighbours heard after the solicitation that ends its hold
+  are.
 - **Parent set**: the `SIZE` (3) candidates of lowest path cost, ordered by
   path cost, then larger margin (§9 tie-break), then lower address (so that
   the result does not depend on the table's slot order). **Preferred
@@ -28,15 +30,20 @@ infinite: no route or poisoned).
   the new advertised rank leave the set (rank rule).
 - **Detach**: when no candidate remains (bound exceeded included), the node
   advertises 255 at once, clears L and the set, and selects nothing for
-  ``hold_ms`` (2 Imin, set by the Trickle step; 0 by default); it then
-  rejoins through neighbours heard after the poison, at any rank.
+  ``hold_ms`` (2 Imin, set by the Trickle step; 0 by default), then until
+  its solicitation goes on air (`solicited`, ``soliciting`` meanwhile); it
+  then rejoins through neighbours heard after that solicitation, at any
+  rank (without hold: after the poison). A child that lost the poison
+  hears the solicitation (rank 255) and detaches in turn, so that it is no
+  candidate (§9, TLA+ `DODAG`: no loop with at most one loss in a row on a
+  link).
 - **Parent flags**: the set's members are flagged in the neighbour table
   (`NeighbourTable.set_parent`), so that eviction spares them.
 
 Entry points for the later steps: `recompute` (after frames are heard, at
 each presence period, on a timer), `next_parent` / `reroute` (the link
-engine's ``reroute``: class 1 attempts exhausted on a parent, §12), `detach`
-and `on_new_version` (Trickle and DODAG version, §9). Each returns event
+engine's ``reroute``: class 1 attempts exhausted on a parent, §12), `detach`,
+`solicited` and `on_new_version` (Trickle and DODAG version, §9). Each returns event
 flags (`PARENT_CHANGED`, `RANK_CHANGED`, `RANK_INCREASED`, `DETACHED`,
 `ATTACHED`), also accumulated until read by `events`: the caller copies
 ``rank`` and ``version`` into the frame header (``LinkEngine.rank``,
@@ -48,11 +55,13 @@ the advertised one; a preferred parent outside the 3 lowest path costs has
 left the set even when no candidate beats it by 12; the bound L + 56 makes a
 candidate unusable (as a path cost above 254 does), the node detaching when
 none remains; a dropped parent stays excluded until heard again; the root
-keeps rank 0 and selects nothing.
+keeps rank 0 and selects nothing; a solicitation sent during the hold's
+2 Imin (another version heard) does not end it; a new version ends the
+hold (its parents are taken at any rank).
 """
 
 from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, UPWARD
-from mesh.neighbours import ETX_ONE
+from mesh.neighbours import ETX_ONE, silence_ms
 from mesh.reliable import HOLD
 
 MIN_HOP = 8  # rank increase of one hop of ETX 1 (RPL MinHopRankIncrease)
@@ -61,7 +70,6 @@ MAX_RANK_INCREASE = 56  # 7 perfect hops (Contiki-NG's MaxRankIncrease)
 SIZE = 3  # parent set members
 SWITCH_THRESHOLD = 12  # path cost gain to switch preferred parent (1.5 hops)
 RANK_HYSTERESIS = 4  # advertised rank change to advertise it (half a hop)
-SILENCE_PERIODS = 2  # presence periods without a frame: no longer a candidate
 VERSION_MASK = 0x0F  # 4-bit DODAG version
 
 # Event flags.
@@ -98,14 +106,16 @@ class Parents:
     """Rank and parent set of one board (see the module docstring).
 
     table: its `NeighbourTable`; root: True on the root (rank 0, no parent);
-    max_increase: MaxRankIncrease; hold_ms: selection pause after a detach;
+    max_increase: MaxRankIncrease; hold_ms: selection pause after a detach
+    (then until `solicited`);
     clock: function() -> now (ms) used by `reroute`, which receives no time
     (None: the time of the last `recompute`).
 
     Read: ``rank`` (advertised), ``version``, ``lowest`` (L, None after a
     detach or a new version), ``preferred`` (address or None), ``cost``
-    (path cost through it at the last selection), `members`; counters
-    ``switches``, ``detaches``, ``drops``.
+    (path cost through it at the last selection), `members`,
+    ``hold_until``, ``soliciting``, ``poisoned_at``; counters ``switches``,
+    ``detaches``, ``drops``.
     """
 
     def __init__(self, table, root=False, max_increase=MAX_RANK_INCREASE, hold_ms=0, clock=None):
@@ -119,8 +129,9 @@ class Parents:
         self.lowest = RANK_ROOT if root else None
         self.preferred = None
         self.cost = None
-        self.poisoned_at = None  # time of the last detach until attached again
-        self.hold_until = None
+        self.poisoned_at = None  # last detach, then the solicitation ending its hold
+        self.hold_until = None  # end of the detach hold's 2 Imin
+        self.soliciting = False  # hold over, waiting for the solicitation to go on air
         self.now = None
         self.switches = 0
         self.detaches = 0
@@ -150,7 +161,7 @@ class Parents:
         """Return the path cost through neighbour entry n if it is a candidate, else None."""
         if n.version != self.version or n.rank >= self.rank:
             return None
-        if now - n.heard >= SILENCE_PERIODS * self.table.period_ms:
+        if now - n.heard >= silence_ms(self.table.period_ms):
             return None
         if self.poisoned_at is not None and n.heard <= self.poisoned_at:
             return None
@@ -179,6 +190,20 @@ class Parents:
         self._events |= events
         return events
 
+    def solicited(self, now):
+        """A solicitation went on air at now: it ends the detach hold once its time is over.
+
+        Only neighbours heard after now are candidates from then on (§9:
+        rejoin through neighbours heard after the solicitation). Returns True
+        if it ended the hold.
+        """
+        if not self.soliciting and (self.hold_until is None or now < self.hold_until):
+            return False
+        self.soliciting = False
+        self.hold_until = None
+        self.poisoned_at = now
+        return True
+
     def on_new_version(self, version, now):
         """Adopt DODAG version (4 bits) and select again, L restarted; return the events.
 
@@ -197,6 +222,7 @@ class Parents:
         self.lowest = None
         self.poisoned_at = None
         self.hold_until = None
+        self.soliciting = False
         self._dropped.clear()
         events = self._select(now)
         if self.rank == RANK_INFINITE:
@@ -250,6 +276,9 @@ class Parents:
             if now < self.hold_until:
                 return 0
             self.hold_until = None
+            self.soliciting = True
+        if self.soliciting:
+            return 0  # until `solicited`
         best = []  # (path cost, -margin, address, rank), lowest first
         for n in table.entries():
             cost = self.candidate_cost(n, now)
@@ -303,6 +332,7 @@ class Parents:
         self.lowest = None
         self.poisoned_at = now
         self.hold_until = now + self.hold_ms if self.hold_ms else None
+        self.soliciting = False
         self.detaches += 1
         events = DETACHED
         if was != RANK_INFINITE:

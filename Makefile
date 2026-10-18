@@ -27,25 +27,38 @@ TEST_PATH = .frozen:$(CURDIR)/src:$(CURDIR):$(MPY_LIB)/python-stdlib/unittest
 # multi-node traffic keep their traces in memory.
 TEST_HEAP ?= 32M
 
+# TLA+ models of spec/ (TLC from tla2tools.jar, Java 11 or later).
+TLA_JAR ?= $(HOME)/.local/lib/tla2tools.jar
+
 # Top-level entries of src/ copied to the board's filesystem root.
 DEPLOY_ITEMS = $(notdir $(wildcard src/*))
 
 LINT_PATHS = src sim tests tools docs firmware Makefile README.md
 
-.PHONY: help check test lint firmware flash deploy
+# Runs of the scenario suites for `make seeds` (seed shifts 0 to SEEDS - 1).
+SEEDS ?= 24
+
+.PHONY: help check test seeds lint firmware flash deploy spec spec-pass spec-defects
 
 help:
 	@echo "make test                 host tests on the MicroPython unix port"
+	@echo "make seeds [SEEDS=24]     scenario suites on SEEDS seeds (not part of check)"
 	@echo "make lint                 ruff (check, format) and codespell"
 	@echo "make check                lint + test"
 	@echo "make firmware             build the $(BOARD) firmware"
 	@echo "make flash PORT=<dev>     flash the $(BOARD) firmware"
 	@echo "make deploy PORT=<dev>    copy src/ to the board and reset it"
+	@echo "make spec                 TLC: every model, each against its expected outcome"
+	@echo "make spec-pass            TLC: the models that must hold"
+	@echo "make spec-defects         TLC: the models that must fail (defects, limits)"
 
 check: lint test
 
 test:
 	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/run.py tests
+
+seeds:
+	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/seeds.py $(SEEDS)
 
 lint:
 	$(RUFF) check .
@@ -60,3 +73,12 @@ flash:
 
 deploy:
 	cd src && $(MPREMOTE) connect $(PORT) resume fs cp -r $(DEPLOY_ITEMS) : + reset
+
+spec:
+	TLA_JAR=$(TLA_JAR) sh spec/run.sh all
+
+spec-pass:
+	TLA_JAR=$(TLA_JAR) sh spec/run.sh pass
+
+spec-defects:
+	TLA_JAR=$(TLA_JAR) sh spec/run.sh defects
