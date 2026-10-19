@@ -3,7 +3,7 @@
 Usage: micropython tests/seeds.py [COUNT [MODULE...]]
 
 Runs the unittest.TestCase classes of each scenario module (default
-`SCENARIOS`: the routing scenarios of M3-12 and the class 1 ones) COUNT
+`SCENARIOS`: the DODAG, routing and class 1 scenarios) COUNT
 times (default 24): run k adds k * `STRIDE` to the seed of every
 `sim.net.Network` built by the scenarios, so that run 0 is the one of
 `make test` and the others draw other collisions, jitters and backoffs from
@@ -19,7 +19,7 @@ import unittest
 
 from sim.net import Network
 
-SCENARIOS = ("test_routing_scenario", "test_reliable_scenario")
+SCENARIOS = ("test_dodag_scenario", "test_routing_scenario", "test_reliable_scenario")
 STRIDE = 1000  # seed offset between runs (above the seeds a suite uses)
 
 _shift = [0]

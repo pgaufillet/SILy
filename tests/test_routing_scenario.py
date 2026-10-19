@@ -24,7 +24,7 @@ from mesh.counter import FrameCounter
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
 from mesh.neighbours import popcount16
-from mesh.parents import MIN_HOP, SWITCH_THRESHOLD
+from mesh.parents import MIN_HOP, SWITCH_THRESHOLD, link_cost
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
 from mesh.reliable import ATTEMPTS, identity
@@ -702,7 +702,8 @@ class _Cutoff:
     it; the first lose frames B sends at rank 255 are lost at C (link
     B -> C cut while each is on air; lose None: every one until B has a
     finite rank again). ``on_detach(now)`` is called at B's first frame at
-    rank 255 (its poison); ``lost`` lists the times of the frames lost."""
+    rank 255 (its poison); ``lost`` lists the times of the frames lost;
+    ``poisoned`` the times C heard a frame of B at rank 255."""
 
     def __init__(self, seed):
         names = (ROOT, A, B, C)
@@ -710,20 +711,62 @@ class _Cutoff:
         m = Mesh(seed, names, links)
         m.run(12 * m.imin + 2 * P)
         # Formed: ranks may still move (hidden terminals: root and B, A and
-        # C), a parent's rank rise followed by its child (§9).
-        for _ in range(60):
-            if [m.preferred(n) for n in (A, B, C)] == [ROOT, A, B] and not m.consistent((A, B, C)):
+        # C), a parent's rank rise followed by its child (§9). Each link
+        # to a parent also reads an ETX of 2 at most (cost 16): samples
+        # lost to those hidden terminals while the windows are short can
+        # leave a link at the ETX limit of 4, which one more loss makes
+        # ineligible (a detach the scenarios do not script); failures age
+        # out within the silence limit (§9).
+        for _ in range(90):
+            if (
+                [m.preferred(n) for n in (A, B, C)] == [ROOT, A, B]
+                and not m.consistent((A, B, C))
+                and max(self._costs(m)) <= 2 * MIN_HOP
+            ):
                 break
             m.run(m.net.now + 1000)
         else:
-            raise AssertionError("line not formed")
+            raise AssertionError("line not formed", self._costs(m))
         self.m = m
         self.b, self.c = m.b(B), m.b(C)
         self.lost = []  # times of B's frames lost at C
         self.detached = None  # time of B's first frame at rank 255
+        self.poisoned = []  # times C heard a frame of B at rank 255
         self._left = 0
         self._sent = self.b.engine.sent
         self.b.engine.sent = self._sent_by_b
+        self._heard = self.c.engine.heard
+        self.c.engine.heard = self._heard_by_c
+
+    @staticmethod
+    def _costs(m):
+        # Link cost (§9) of A, B and C towards their parents, from their view.
+        out = []
+        for n, p in ((A, ROOT), (B, A), (C, B)):
+            view = m.b(n).engine.neighbours.get(p)
+            out.append(link_cost(view.etx()) if view is not None else RANK_INFINITE)
+        return out
+
+    def _heard_by_c(self, header, rssi, snr, now):
+        if header.source == B and header.rank == RANK_INFINITE:
+            self.poisoned.append(now)
+        return self._heard(header, rssi, snr, now)
+
+    def check_loops(self, test, loops, log):
+        """No loop through C while C heard B's frames at rank 255 (§9: one
+        loss in a row per link). If B's next frame at rank 255 (its
+        solicitation) was lost at C as well (collision, half duplex), two
+        losses in a row: B may rejoin through C, and the loop ends by a
+        switch or at the L + 56 bound, within one Imin per hop of increase
+        (§9 loop freedom). Returns True if such a loop formed."""
+        m = self.m
+        if not loops:
+            return False
+        first = [t for t in self.poisoned if t > self.lost[-1]]
+        test.assertTrue(not first or first[0] > loops[0], (self.lost, self.poisoned, loops[0]))
+        bound = (INFO.max_increase // MIN_HOP + 1) * m.imin
+        test.assertTrue(max(episodes(loops)) <= bound, (episodes(loops), bound, log))
+        return True
 
     def _sent_by_b(self, sel, counter, now):
         self._sent(sel, counter, now)
@@ -773,7 +816,9 @@ class PoisonLost(unittest.TestCase):
     """B's poison is lost at C, which keeps B as parent and sends a frame
     during B's hold: B must not rejoin through C, its own child (TLA+
     `DODAG_line_solicit_nocycle`: no loop with at most one loss in a row
-    per link)."""
+    per link). If B's solicitation is lost at C too (a collision, not
+    scripted), the loop the design accepts after two losses in a row must
+    end within its bound (`_Cutoff.check_loops`)."""
 
     def test_no_rejoin_through_a_child(self):
         s = _Cutoff(11)
@@ -793,9 +838,10 @@ class PoisonLost(unittest.TestCase):
         m.run(start + 6 * P)
         self.assertEqual(len(s.lost), 1)
         self.assertEqual(sent, [0])
-        self.assertEqual(loops, [])
-        self.assertEqual([p for t, n, p, r in log if n == B and p == C], [])
-        # Both cut off: detached for good (C heard B's solicitation).
+        if not s.check_loops(self, loops, log):
+            self.assertEqual([p for t, n, p, r in log if n == B and p == C], [])
+        # Both cut off: detached for good (C heard B's solicitation, or the
+        # loop ended at the bound).
         self.assertEqual((m.rank(B), m.rank(C)), (RANK_INFINITE, RANK_INFINITE))
         # A heard again: both rejoin, consistent.
         m.net.medium.restore(A, B)
