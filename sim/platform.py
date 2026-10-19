@@ -84,10 +84,10 @@ class FakeRetained(Retained):
 
     def __init__(self, size):
         self.data = bytearray(size)
-        self._saved = bytes(size)
+        self._saved = bytearray(size)  # copied in place: saved on every frame
 
     def save(self):
-        self._saved = bytes(self.data)
+        self._saved[:] = self.data
 
     def reset(self):
         """Soft reset: data returns to its last saved content."""
@@ -95,7 +95,7 @@ class FakeRetained(Retained):
 
     def power_loss(self):
         """Power loss: data and saved content become zeros."""
-        self._saved = bytes(len(self.data))
+        self._saved[:] = bytes(len(self.data))
         self.data[:] = self._saved
 
 
