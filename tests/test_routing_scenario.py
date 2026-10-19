@@ -23,7 +23,8 @@ from mesh import frame
 from mesh.counter import FrameCounter
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
-from mesh.parents import SWITCH_THRESHOLD
+from mesh.neighbours import popcount16
+from mesh.parents import MIN_HOP, SWITCH_THRESHOLD
 from mesh.ports import PRESENCE
 from mesh.profile import EU_869
 from mesh.reliable import ATTEMPTS, identity
@@ -386,15 +387,92 @@ class RelayKilled(unittest.TestCase):
         self.assertEqual(c.failures, [])
 
 
+class FollowParentRank(unittest.TestCase):
+    """Diamond root — A, root — B, A — C, B — C, C — D (TLA+
+    `DODAG_follow_follow_*`). C attaches through A, D through C, before
+    the link B — C comes up; B's frames are then lost at C one in two at
+    most, so that C hears B at d_in 9/16 (ETX 3.16 before acknowledgement
+    samples, §9: link cost 25; 8/16, ETX 4, is still eligible). A dies: C
+    falls back on B at a rank not below D's; D, whose only neighbour C is,
+    keeps C and follows its rank increase (§9), attached all along."""
+
+    def test_child_follows_a_local_repair(self):
+        names = (ROOT, A, B, C, D)
+        links = ((ROOT, A, 10), (ROOT, B, 10), (A, C, 10), (B, C, 8), (C, D, 10))
+        m = Mesh(13, names, links)
+        b, c, d = m.b(B), m.b(C), m.b(D)
+        view = c.engine.neighbours
+        medium = m.net.medium
+        link = medium.get_link(B, C)
+        sent = b.engine.sent
+
+        def lossy(sel, counter, now):
+            # B's frame is lost at C if C heard B's previous one and hearing
+            # this one would raise d_in above 9/16.
+            sent(sel, counter, now)
+            n = view.get(B)
+            link.up = True
+            if n is not None and counter == n.counter + 1:
+                span = min(n.rx_span + 1, 16)
+                if popcount16(((n.rx_bits << 1) | 1) & 0xFFFF) * 16 > 9 * span:
+                    link.up = False
+
+        medium.cut(B, C)
+        medium.cut(C, B)
+        m.run(12 * m.imin + 3 * P)
+        for _ in range(60):
+            if [m.preferred(n) for n in (A, B, C, D)] == [ROOT, ROOT, A, C]:
+                break
+            m.run(m.net.now + 1000)
+        else:
+            raise AssertionError("diamond not formed")
+        medium.restore(C, B)
+        b.engine.sent = lossy
+        # C's path cost through B not below D's rank (a frame lost to a
+        # hidden terminal may raise an ETX for a while, §9 failure ageing).
+        for _ in range(60):
+            m.run(m.net.now + 1000)
+            n = view.get(B)
+            cost = None if n is None else c.routing.parents.candidate_cost(n, m.net.now)
+            if cost is not None and cost >= m.rank(D):
+                break
+        else:
+            raise AssertionError("link B - C not as scripted")
+        self.assertEqual([m.preferred(n) for n in (A, B, C, D)], [ROOT, ROOT, A, C])
+        kill = m.net.now
+        log = m.watch((C, D), kill)
+        m.b(A).power_loss(off_ms=OFF)
+        m.run(kill + 5 * P)
+        # C fell back on B (local repair) at a rank not below D's, which D
+        # would no longer take as a parent under the rank rule alone.
+        t, parent = switched(log, C, A)
+        self.assertEqual(parent, B)
+        rank_c = [r for u, n, p, r in log if n == C and u >= t][0]
+        rank_d = [r for u, n, p, r in log if n == D and u <= t][-1]
+        self.assertTrue(rank_d <= rank_c < RANK_INFINITE, log)
+        # D kept C and followed: never detached, its rank above C's.
+        self.assertEqual([p for u, n, p, r in log if n == D and p != C], [], log)
+        self.assertTrue([r for u, n, p, r in log if n == D and r > rank_c], log)
+        self.assertEqual(d.routing.dodag.counters.poisons, 0)
+        self.assertEqual(c.routing.dodag.counters.poisons, 0)
+        self.assertEqual([m.preferred(n) for n in (B, C, D)], [ROOT, B, C])
+        b.engine.sent = sent
+        link.up = True
+        self.assertEqual(m.consistent((B, C, D)), [])
+
+
 class LoopDuringRepair(unittest.TestCase):
     """Line root — A — B — C — D (+ sniffer). B stops hearing A and C (links
     A -> B and C -> B cut) and its view of C is stale: rank 8, as if C's
     frames since it moved under B had been lost. B's class 1 attempts to A
     fail; at the local repair B picks C, its own child, and C -> B comes
-    back: a loop B -> C -> B. Data-path validation breaks it within one
-    turn."""
+    back: a loop B -> C -> B. Each follows the other's rank increase (§9
+    rank following), advertised at once on the rank errors of data-path
+    validation: the ranks climb until B's path cost passes L + 56, and B,
+    without another candidate, detaches (TLA+
+    `DODAG_line_follow_witness_bound`)."""
 
-    def test_loop_broken_within_one_turn(self):
+    def test_loop_ends_at_the_rank_bound(self):
         names = (ROOT, A, B, C, D)
         links = ((ROOT, A, 10), (A, B, 10), (B, C, 10), (C, D, 10))
         m = Mesh(5, names, links, sniffer=True)
@@ -450,34 +528,40 @@ class LoopDuringRepair(unittest.TestCase):
         m.run(start + 12000)
         loop_at, parent = switched(log, B, A)
         self.assertEqual(parent, C)  # the loop B -> C -> B formed
-        # Broken: C saw B's rank not above its own (rank error: Trickle reset
-        # and an advertisement at once, which makes B leave C); if B's
-        # message came back before, B dropped it as a loop: one turn at most.
+        # C saw B's rank not above its own (rank error: Trickle reset and an
+        # advertisement at once); B follows C's new rank, C B's, and so on.
+        # Each return of B's message to B is counted as a loop.
         self.assertTrue(c.routing.dodag.counters.rank_errors >= 1)
-        self.assertTrue(len(returned) <= 1, returned)
-        self.assertEqual(b.routing.counters.loops, len(returned))
-        left = [(t, p) for t, n, p, r in log if n == B and t > loop_at]
-        self.assertNotEqual(left[0][1], C)
-        self.assertTrue(left[0][0] - loop_at <= m.imin, (loop_at, left))
+        self.assertTrue(b.routing.counters.loops >= len(returned), returned)
+        # Broken by the bound: B kept C while its rank stayed within L + 56
+        # (L at most its rank before), then detached, without another
+        # neighbour. The climb takes 56 / 8 = 7 increases, each advertised
+        # within an Imin.
+        rank_b = [r for t, n, p, r in log if n == B][0]
+        left = [(t, p) for t, n, p, r in log if n == B and t > loop_at and p != C]
+        self.assertEqual(left[0][1], None)
+        on_c = [r for t, n, p, r in log if n == B and loop_at <= t < left[0][0]]
+        self.assertTrue(max(on_c) <= rank_b + INFO.max_increase, (rank_b, on_c))
+        bound = (INFO.max_increase // MIN_HOP + 1) * m.imin
+        self.assertTrue(left[0][0] - loop_at <= bound, (loop_at, left))
         # Cut from the root, B, C and D then detach and rejoin through each
         # other while their views are stale (§9 detach and rejoin): loops may
         # form again, each one short-lived.
         self.assertTrue(max(episodes(loops)) <= P + 2 * m.imin, episodes(loops))
-        # No message circulated: per message and link at most the attempts of
-        # one next hop, and nothing more on air once the attempts are over.
+        # B's message travels around a loop while it lasts (custody, §12: a
+        # copy that comes back once its holder has handed it over is taken
+        # again), and nothing more is on air once the loops are over and the
+        # attempts of the last hop exhausted.
         rel = b.engine.reliable
-        quiet = start + loop_at + ATTEMPTS * (rel.relay_timeout_ms + 100)
-        sent = {}
+        quiet = max(loops) + ATTEMPTS * (rel.relay_timeout_ms + 100)
         for src in (B, C):
             for t, h, msgs in m.frames(src):
                 for msg in msgs:
                     if msg.port == APP and h.dest in (B, C) and t < start + 12000:
                         key = identity(msg, h.source, h.dest) + (src,)
-                        sent[key] = sent.get(key, 0) + 1
                         if key[0] == B:
-                            self.assertTrue(t <= quiet, (t - start, key))
+                            self.assertTrue(t <= quiet, (t - start, quiet - start, key))
         self.assertTrue(1 <= len(to_c) <= ATTEMPTS and set(to_c) == {mine}, to_c)
-        self.assertTrue(max(sent.values()) <= ATTEMPTS, sent)
         # B's message had reached the root through A before the loop.
         self.assertEqual(m.root.inbox_from(APP)[0], (B, b"mine"))
         # The links come back: no loop, every attached node consistent.
@@ -626,7 +710,7 @@ class _Cutoff:
         m = Mesh(seed, names, links)
         m.run(12 * m.imin + 2 * P)
         # Formed: ranks may still move (hidden terminals: root and B, A and
-        # C), a rank rise detaching the child for a while (§9 rank rule).
+        # C), a parent's rank rise followed by its child (§9).
         for _ in range(60):
             if [m.preferred(n) for n in (A, B, C)] == [ROOT, A, B] and not m.consistent((A, B, C)):
                 break

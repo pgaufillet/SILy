@@ -353,6 +353,105 @@ class BoundedIncrease(unittest.TestCase):
         self.assertEqual(self.p.rank, RANK_INFINITE)
 
 
+class RankFollowing(unittest.TestCase):
+    """The node follows its preferred parent's rank increase within L + 56 (§9,
+    RPL); the other candidates stay strictly below the node's rank."""
+
+    def setUp(self):
+        # Through A (rank 16, ETX 1): rank 24, L 24, bound 80.
+        self.net = Net()
+        self.net.hear(A, 16, 0)
+        self.p = Parents(self.net.table)
+        self.p.recompute(0)
+
+    def step(self, rank, now):
+        self.net.hear(A, rank, now)
+        return self.p.recompute(now)
+
+    def test_rank_not_below_the_node_followed(self):
+        events = self.step(30, 100)
+        self.assertEqual((self.p.preferred, self.p.members(), self.p.rank), (A, (A,), 38))
+        self.assertEqual(events, RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((self.p.lowest, self.p.detaches), (24, 0))
+        self.assertEqual(self.net.flagged(), [A])
+
+    def test_rank_equal_to_the_node_followed(self):
+        self.assertEqual(self.step(24, 100), RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((self.p.preferred, self.p.rank), (A, 32))
+
+    def test_other_candidates_strictly_below_the_node(self):
+        self.net.hear(B, 24, 50)  # not below 24: no candidate, path cost 32 though
+        self.net.hear(C, 23, 50)  # below: candidate, path cost 31
+        self.p.recompute(50)
+        self.assertEqual(self.p.members(), (A, C))
+        self.step(30, 100)  # A's path cost 38: C better by 7 only
+        self.assertEqual((self.p.members(), self.p.rank), ((A, C), 38))
+        self.assertFalse(self.net.table.get(B).parent)
+
+    def test_better_candidate_still_switches(self):
+        self.net.hear(C, 10, 50)  # path cost 18: 6 better than A, kept
+        self.p.recompute(50)
+        self.assertEqual(self.p.preferred, A)
+        events = self.step(30, 100)  # A's path cost 38: C better by 20
+        self.assertEqual((self.p.members(), self.p.rank), ((C,), 18))
+        self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED)
+
+    def test_up_to_the_bound_then_detach(self):
+        self.step(72, 100)  # path cost 80 = L + 56
+        self.assertEqual((self.p.preferred, self.p.rank, self.p.lowest), (A, 80, 24))
+        events = self.step(73, 200)  # 81 > L + 56
+        self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((self.p.rank, self.p.members(), self.p.lowest), (RANK_INFINITE, (), None))
+        self.assertEqual(self.p.detaches, 1)
+        self.assertEqual(self.net.flagged(), [])
+
+    def test_beyond_the_bound_another_candidate_taken(self):
+        self.net.hear(B, 20, 50)  # path cost 28
+        self.p.recompute(50)
+        self.assertEqual(self.p.members(), (A, B))
+        self.step(73, 100)  # A beyond L + 56: dropped, B below 24 taken
+        self.assertEqual((self.p.members(), self.p.rank), ((B,), 28))
+        self.assertEqual(self.p.detaches, 0)
+
+    def test_poisoned_preferred_parent_not_followed(self):
+        events = self.step(RANK_INFINITE, 100)
+        self.assertTrue(events & DETACHED)
+        self.assertEqual(self.p.rank, RANK_INFINITE)
+
+    def test_dropped_preferred_parent_not_followed(self):
+        self.net.hear(A, 30, 100)
+        self.assertEqual(self.p.next_parent(A, 100), HOLD)
+        self.assertEqual(self.p.rank, RANK_INFINITE)
+
+
+class FollowDiamond(unittest.TestCase):
+    """Diamond root - A, root - B, A - C, B - C (ETX 2), C - D (TLA+
+    `DODAG_follow_follow_*`): A dies, C falls back on B at rank 24, D's
+    rank; D, whose only neighbour C is, keeps C and follows."""
+
+    def test_child_follows_a_local_repair(self):
+        c_net = Net()
+        c_net.hear(A, 8, 0)
+        c_net.hear(B, 8, 0)
+        c = Parents(c_net.table)
+        c.recompute(0)
+        d_net = Net()
+        d_net.hear(C, c.rank, 0)
+        d = Parents(d_net.table)
+        d.recompute(0)
+        self.assertEqual((c.members(), c.rank, d.rank), ((A, B), 16, 24))
+        # A falls silent; B heard, over a link of ETX 2 (failures renewed so
+        # that they do not age out).
+        c_net.hear(B, 8, 2400)
+        c_net.etx(B, 1, 2, 2400)
+        c.recompute(2500)
+        self.assertEqual((c.preferred, c.rank), (B, 24))
+        d_net.hear(C, c.rank, 2600)
+        events = d.recompute(2600)
+        self.assertEqual((d.preferred, d.rank, d.detaches), (C, 32, 0))
+        self.assertEqual(events, RANK_CHANGED | RANK_INCREASED)
+
+
 class MarginTieBreak(unittest.TestCase):
     def test_larger_margin_wins_equal_costs(self):
         net = Net()
@@ -568,7 +667,9 @@ def _reference(p, now):
     bound = 254 if p.lowest is None else min(254, p.lowest + p.max_increase)
     cands = []
     for n in table.entries():
-        if n.version != p.version or n.rank >= p.rank or not n.eligible():
+        if n.version != p.version or not n.eligible():
+            continue
+        if n.rank >= p.rank and n.address != p.preferred:
             continue
         if now - n.heard >= 5 * _PERIOD // 2:
             continue

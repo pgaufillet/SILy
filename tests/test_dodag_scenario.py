@@ -168,10 +168,10 @@ class DetachRejoin(unittest.TestCase):
         line.run(lost + 5 * PERIOD // 2 + 3 * line.imin)  # silence limit, poison, hold
         # C lost its only parent: poisoned; D, whose only parent is C, too.
         # C's presences to the dead B fail (§9 presence samples): C's rank
-        # may rise before the silence limit, D (no longer above C) detaches
-        # first, rejoins C, then detaches again on C's poison.
+        # may rise before the silence limit, D follows it (§9 rank
+        # following) and detaches on C's poison only.
         self.assertEqual(c.routing.dodag.counters.poisons, 1)
-        self.assertTrue(1 <= d.routing.dodag.counters.poisons <= 2)
+        self.assertEqual(d.routing.dodag.counters.poisons, 1)
         self.assertEqual((c.engine.rank, d.engine.rank), (RANK_INFINITE, RANK_INFINITE))
         self.assertTrue(c.routing.dodag.counters.solicits >= 1)
         self.assertEqual(line.attached()[0], True)

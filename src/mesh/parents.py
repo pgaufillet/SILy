@@ -9,6 +9,8 @@ infinite: no route or poisoned).
   neighbour = its rank + link cost; above 254 the neighbour is not usable.
 - **Candidates**: neighbours of the node's DODAG version, of rank strictly
   lower than the node's advertised rank (any finite rank without route),
+  the preferred parent at any rank (**rank following**, RPL: the node
+  follows its preferred parent's rank increase within the bound below),
   heard within the silence limit (`mesh.neighbours.silence_ms`: 2.5
   presence periods, strict), through an eligible link
   (`Neighbour.eligible`), whose path cost is at most the **bound**
@@ -26,8 +28,9 @@ infinite: no route or poisoned).
   is listed preferred parent first, then by that order.
 - **Advertised rank** (``rank``) = path cost through the preferred parent,
   updated when it differs by `RANK_HYSTERESIS` (4) or more, or when the
-  preferred parent changes. Members whose rank is not strictly lower than
-  the new advertised rank leave the set (rank rule).
+  preferred parent changes (a followed increase is at least one link cost,
+  8). Members whose rank is not strictly lower than the new advertised rank
+  leave the set (rank rule).
 - **Detach**: when no candidate remains (bound exceeded included), the node
   advertises 255 at once, clears L and the set, and selects nothing for
   ``hold_ms`` (2 Imin, set by the Trickle step; 0 by default), then until
@@ -36,7 +39,9 @@ infinite: no route or poisoned).
   rank (without hold: after the poison). A child that lost the poison
   hears the solicitation (rank 255) and detaches in turn, so that it is no
   candidate (§9, TLA+ `DODAG`: no loop with at most one loss in a row on a
-  link).
+  link). A loop formed despite it (two losses in a row) is not broken by
+  the rank rule, each member following the other's increase: it ends by a
+  switch or when a member's path cost passes the bound (§9).
 - **Parent flags**: the set's members are flagged in the neighbour table
   (`NeighbourTable.set_parent`), so that eviction spares them.
 
@@ -50,14 +55,15 @@ flags (`PARENT_CHANGED`, `RANK_CHANGED`, `RANK_INCREASED`, `DETACHED`,
 ``dodag_version``), resets Trickle, sends its presence at once after a
 parent change and calls ``Reliable.route_changed``.
 
-Readings where §9 is silent: the node's rank compared with candidates is
-the advertised one; a preferred parent outside the 3 lowest path costs has
-left the set even when no candidate beats it by 12; the bound L + 56 makes a
-candidate unusable (as a path cost above 254 does), the node detaching when
-none remains; a dropped parent stays excluded until heard again; the root
-keeps rank 0 and selects nothing; a solicitation sent during the hold's
-2 Imin (another version heard) does not end it; a new version ends the
-hold (its parents are taken at any rank).
+Readings where §9 is silent: the node's rank compared with the other
+candidates is the advertised one; a preferred parent outside the 3 lowest
+path costs has left the set even when no candidate beats it by 12; the
+bound L + 56 makes a candidate unusable (as a path cost above 254 does),
+the node detaching when none remains; a dropped parent stays excluded
+until heard again; the root keeps rank 0 and selects nothing; a
+solicitation sent during the hold's 2 Imin (another version heard) does
+not end it; a new version ends the hold (its parents are taken at any
+rank).
 """
 
 from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, UPWARD
@@ -158,8 +164,14 @@ class Parents:
         return bound if bound < MAX_COST else MAX_COST
 
     def candidate_cost(self, n, now):
-        """Return the path cost through neighbour entry n if it is a candidate, else None."""
-        if n.version != self.version or n.rank >= self.rank:
+        """Return the path cost through neighbour entry n if it is a candidate, else None.
+
+        The preferred parent is one at any rank (its increase is followed,
+        within the bound), the others below the advertised rank.
+        """
+        if n.version != self.version:
+            return None
+        if n.rank >= self.rank and n.address != self.preferred:
             return None
         if now - n.heard >= silence_ms(self.table.period_ms):
             return None
