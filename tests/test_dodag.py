@@ -510,6 +510,32 @@ class Adoption(_Case):
         self.assertEqual(len(sol), 1)
         self.assertEqual(sol[0][1].rank, RANK_INFINITE)
 
+    def test_detached_node_adopts_another_version_only_after_its_solicitation(self):
+        # Q, heard during the hold, may be a child that lost the poison, in
+        # an older version (TLA+ `DODAG_diamond_versions_adopt`): adopting
+        # its version would attach the node through its own child.
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        start = b.now
+        d = b.dodag
+        b.rx(self.p.frame(RANK_INFINITE, 3))  # the parent's poison: detached
+        self.assertEqual((d.counters.poisons, b.engine.rank), (1, RANK_INFINITE))
+        b.advance(start + b.imin)
+        b.rx(self.q.info(16, 2))
+        b.rx(self.s.info(16, 4))
+        self.assertEqual((d.version, b.engine.rank, d.counters.adoptions), (3, RANK_INFINITE, 1))
+        late = DESYNC_SLOTS * b.engine.slot_ms + 100
+        b.advance(start + 2 * b.imin + late)
+        self.assertEqual((d.version, b.engine.rank), (3, RANK_INFINITE))
+        # The hold ended by a solicitation at its end (the one asked again
+        # after Imin, or its own).
+        ended = d.parents.poisoned_at
+        self.assertTrue(ended >= start + 2 * b.imin, ended)
+        self.assertTrue(ended in [t for t, h in b.solicitations(start)])
+        # Heard after the solicitation: adopted, attached at any rank.
+        b.rx(self.q.info(40, 2))
+        self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (2, Q, 48))
+
 
 class Resets(_Case):
     def test_quiet_at_imax(self):

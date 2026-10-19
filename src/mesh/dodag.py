@@ -39,12 +39,17 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   suppressed by k = 2 frames of the neighbourhood would not guarantee (in
   a loop, the frames of the loop itself suppress it).
 - **Adoption**: an attached node adopts a newer version from the DODAG
-  information of a neighbour of finite rank; a detached node (or one that
-  has adopted nothing since boot) adopts any version, its own included. It
-  takes the network-wide parameters (periods, Imin, maximum rank increase,
-  flags), resets L (`Parents.on_new_version`) and its Trickle timer. A
-  message with another regional profile identifier is not adopted and is
-  counted (``foreign_profile``, MP22), as is a malformed one.
+  information of a neighbour of finite rank; a detached node adopts any
+  other version, but only from a DODAG information heard after the
+  solicitation that ends its hold (the rule of the rejoin: during the hold
+  a descendant that lost the poison may still advertise, in an older
+  version too); one that has adopted nothing since boot adopts any
+  version, its own included. It takes the network-wide parameters
+  (periods, Imin, maximum rank increase, flags), resets L
+  (`Parents.on_new_version`, which keeps a detach hold and its rejoin
+  rule) and its Trickle timer. A message with another regional profile
+  identifier is not adopted and is counted (``foreign_profile``, MP22), as
+  is a malformed one.
 - **Across versions** (§9): a frame of a newer version from a neighbour of
   finite rank means the node is behind (`Parents.behind`): it keeps
   selecting in its own version, keeps its preferred parent once that parent
@@ -386,7 +391,7 @@ class Dodag:
         cmp = compare_versions(header.dodag_version, self.version)
         if not self.attached or not self.configured:
             if cmp != 0 and self.configured:
-                self._ask(now)  # a detached node adopts any version
+                self._ask(now)  # a detached node adopts another version
             return n
         if cmp == 0:
             self.trickle.heard()
@@ -444,7 +449,12 @@ class Dodag:
         version = header.dodag_version
         cmp = compare_versions(version, self.version)
         if not self.root:
-            if not self.configured or (not self.attached and cmp != 0) or cmp == 1:
+            if self.attached:
+                adopt = cmp == 1
+            else:  # another version, heard after the solicitation ending the hold
+                p = self.parents
+                adopt = cmp != 0 and p.hold_until is None and not p.soliciting
+            if adopt or not self.configured:
                 self._adopt(version, info, now)
                 return
         if cmp == 0 and self.attached:

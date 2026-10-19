@@ -70,8 +70,9 @@ bound L + 56 makes a candidate unusable (as a path cost above 254 does),
 the node detaching when none remains; a dropped parent stays excluded
 until heard again; the root keeps rank 0 and selects nothing; a
 solicitation sent during the hold's 2 Imin (another version heard) does
-not end it; a new version ends the hold (its parents are taken at any
-rank).
+not end it; a new version does not end the hold nor lift its rejoin rule
+(its parents are taken at any rank, among the neighbours heard after the
+solicitation).
 """
 
 from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, UPWARD
@@ -239,7 +240,9 @@ class Parents:
         """Adopt DODAG version (4 bits) and select again, L restarted; return the events.
 
         Only parents of the new version are taken, at any rank; without one
-        the node detaches. The root only records the version it issued.
+        the node detaches. A detach hold goes on, and after it only
+        neighbours heard after the solicitation are taken. The root only
+        records the version it issued.
         """
         version &= VERSION_MASK
         if self.root:
@@ -251,9 +254,6 @@ class Parents:
         self.cost = None
         self.rank = RANK_INFINITE
         self.lowest = None
-        self.poisoned_at = None
-        self.hold_until = None
-        self.soliciting = False
         self.behind = False
         self._dropped.clear()
         events = self._select(now)

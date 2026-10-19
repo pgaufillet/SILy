@@ -25,7 +25,7 @@ from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
 from mesh.neighbours import popcount16
 from mesh.parents import MIN_HOP, SWITCH_THRESHOLD
-from mesh.ports import PRESENCE
+from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
 from mesh.reliable import ATTEMPTS, identity
 from mesh.replay import ReplayTable
@@ -752,6 +752,23 @@ class _Cutoff:
         self.m.net.medium.cut(B, A)
 
 
+class _Lagging(_Cutoff):
+    """`_Cutoff` whose B loses its DODAG information at C while ``lagging``
+    (link B -> C cut while each one is on air): after a new version, B
+    adopts it and C stays behind it, in the old version."""
+
+    def __init__(self, seed):
+        self.lagging = True
+        _Cutoff.__init__(self, seed)
+
+    def _sent_by_b(self, sel, counter, now):
+        _Cutoff._sent_by_b(self, sel, counter, now)
+        if self.lagging and any(m.port == DODAG_INFO and len(m.payload) for m in sel.messages):
+            medium = self.m.net.medium
+            medium.cut(B, C)
+            self.m.net.at(now + sel.toa_ms + 1, medium.restore, B, C)
+
+
 class PoisonLost(unittest.TestCase):
     """B's poison is lost at C, which keeps B as parent and sends a frame
     during B's hold: B must not rejoin through C, its own child (TLA+
@@ -785,6 +802,69 @@ class PoisonLost(unittest.TestCase):
         m.net.medium.restore(B, A)
         m.run(m.net.now + 3 * P)
         self.assertEqual([m.preferred(n) for n in (A, B, C)], [ROOT, A, B])
+        self.assertEqual(m.consistent((A, B, C)), [])
+
+
+class AdoptionDuringTheHold(unittest.TestCase):
+    """TLA+ `DODAG_diamond_versions_adopt` on a line: B adopts a new version,
+    C stays behind it in the old one (B's DODAG information lost at C), then
+    A dies for B: B detaches, its poison lost at C, which keeps B and
+    advertises the old version during B's hold. B must not adopt it from
+    its own child (a loop): a detached node adopts another version only
+    after its solicitation, which C hears and detaches on."""
+
+    def test_no_adoption_from_a_child(self):
+        s = _Lagging(13)
+        m, b, c = s.m, s.b, s.c
+        start = m.net.now
+        m.root.routing.dodag.set_version(1, start)
+        m.root.node.wake()
+        m.run(start + 2 * P)
+        cd = c.routing.dodag
+        self.assertEqual((b.routing.dodag.version, cd.version), (1, 0))
+        self.assertEqual((cd.parents.preferred, cd.parents.behind), (B, True))
+
+        def advertise():
+            cd.rank_error(m.net.now)  # an advertisement at once
+            c.node.wake()
+
+        def on_detach(now):
+            # C, still attached through B, advertises during B's hold, once
+            # B's poison is over (B does not hear while it sends).
+            m.net.at(now + 100, advertise)
+
+        s.on_detach = on_detach
+        infos = []  # (time, rank) of C's DODAG information
+        base = c.engine.sent
+
+        def sent(sel, counter, now):
+            base(sel, counter, now)
+            if any(m.port == DODAG_INFO and len(m.payload) for m in sel.messages):
+                infos.append((now, c.engine.rank))
+
+        c.engine.sent = sent
+        cut = m.net.now
+        log = m.watch((B, C), cut)
+        loops = m.loop_samples((B, C), cut, cut + 3 * P)
+        s.cut(1)
+        m.run(cut + 5 * P // 2 + 4 * m.imin)
+        self.assertEqual(len(s.lost), 1)  # B's poison
+        self.assertEqual([p for t, n, p, r in log if n == B and p == C], [])
+        self.assertEqual(loops, [])
+        self.assertEqual(b.routing.dodag.version, 1)
+        self.assertEqual((m.rank(B), m.rank(C)), (RANK_INFINITE, RANK_INFINITE))
+        # C advertised the old version at a finite rank during B's hold
+        # (B's solicitation ended it).
+        ended = b.routing.parents.poisoned_at
+        during = [t for t, r in infos if s.detached <= t < ended and r != RANK_INFINITE]
+        self.assertTrue(during, (infos, s.detached, ended))
+        # A heard again: both rejoin in the new version, consistent.
+        s.lagging = False
+        m.net.medium.restore(A, B)
+        m.net.medium.restore(B, A)
+        m.run(m.net.now + 3 * P)
+        self.assertEqual([m.preferred(n) for n in (A, B, C)], [ROOT, A, B])
+        self.assertEqual([m.b(n).engine.dodag_version for n in (A, B, C)], [1, 1, 1])
         self.assertEqual(m.consistent((A, B, C)), [])
 
 

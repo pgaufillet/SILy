@@ -587,17 +587,28 @@ class Detach(unittest.TestCase):
         self.assertTrue(p.recompute(1600) & ATTACHED)
         self.assertEqual(p.preferred, A)
 
-    def test_new_version_ends_the_hold(self):
+    def test_new_version_keeps_the_hold_and_its_rejoin_rule(self):
+        # B, heard during the hold, may be a descendant that lost the
+        # poison, whatever its version (TLA+ `Adopt = "fresh"`).
         net = Net()
         net.hear(A, 8, 900)
         p = Parents(net.table, hold_ms=500)
         p.recompute(900)
         p.detach(1000)
+        net.hear(B, 8, 1100, version=1)
+        self.assertEqual(p.on_new_version(1, 1100), 0)
+        self.assertEqual((p.version, p.rank, p.hold_until), (1, RANK_INFINITE, 1500))
         p.recompute(1600)
         self.assertTrue(p.soliciting)
-        net.hear(B, 16, 1700, version=1)
-        self.assertTrue(p.on_new_version(1, 1700) & ATTACHED)
-        self.assertEqual((p.preferred, p.soliciting), (B, False))
+        self.assertEqual(p.on_new_version(2, 1650), 0)
+        self.assertTrue(p.soliciting)
+        self.assertTrue(p.solicited(1700))
+        # Adopted after the solicitation: B (heard before it) is no
+        # candidate, C (heard after it) is, at any rank.
+        net.hear(B, 8, 1650, version=3)
+        net.hear(C, 40, 1800, version=3)
+        self.assertTrue(p.on_new_version(3, 1800) & ATTACHED)
+        self.assertEqual((p.members(), p.rank, p.poisoned_at), ((C,), 48, None))
 
     def test_detach_without_route_has_no_rank_events(self):
         p = Parents(Net().table)
