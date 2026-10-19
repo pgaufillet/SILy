@@ -36,7 +36,8 @@ so that the mesh core is never left waiting; a radio found outside reception
 while idle is put back into it (``rx_restarts``).
 
 Counters (``stats()``) and CPU time of the radio paths (``cpu``, µs: count,
-total, maximum) serve the bench measurements (§18).
+total, maximum) serve the bench measurements (MESH_DESIGN §18,
+`docs/measurements.md`).
 """
 
 import asyncio

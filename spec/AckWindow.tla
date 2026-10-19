@@ -3,7 +3,7 @@
 (* Acknowledgement window, ETX and advertised rank of a relay R whose      *)
 (* preferred parent P (rank ParentRank, the root by default) is its only  *)
 (* parent (MESH_DESIGN §9 link estimation, rank and parent set; §12 class *)
-(* 1; §18 design issue 6).                                                 *)
+(* 1; design issue 6 of spec/README.md).                                   *)
 (*                                                                         *)
 (* No time: a behaviour is a sequence of acknowledgement samples. The code *)
 (* records one sample per class 1/2 message (reliable.py:405 on an         *)

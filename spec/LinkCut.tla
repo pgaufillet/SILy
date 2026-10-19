@@ -1,7 +1,7 @@
 ------------------------------ MODULE LinkCut ------------------------------
 (***************************************************************************)
 (* Re-eligibility of a link after a cut (MESH_DESIGN §9 link estimation;  *)
-(* §18 design issue 2; MP10, MP15). Discrete time in ticks.                *)
+(* design issue 2 of spec/README.md; MP10, MP15). Discrete time in ticks.  *)
 (*                                                                         *)
 (* A node R and its only possible parent X (worst case: no other parent to *)
 (* fall back on). X sends a frame every F ticks; R records it in its       *)

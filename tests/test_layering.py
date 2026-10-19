@@ -1,4 +1,4 @@
-"""Package isolation rules (MESH_DESIGN §1, ARCHITECTURE).
+"""Package isolation rules (MESH_DESIGN §1, README layout).
 
 - mesh: application-agnostic, platform injected: no sily, board, machine,
   and not the host-only simulator sim.

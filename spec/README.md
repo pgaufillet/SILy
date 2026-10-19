@@ -1,12 +1,30 @@
 # Link and time: TLA+ models of the mesh
 
 TLA+ models of the link estimation and timing rules of the mesh
-(MESH_DESIGN §7, §9, §12 class 1, §16), checked with TLC. They cover the
-three defects found by the M3-12 host scenarios (MESH_DESIGN §18, items 1, 2
-and 6) and the provisional choices made to fix them, and the options for
-a root beacon tolerating two consecutive losses. A routing model, `DODAG`
-(last section), covers items 3 and 5, rank following, DODAG version lag
-and the rejoin after a solicitation. Each defect has a configuration of the current design that
+(MESH_DESIGN §7, §9, §12 class 1, §16), checked with TLC. The host
+scenarios of upward routing found six design issues, numbered as found and
+quoted by number below and in the models, each fixed since:
+
+1. one lost root beacon made the root's children drop it, which rebuilt
+   the DODAG: root beacon on its own timer and parent silence limit of 2.5
+   periods, MESH_DESIGN §9 *Link estimation*, *Trickle and control
+   traffic*;
+2. acknowledgement failures never aged: failure ageing, §9 *Link
+   estimation*;
+3. a looped class 1 message was lost without error: custody of duplicates,
+   §12 *Class 1*;
+4. presence was refused above 80 % duty-cycle use, which hid the flag
+   reporting it: flag kept until a presence goes on air, §11 *Mesh ports*;
+5. a single lost poison let a detached node rejoin through its own
+   descendants: solicitation before the rejoin, §9 *Loop freedom*;
+6. one lost root acknowledgement made a relay's rank jump: one sample per
+   frame, `p_ack` from 4 samples, §9 *Link estimation*.
+
+The link and time models cover issues 1, 2 and 6, the choices made to fix
+them, and the options for a root beacon tolerating two consecutive losses.
+A routing model, `DODAG` (last section), covers issues 3 and 5, rank
+following, DODAG version lag and the rejoin after a solicitation. Each
+defect has a configuration of the current design that
 must fail with a counterexample; the choices have configurations that must
 hold, plus configurations just beyond each bound that must fail (the bounds
 are tight).
@@ -67,7 +85,7 @@ they mirror (file:line, `src/mesh`).
 - **DetectAny / DetectFresh** (`AckWindow`): KAny consecutive failures make
   a link ineligible whatever the history; KFresh do on a fresh window.
 
-## Provisional choices modelled
+## Choices modelled
 
 1. **Root beacon** on a periodic timer jittered by ±10 % (§7), independent
    of Trickle (`Timer = "periodic"`), and **parent silence threshold
@@ -84,8 +102,8 @@ they mirror (file:line, `src/mesh`).
    are removed from the window and its successes kept (`Aging = "failure"`,
    `Forget = "failures"`, delay Th).
 5. **Minimum sample count**: p_ack replaces 1/d_in² only from `NMin`
-   samples; 4 is the smallest value keeping P4Strong. **Latch** (proposed
-   mitigation of the d_in / p_ack switch): once the entry has held NMin
+   samples; 4 is the smallest value keeping P4Strong. **Latch** (mitigation
+   of the d_in / p_ack switch): once the entry has held NMin
    samples, p_ack is used whenever the window is not empty.
 
 ## Results
@@ -103,7 +121,7 @@ they mirror (file:line, `src/mesh`).
 | Tr, 2 lost presences tolerated | Tr ≥ 67 ticks = 3.35T | `Silence_root_P1_Tr67`, `_Tr66` |
 | Tr, 3 lost presences detected | Tr ≤ 72 ticks = 3.6T | `Silence_root_P2_Tr72`, `_Tr73` |
 | Tr band | **empty** (74 > 72), at D = 0 | `KMiss_Tr72` |
-| `K_MISS` = 4 (owner, session 23): Tr = 90 ticks = 4.5T | no false alarm; 3 lost tolerated up to D = 1 (T/20), 4 detected at D = 0 | `KMiss_Tr90`, `Silence_root4_P1_Tr90`, `_D1`, `_D2`, `Silence_root4_P2_Tr90`, `_D1` |
+| `K_MISS` = 4 (chosen, the band for 3 being empty): Tr = 90 ticks = 4.5T | no false alarm; 3 lost tolerated up to D = 1 (T/20), 4 detected at D = 0 | `KMiss_Tr90`, `Silence_root4_P1_Tr90`, `_D1`, `_D2`, `Silence_root4_P2_Tr90`, `_D1` |
 | Per-message samples (code) | one lost acknowledgement of an 8-message frame detaches the children even on a full window | `AckWindow_permessage_P4_full` |
 | Root beacon every half period (T = 10 ticks, presence period 20), Th unchanged (50) | 3 consecutive lost beacons tolerated up to D = 5 ticks (4 × 11 + D < 50), 6 fails; 2 tolerated up to the model's largest D, 8 ticks; 4 lost may go undetected until the next beacon (5 × 9 < 50); 5 detected up to D = 4, 5 fails | `Silence_half_*` |
 | Root beacon every 2/3 period (T = 20 ticks, presence period 30, Th = 75) | 2 consecutive lost beacons tolerated up to D = 8 ticks = 0.27 presence period (3 × 22 + D < 75), 9 fails; 3 lost drop the root | `Silence_twothirds_*` |
@@ -139,21 +157,23 @@ they mirror (file:line, `src/mesh`).
 - **Root alarm**: K_MISS is not implemented in the code; it is modelled as
   a silence threshold `Tr` on C's presence at the root (`RootTh`).
 
-## Open points (owner)
+## Choices from the models
 
-- **Root threshold Tr** (decided, owner, session 23: `K_MISS` = 4, Tr =
-  4.5T, about 135 s at SF7–8 and 270 s at SF9): with Th = 5T/2 the band for
-  `K_MISS` = 3 is empty (no false alarm after a relay failure needs
-  Tr ≥ 3.7T, detecting 3 lost presences Tr ≤ 3.6T). Checked at Tr = 90
-  ticks (`Silence_root4_*`, `KMiss_Tr90`): no false alarm after a relay
-  failure, 3 lost presences tolerated up to an on-air delay of T/20
-  (violated at T/10), 4 detected without delay; with any delay, 4 lost
-  presences may be detected one period late (5 always are). Residual: the
-  root alarm tolerates little on-air delay; to measure on the bench.
+- **Root threshold Tr**: `K_MISS` = 4, Tr = 4.5T, about 135 s at SF7–8 and
+  270 s at SF9 (MESH_DESIGN §16). With Th = 5T/2 the band for `K_MISS` = 3
+  is empty (no false alarm after a relay failure needs Tr ≥ 3.7T, detecting
+  3 lost presences Tr ≤ 3.6T), so 4 is the smallest count with a valid
+  threshold. Checked at Tr = 90 ticks (`Silence_root4_*`, `KMiss_Tr90`): no
+  false alarm after a relay failure, 3 lost presences tolerated up to an
+  on-air delay of T/20 (violated at T/10), 4 detected without delay; with
+  any delay, 4 lost presences may be detected one period late (5 always
+  are).
 - **P2 vs on-air delay**: with Th = 5T/2, P1 tolerates D ≤ T/4 but P2 only
   D ≤ T/5: between the two, two lost frames can go undetected until the
-  next frame (detection then takes one more period).
-- **Root beacon and two consecutive losses**: with one beacon per period a
+  next frame (detection then takes one more period). A known limit,
+  stated in MESH_DESIGN §9 (silence limit).
+- **Root beacon every half period** (MESH_DESIGN §9, Trickle and control
+  traffic): with one beacon per period a
   child of the root drops it after two consecutive lost beacons (gap up to
   3 × 1.1 = 3.3 periods > 2.5); having no other candidate of lower rank, it
   detaches with its subtree. A beacon every half period (±10 %) keeps the
@@ -168,7 +188,19 @@ they mirror (file:line, `src/mesh`).
   ≥ 3.35 periods to tolerate 2 losses, which with a report within T/20
   raises the root alarm on a root child that re-attaches after a cut (no false alarm needs Tr > 1.1 + Th + report
   delay: 4.7 periods at Th = 3.5), and lengthens the idle switch of a root
-  child by one period.
+  child by one period. The half period is therefore the choice: it
+  tolerates the most losses without changing any detection bound.
+- **Latch**: the mitigation of the d_in / p_ack switch, in the design
+  (MESH_DESIGN §9, link estimation); without it, anomaly 6 remains (bounded
+  to a loss at the NMin-th sample of a link whose d_in and p_ack disagree).
+
+## Open points
+
+The same points appear in MESH_DESIGN §18.
+
+- **Root alarm and on-air delay**: the root alarm at Tr = 4.5T tolerates
+  3 lost presences only up to an on-air delay variation of T/20; to measure
+  on the bench.
 - **Bad links seen only through presence**: from a full window, 13 lost
   presences (13 periods) are needed before the link becomes ineligible on
   its ETX; with class 1 traffic the 3-attempt drop acts within seconds.
@@ -182,9 +214,6 @@ they mirror (file:line, `src/mesh`).
   sent within one batching delay of each other give one failed sample
   (one sample per acknowledgement frame), which is `M = 1`, the case P4
   already checks (`AckWindow_nmin4_P4`: P4 and P4Strong hold).
-- **Latch**: proposed mitigation of the d_in / p_ack switch; without it,
-  anomaly 6 remains (bounded to a loss at the NMin-th sample of a link whose
-  d_in and p_ack disagree).
 
 # DODAG: routing, repair and class 1 custody
 
@@ -192,8 +221,9 @@ they mirror (file:line, `src/mesh`).
 selection, detach and poison, hold, solicitation and rejoin, data-path
 validation, a relay death, DODAG versions and global repair — together
 with class 1 custody (hop-by-hop acknowledgement, duplicate cache, 3
-attempts and parent drop, holding, errors). It covers MESH_DESIGN §18 items
-3 (a looped class 1 message is lost without error) and 5 (single poison),
+attempts and parent drop, holding, errors). It covers issues 3 (a looped
+class 1 message is lost without error) and 5 (single poison) of the first
+section,
 and later defects of the readings: a child cannot follow its preferred
 parent's rank increase (it detaches), a node behind a new DODAG version
 detaches after one lost advertisement, and a node rejoins through the first
@@ -254,7 +284,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   them, overheard data frames included. **Losses**: per receiver, at most
   `MaxLoss` overall and at most `MaxConsec` consecutive frames of one node
   lost by one neighbour.
-- **Acknowledgements** (`Acks`): `"atomic"` (first model, the M3-12 code):
+- **Acknowledgements** (`Acks`): `"atomic"` (first model, the code before
+  fix 3):
   an explicit acknowledgement is atomic with the reception, may be lost
   (counted in `MaxLoss` only) and carries no rank; a detached node keeps
   retrying its waiting copies towards its former parent. `"frame"` (the code
@@ -390,7 +421,7 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 | Fix 3 variant (retake) | silent loss: the copy taken back is later sent to a former loop member whose first sender it is, which drops it as a retransmission | `DODAG_line_retake_MP5` |
 | Both fixes, liveness | MP5Live, LoopsEnd, RanksSettle, MP10Live, CutOffLive hold, atomic (diamond ≤ 2 losses, line without MP5Live) and as frames with the refined rule (diamond ≤ 2, subtree ≤ 1, line without MP5Live) | `DODAG_*_fixed_live`, `DODAG_*_frame_refined_live` |
 | Current design, diamond | liveness holds (local repair only, no detach) | `DODAG_diamond_current_live` |
-| Partition | a relay holding a message when it is cut off fails it after the holding; its error cannot reach the origin, cut off too (accepted as an MP5 exception, owner, session 23) | `DODAG_line_partition_MP5Live` |
+| Partition | a relay holding a message when it is cut off fails it after the holding; its error cannot reach the origin, cut off too (accepted as an MP5 exception: with no link, no failure can travel; class 2 recovers it) | `DODAG_line_partition_MP5Live` |
 | Non-vacuity (frames, refined) | loops form with 2 consecutive losses even with both fixes; messages delivered, errors received, rank errors detected | `DODAG_subtree_frame_witness_*` |
 
 Rank following and DODAG versions, on the code since fixes 3 and 5
@@ -451,7 +482,9 @@ subtree during its hold. Adopting only after the hold (after the
 solicitation, a second poison) removes it with at most one consecutive
 loss per link, as fix 5 does for rejoins in one version.
 
-## Open points (owner)
+## From the models to the code
+
+How each fix is implemented, what it costs, and the limits accepted.
 
 - **Fix 3 in the code**: implemented with the refined rule
   (`Reliable.holding(key, source)` in `LinkEngine._receive` and
@@ -461,7 +494,7 @@ loss per link, as fix 5 does for rejoins in one version.
   Cost: a lost acknowledgement whose retransmission reaches a relay that has
   already handed the message over makes one duplicate travel the rest of the
   path (filtered by the root). MESH_DESIGN §9 (data-path validation) and §12
-  (duplicate cache) to update.
+  (duplicate cache) describe it.
 - **Code changes for fix 5**: `Dodag._routing` (dodag.py:480-492): at the
   end of the hold, solicit without selecting; the hold lasts until the
   solicitation goes on air (`Dodag._sent`), which sets
@@ -473,11 +506,13 @@ loss per link, as fix 5 does for rejoins in one version.
   of a detached node (acknowledgements, solicitations) carries rank 255 and
   acts as a poison; the model's frame mode includes its acknowledgements
   (data retries towards the former parent no longer exist). MESH_DESIGN §9
-  (detach) and the M3-11 reading "the poison is sent once" to update.
+  (detach) describes it; the poison is still sent once (a lost one is
+  covered by the solicitation that ends the hold).
 - **Partition**: a relay cut off from the root while holding a class 1
   message fails it after 2 periods; its error is held then dropped (an error
   about an error is never generated): the origin, cut off as well, never
-  learns. Not one of MP5's accepted exceptions (class 2 recovers it).
+  learns. Accepted as an exception to MP5 (MESH_DESIGN §2, §12): with no
+  link at all no failure can travel; class 2 recovers it.
 - **Code changes for rank following**: `Parents.candidate_cost`
   (parents.py:162): the rank test `n.rank >= self.rank` does not apply to
   the preferred parent (`n.address == self.preferred`); its path cost stays
@@ -489,8 +524,7 @@ loss per link, as fix 5 does for rejoins in one version.
   leave the set (parents.py:320-323). Cost: a loop formed despite fix 5 (two
   consecutive losses) is no longer broken by the rank rule but by a switch
   or by the bound (above). MESH_DESIGN §9 (candidates, bounded rank
-  increase: "a rank increase only uses neighbours whose rank is lower" now
-  excepts the preferred parent) to update.
+  increase) excepts the preferred parent from the rank test.
 - **Code changes for no detach behind a version**: `Dodag._heard`
   (dodag.py:393-398) marks the node behind without a 2 Imin limit
   (`BEHIND_IMIN`, dodag.py:123, and the end of `_behind_until` at
@@ -507,13 +541,11 @@ loss per link, as fix 5 does for rejoins in one version.
   (dodag.py:441): a detached node adopts another version only when
   `Parents` is neither in its hold nor waiting for its solicitation
   (`hold_until is None and not soliciting`); `Parents.on_new_version`
-  (parents.py:223-225) then no longer ends a hold. MESH_DESIGN §9 ("a
-  detached node adopts any version it hears") and the readings "a node
-  behind a newer version keeps its parents up to 2 Imin", "a new version
-  ends the hold" to update.
+  (parents.py:223-225) then no longer ends a hold. MESH_DESIGN §9 (loop
+  freedom, across versions) states the rule.
 - **Code changes for the answer window**: `Parents.solicited`
   (parents.py:225-237) opens a window, `window_until = now + window_ms`
-  (one Imin, set by `Dodag._apply_info` beside `hold_ms`, dodag.py:338), for
+  (Imin + 8 slots, set by `Dodag._apply_info` beside `hold_ms`), for
   every solicitation of a detached node that goes on air (`Dodag._sent`,
   dodag.py:420-429: the one ending the hold, the periodic ones of
   dodag.py:529-533, the boot one), and only the one ending the hold sets
@@ -526,14 +558,13 @@ loss per link, as fix 5 does for rejoins in one version.
   `_select` honours it), so that an adoption in the window waits for its
   close. At boot the first DODAG information is still adopted at once (the
   parameters), the selection waits for the window of the boot
-  solicitation (not modelled: the model has no boot). The detach + rejoin
-  bound of §9 is unchanged (the window is the Imin already counted for the
-  answers); the rejoin comes at the close instead of the first answer. A
-  Trickle answer leaves within [Imin/2, Imin) of its reset, plus its desync
-  and time on air: a window of exactly Imin can miss the latest answers (a
-  margin of a few slots catches them; those after the close are taken only
-  by the switch threshold). MESH_DESIGN §9 (detach: "the first candidate
-  heard is taken"; solicitation) to update.
+  solicitation (not modelled: the model has no boot). The rejoin comes at
+  the close instead of the first answer. A Trickle answer leaves within
+  [Imin/2, Imin) of its reset, plus its desync and time on air: a window of
+  exactly Imin can miss the latest answers (those after the close are taken
+  only by the switch threshold), hence the 8 slots of margin, which the
+  detach + rejoin time of MESH_DESIGN §9 includes (detach; Trickle,
+  solicitation).
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
@@ -544,3 +575,11 @@ loss per link, as fix 5 does for rejoins in one version.
   subtree graph with 1 loss only (≈ 4 minutes), with versions on the line
   (≤ 2 losses) and on the diamond with a relay death (≤ 1 loss, no
   message: with a message the safety check alone has 300 000 states).
+
+## Open points
+
+- **Global repair wave**: a solicitation of finite rank (only a node behind
+  a newer version sends one) answered by newer neighbours only, so that the
+  node's own children no longer answer it in the window of its parent's
+  advertisement (MESH_DESIGN §9, global repair wave; §18). To decide, then
+  to model (`Versions = 2`) and check on the seed runs.
