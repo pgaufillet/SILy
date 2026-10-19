@@ -160,6 +160,7 @@ class Medium:
         self.ports = {}
         self._order = []  # ports in attach order: deterministic iteration
         self._links = {}  # (src, dst) -> Link
+        self._out = {}  # src -> [(dst port, Link)] in attach order
 
     # Topology.
 
@@ -181,7 +182,11 @@ class Medium:
                 raise ValueError("unknown address")
         if src == dst:
             raise ValueError("self link")
-        self._links[(src, dst)] = Link(loss, rssi, snr)
+        links = self._links
+        links[(src, dst)] = Link(loss, rssi, snr)
+        self._out[src] = [
+            (p, links[(src, p.address)]) for p in self._order if (src, p.address) in links
+        ]
 
     def link_both(self, a, b, loss=0.0, rssi=-80, snr=10):
         """Create the links a -> b and b -> a with the same parameters."""
@@ -245,9 +250,8 @@ class Medium:
         for r in port._rx:  # half duplex: receptions in progress are lost
             if r.end > now and r.fate is None:
                 r.fate = HALF_DUPLEX
-        for dst in self._order:
-            link = self._links.get((port.address, dst.address))
-            if link is None or not link.up:
+        for dst, link in self._out.get(port.address, ()):
+            if not link.up:
                 continue
             r = _Reception(dst, tx.end, link, self.rng.chance(link.loss))
             if dst._transmitting(now):
