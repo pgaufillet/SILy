@@ -44,12 +44,22 @@ NODES ?= 30
 MINUTES ?= 10
 SEED ?= 1
 
-.PHONY: help check test seeds simbench lint firmware flash deploy spec spec-pass spec-defects
+# Large-network suite (`make large`, tests/large.py): every scenario and
+# topology at 30 nodes on LARGE_SEEDS seeds, plus one 64-node run per
+# scenario, LARGE_JOBS runs at a time; RUN="SCENARIO TOPOLOGY SEED [NODES]"
+# runs one of them alone with its full report.
+LARGE_SEEDS ?= 3
+LARGE_JOBS ?= 4
+RUN ?=
+LARGE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/large.py
+
+.PHONY: help check test seeds simbench large lint firmware flash deploy spec spec-pass spec-defects
 
 help:
 	@echo "make test                 host tests on the MicroPython unix port"
 	@echo "make seeds [SEEDS=24]     scenario suites on SEEDS seeds (not part of check)"
 	@echo "make simbench             simulator benchmark: wall clock, digest (NODES, MINUTES, SEED)"
+	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
 	@echo "make lint                 ruff (check, format) and codespell"
 	@echo "make check                lint + test"
 	@echo "make firmware             build the $(BOARD) firmware"
@@ -69,6 +79,15 @@ seeds:
 
 simbench:
 	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/simbench.py $(NODES) $(MINUTES) $(SEED)
+
+large:
+ifeq ($(strip $(RUN)),)
+	@dir=$$(mktemp -d) && start=$$(date +%s) && \
+	$(LARGE) plan $(LARGE_SEEDS) | xargs -P $(LARGE_JOBS) -L 1 $(LARGE) run $$dir; \
+	$(LARGE) summary $$dir $$(($$(date +%s) - start)); status=$$?; rm -rf $$dir; exit $$status
+else
+	$(LARGE) run - $(RUN)
+endif
 
 lint:
 	$(RUFF) check .
