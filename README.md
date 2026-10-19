@@ -23,7 +23,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     on the unix port and can be extracted later; its core is event-driven
     without I/O (time and events in, actions and next deadline out,
     `mesh/core.py`), driven by its asyncio runner on the board
-    (`mesh/runner.py`) and by the simulator on the host;
+    (`mesh/runner.py`) and by the simulator on the host; its design is
+    described in `docs/MESH_DESIGN.md`;
   - `board/` — board support, the only hardware-specific code: T3S3 wiring,
     ESP32 platform of the mesh (NVS, RTC memory, random source), SX1262
     radio adapter (reception, transmission, carrier sense).
@@ -36,6 +37,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 - `tests/` — host tests (`run.py` runner, `test_*.py` modules).
 - `tools/bench.py` — two-board bench measurements, run from the host over
   the serial ports; results in `docs/measurements.md`.
+- `tools/mesh_budget.py` — airtime budget and repair times of the mesh
+  design (CPython 3), the source of the figures of `docs/MESH_DESIGN.md`.
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
   `LILYGO_T3_S3` board plus the frozen `lora-async` package.
 
