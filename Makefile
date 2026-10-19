@@ -38,11 +38,18 @@ LINT_PATHS = src sim tests tools docs firmware Makefile README.md
 # Runs of the scenario suites for `make seeds` (seed shifts 0 to SEEDS - 1).
 SEEDS ?= 24
 
-.PHONY: help check test seeds lint firmware flash deploy spec spec-pass spec-defects
+# Simulator benchmark (`make simbench`): grid of NODES boards for MINUTES
+# simulated minutes from SEED.
+NODES ?= 30
+MINUTES ?= 10
+SEED ?= 1
+
+.PHONY: help check test seeds simbench lint firmware flash deploy spec spec-pass spec-defects
 
 help:
 	@echo "make test                 host tests on the MicroPython unix port"
 	@echo "make seeds [SEEDS=24]     scenario suites on SEEDS seeds (not part of check)"
+	@echo "make simbench             simulator benchmark: wall clock, digest (NODES, MINUTES, SEED)"
 	@echo "make lint                 ruff (check, format) and codespell"
 	@echo "make check                lint + test"
 	@echo "make firmware             build the $(BOARD) firmware"
@@ -59,6 +66,9 @@ test:
 
 seeds:
 	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/seeds.py $(SEEDS)
+
+simbench:
+	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/simbench.py $(NODES) $(MINUTES) $(SEED)
 
 lint:
 	$(RUFF) check .
