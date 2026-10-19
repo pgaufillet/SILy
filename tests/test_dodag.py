@@ -21,7 +21,7 @@ from mesh.dodag import (
     default_info,
     encode_info,
 )
-from mesh.frame import BROADCAST, LINK_LOCAL, RANK_INFINITE, ROOT, Header, Message
+from mesh.frame import BROADCAST, LINK_LOCAL, RANK_INFINITE, ROOT, UPWARD, Header, Message
 from mesh.link import open_link
 from mesh.parents import MAX_RANK_INCREASE
 from mesh.ports import DODAG_INFO
@@ -436,22 +436,79 @@ class Adoption(_Case):
         self.assertEqual(len(sol), 1)
         self.assertTrue(sol[0][0] - start < 200)
         self.assertEqual(sol[0][1].dodag_version, 3)
-        # Behind: parents kept, upward traffic keeps its next hop.
-        b.advance(start + b.imin)
+        # Behind: parents kept, upward traffic keeps its next hop; another
+        # frame of the newer version does not solicit again.
+        b.advance(start + b.imin // 2)
         b.rx(self.p.frame(16, 4))
         self.assertEqual((d.parents.preferred, b.engine.rank, d.counters.poisons), (P, 24, 0))
-        self.assertEqual(len(b.solicitations(start)), 2)  # at most one per Imin
+        self.assertEqual(d.next_hop(Message(UPWARD, 0, 20, b"up")), P)
+        self.assertEqual(len(b.solicitations(start)), 1)
         b.rx(self.p.info(16, 4))
         self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (4, P, 24))
 
-    def test_behind_without_answer_drops_the_old_parents(self):
+    def test_behind_keeps_its_parent_and_solicits_with_backoff(self):
+        # The parent moved to version 4, its DODAG information lost (TLA+
+        # `DODAG_line_versions_lag`): no detach; the node keeps it at its own
+        # rank and solicits again after Imin, the gap doubling up to the
+        # presence period, until it adopts the version.
         b = self.attached(3)
         b.steady([(self.p, 16, 3)])
         start = b.now
+        d = b.dodag
+        b.rx(self.p.frame(40, 4))  # a rank of another version: not compared
+        for k in range(1, 9):  # heard within the silence limit
+            b.advance(start + 4000 * k)
+            b.rx(self.p.frame(40, 4))
+        self.assertEqual((d.parents.preferred, b.engine.rank, d.counters.poisons), (P, 24, 0))
+        self.assertEqual((d.version, d.parents.behind), (3, True))
+        self.assertEqual(d.next_hop(Message(UPWARD, 0, 20, b"up")), P)
+        times = [t for t, h in b.solicitations(start)]
+        gaps = [t1 - t0 for t0, t1 in zip(times, times[1:])]
+        expected = [b.imin, 2 * b.imin, 4 * b.imin, PERIOD, PERIOD]
+        self.assertEqual(len(gaps), len(expected), gaps)
+        for gap, e in zip(gaps, expected):
+            self.assertTrue(abs(gap - e) < 300, (gaps, expected))
+        # The answer comes through: adopted, no more solicitations.
+        b.rx(self.p.info(40, 4))
+        self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (4, P, 48))
+        self.assertFalse(d.parents.behind)
+        count = len(times)
+        b.advance(b.now + 2 * PERIOD)
+        self.assertEqual(len(b.solicitations(start)), count)
+        self.assertEqual((d.parents.preferred, d.counters.poisons), (P, 0))
+
+    def test_behind_keeps_selecting_in_its_version(self):
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        d = b.dodag
+        b.rx(self.q.frame(16, 4))  # Q moved to version 4; P has not
+        b.rx(self.s.frame(4, 3))  # path cost 12, better than P's by 12
+        self.assertEqual((d.parents.preferred, b.engine.rank), (S, 12))
+        self.assertEqual(d.counters.poisons, 0)
+        self.assertTrue(d.parents.behind)
+
+    def test_parent_lost_while_behind_detaches_and_ends_the_solicitations(self):
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        start = b.now
+        d = b.dodag
         b.rx(self.p.frame(16, 4))
-        b.advance(start + 2 * b.imin + 10)
-        self.assertEqual(b.dodag.counters.poisons, 1)
-        self.assertEqual(b.engine.rank, RANK_INFINITE)
+        b.advance(start + 2 * PERIOD)
+        self.assertEqual((d.parents.preferred, d.counters.poisons), (P, 0))
+        self.assertTrue(d.parents.behind)
+        detach = start + 5 * PERIOD // 2  # P's silence limit (§9)
+        b.advance(detach + 100)
+        self.assertEqual((d.counters.poisons, b.engine.rank), (1, RANK_INFINITE))
+        self.assertFalse(d.parents.behind)
+        # No solicitation of the backoff during the hold: the hold's own
+        # one at its end (rank 255), then once per presence period.
+        late = DESYNC_SLOTS * b.engine.slot_ms + 100
+        b.advance(detach + 2 * b.imin - 1)
+        self.assertEqual(b.solicitations(detach), [])
+        b.advance(detach + 2 * b.imin + late)
+        sol = b.solicitations(detach)
+        self.assertEqual(len(sol), 1)
+        self.assertEqual(sol[0][1].rank, RANK_INFINITE)
 
 
 class Resets(_Case):

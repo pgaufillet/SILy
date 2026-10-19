@@ -628,6 +628,80 @@ class NewVersion(unittest.TestCase):
         self.assertTrue(events & DETACHED)
 
 
+class Behind(unittest.TestCase):
+    """A node behind a newer version keeps its preferred parent once that
+    parent has moved to it, at its own rank (§9; TLA+ `Behind = "keep"`)."""
+
+    def setUp(self):
+        # Version 1 through A (rank 16, ETX 1): rank 24.
+        self.net = Net()
+        self.p = Parents(self.net.table)
+        self.p.on_new_version(1, 0)
+        self.net.hear(A, 16, 0, version=1)
+        self.p.recompute(0)
+        self.assertEqual((self.p.preferred, self.p.rank), (A, 24))
+
+    def cost(self, address, now):
+        return self.p.candidate_cost(self.net.table.get(address), now)
+
+    def test_preferred_parent_of_a_newer_version_kept_at_the_own_rank(self):
+        self.net.hear(A, 100, 100, version=2)  # its rank in version 2: not compared
+        self.p.behind = True
+        self.assertEqual(self.cost(A, 100), 24)
+        self.assertEqual(self.p.recompute(100), 0)
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((A,), 24, 24))
+        self.assertEqual(self.p.detaches, 0)
+
+    def test_not_behind_the_parent_of_another_version_is_lost(self):
+        self.net.hear(A, 16, 100, version=2)
+        self.assertIsNone(self.cost(A, 100))
+        self.assertTrue(self.p.recompute(100) & DETACHED)
+
+    def test_only_the_preferred_parent_and_only_newer(self):
+        self.p.behind = True
+        self.net.hear(B, 4, 100, version=2)  # not the preferred parent
+        self.assertIsNone(self.cost(B, 100))
+        self.net.hear(A, 16, 100, version=0)  # older
+        self.assertIsNone(self.cost(A, 100))
+        self.net.hear(A, 16, 200, version=9)  # 8 apart: not comparable
+        self.assertIsNone(self.cost(A, 200))
+        self.net.hear(A, 16, 300, version=8)  # 7 ahead: newer
+        self.assertEqual(self.cost(A, 300), 24)
+
+    def test_poisoned_silent_or_dropped_parent_not_kept(self):
+        self.p.behind = True
+        self.net.hear(A, RANK_INFINITE, 100, version=2)
+        self.assertIsNone(self.cost(A, 100))
+        self.net.hear(A, 16, 200, version=2)
+        self.assertIsNone(self.cost(A, 200 + 5 * _PERIOD // 2))
+        self.assertEqual(self.p.next_parent(A, 300), HOLD)
+        self.assertEqual(self.p.rank, RANK_INFINITE)
+        self.assertFalse(self.p.behind)  # cleared by the detach
+
+    def test_better_candidate_of_the_own_version_switches(self):
+        self.p.behind = True
+        self.net.hear(A, 2, 100, version=2)
+        self.net.hear(C, 2, 100, version=1)  # path cost 10: better by 14
+        events = self.p.recompute(100)
+        self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED)
+        # A, of another version, is no secondary member (rank 2 not compared).
+        self.assertEqual((self.p.members(), self.p.rank), ((C,), 10))
+        self.assertEqual(self.net.flagged(), [C])
+
+    def test_secondary_members_of_the_own_version(self):
+        self.p.behind = True
+        self.net.hear(A, 30, 100, version=2)
+        self.net.hear(C, 10, 100, version=1)  # path cost 18: better by 6 only
+        self.p.recompute(100)
+        self.assertEqual((self.p.members(), self.p.rank), ((A, C), 24))
+
+    def test_new_version_clears_it(self):
+        self.p.behind = True
+        self.net.hear(A, 16, 100, version=2)
+        self.p.on_new_version(2, 100)
+        self.assertEqual((self.p.behind, self.p.preferred, self.p.rank), (False, A, 24))
+
+
 class Root(unittest.TestCase):
     def test_root_rank_zero_no_parent(self):
         net = Net()

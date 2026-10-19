@@ -20,6 +20,14 @@ infinite: no route or poisoned).
   (`next_parent`) is no candidate until a new frame of it is heard; after a
   detach, only neighbours heard after the solicitation that ends its hold
   are.
+- **Behind a newer version** (``behind``, set by the Trickle step when a
+  frame of a newer version is heard; cleared by `on_new_version` and the
+  detach): the preferred parent stays a candidate once it has moved to a
+  newer version (finite rank, under the same silence, drop and link
+  rules), at the node's own rank as path cost (ranks of different versions
+  are not compared), until the node adopts the version (§9 DODAG version).
+  The other candidates keep the node's version; the preferred parent of
+  another version is never a secondary member.
 - **Parent set**: the `SIZE` (3) candidates of lowest path cost, ordered by
   path cost, then larger margin (§9 tie-break), then lower address (so that
   the result does not depend on the table's slot order). **Preferred
@@ -77,6 +85,7 @@ SIZE = 3  # parent set members
 SWITCH_THRESHOLD = 12  # path cost gain to switch preferred parent (1.5 hops)
 RANK_HYSTERESIS = 4  # advertised rank change to advertise it (half a hop)
 VERSION_MASK = 0x0F  # 4-bit DODAG version
+_HALF = 8  # serial arithmetic on 4 bits: versions less than 8 apart compare
 
 # Event flags.
 PARENT_CHANGED = 1  # preferred parent changed (presence report at once)
@@ -121,7 +130,8 @@ class Parents:
     detach or a new version), ``preferred`` (address or None), ``cost``
     (path cost through it at the last selection), `members`,
     ``hold_until``, ``soliciting``, ``poisoned_at``; counters ``switches``,
-    ``detaches``, ``drops``.
+    ``detaches``, ``drops``. Read and set: ``behind`` (a newer version
+    heard, not adopted yet).
     """
 
     def __init__(self, table, root=False, max_increase=MAX_RANK_INCREASE, hold_ms=0, clock=None):
@@ -138,6 +148,7 @@ class Parents:
         self.poisoned_at = None  # last detach, then the solicitation ending its hold
         self.hold_until = None  # end of the detach hold's 2 Imin
         self.soliciting = False  # hold over, waiting for the solicitation to go on air
+        self.behind = False  # a newer version heard, not adopted yet
         self.now = None
         self.switches = 0
         self.detaches = 0
@@ -167,11 +178,17 @@ class Parents:
         """Return the path cost through neighbour entry n if it is a candidate, else None.
 
         The preferred parent is one at any rank (its increase is followed,
-        within the bound), the others below the advertised rank.
+        within the bound), the others below the advertised rank. While the
+        node is behind, the preferred parent moved to a newer version is one
+        at the node's own rank.
         """
-        if n.version != self.version:
-            return None
-        if n.rank >= self.rank and n.address != self.preferred:
+        across = n.version != self.version
+        if across:
+            if not (self.behind and n.address == self.preferred and n.rank != RANK_INFINITE):
+                return None
+            if not 0 < (n.version - self.version) & VERSION_MASK < _HALF:
+                return None  # not newer
+        elif n.rank >= self.rank and n.address != self.preferred:
             return None
         if now - n.heard >= silence_ms(self.table.period_ms):
             return None
@@ -181,6 +198,8 @@ class Parents:
             return None
         if not n.eligible():
             return None
+        if across:
+            return self.rank
         cost = n.rank + link_cost(n.etx())
         return cost if cost <= self.bound() else None
 
@@ -235,6 +254,7 @@ class Parents:
         self.poisoned_at = None
         self.hold_until = None
         self.soliciting = False
+        self.behind = False
         self._dropped.clear()
         events = self._select(now)
         if self.rank == RANK_INFINITE:
@@ -295,7 +315,9 @@ class Parents:
         for n in table.entries():
             cost = self.candidate_cost(n, now)
             if cost is not None:
-                _insert(best, (cost, -n.margin(), n.address, n.rank))
+                # A preferred parent of another version: never a secondary member.
+                rank = n.rank if n.version == self.version else RANK_INFINITE
+                _insert(best, (cost, -n.margin(), n.address, rank))
         if not best:
             if self.rank != RANK_INFINITE:
                 return self._detach(now)
@@ -345,6 +367,7 @@ class Parents:
         self.poisoned_at = now
         self.hold_until = now + self.hold_ms if self.hold_ms else None
         self.soliciting = False
+        self.behind = False
         self.detaches += 1
         events = DETACHED
         if was != RANK_INFINITE:

@@ -156,6 +156,62 @@ class GlobalRepair(unittest.TestCase):
         line.check_quiet(self, before)
 
 
+class LostInformation(unittest.TestCase):
+    """Global repair with A's DODAG information lost at B for 3 presence
+    periods (TLA+ `DODAG_line_versions_lag`): B hears A's other frames of
+    the new version, so it is behind. It keeps A as parent at its own rank,
+    forwards through it and solicits with backoff: no node detaches, and B
+    then its subtree adopt the version once an answer comes through."""
+
+    def test_lagging_node_keeps_its_subtree(self):
+        line = Line(5)
+        line.run(12 * line.imin)
+        line.steady()
+        a, b = line.nodes[0], line.nodes[1]
+        medium = line.net.medium
+        losing = [True]
+        base = a.engine.sent
+
+        def sent(sel, counter, now):
+            base(sel, counter, now)
+            if losing[0] and any(m.port == DODAG_INFO and len(m.payload) for m in sel.messages):
+                medium.cut(A, B)  # while on air: lost at B only
+                line.net.at(now + sel.toa_ms + 1, medium.restore, A, B)
+
+        def stop():
+            losing[0] = False
+
+        a.engine.sent = sent
+        start = line.net.now
+        line.root.routing.dodag.set_version(1, start)
+        line.root.node.wake()
+        end = start + 3 * PERIOD
+        line.net.at(end, stop)
+        reports = len(line.reports)
+        line.run(end)
+        d = b.routing.dodag
+        self.assertEqual([x.routing.dodag.counters.poisons for x in line.nodes], [0] * 4)
+        self.assertEqual(line.attached(), [True] * 4)
+        self.assertEqual(d.parents.preferred, A)
+        self.assertEqual(a.routing.dodag.version, 1)
+        self.assertEqual((d.version, d.parents.behind), (0, True))
+        # Upward traffic kept flowing through B: presence reports of its
+        # subtree reached the root during the change.
+        origins = set(o for port, o in line.reports[reports:] if port == PRESENCE)
+        self.assertTrue(set((B, C, D)) <= origins, origins)
+        # Solicitations with backoff (Imin, doubling up to the presence
+        # period): at most 6 in 3 periods, where one per Imin would be 18.
+        self.assertTrue(2 <= d.counters.solicits <= 6, d.counters.solicits)
+        # Answers come through: B adopts at its next frame at the latest
+        # (a solicitation within the presence period), then C and D.
+        line.run(end + PERIOD + 6 * line.imin)
+        self.assertEqual([x.engine.dodag_version for x in line.boards], [1] * 5)
+        self.assertEqual([x.routing.dodag.counters.poisons for x in line.nodes], [0] * 4)
+        self.assertEqual([x.routing.parents.preferred for x in line.nodes], [ROOT, A, B, C])
+        self.assertFalse(d.parents.behind)
+        line.check_ranks(self)
+
+
 class DetachRejoin(unittest.TestCase):
     def test_relay_lost_then_back(self):
         line = Line(7)

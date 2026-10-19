@@ -46,10 +46,15 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   message with another regional profile identifier is not adopted and is
   counted (``foreign_profile``, MP22), as is a malformed one.
 - **Across versions** (§9): a frame of a newer version from a neighbour of
-  finite rank means the node is behind: it solicits (at most once per
-  Imin) and keeps its parent set as it is until it adopts the version, for
-  at most 2 Imin (upward traffic keeps flowing); an older one resets the
-  Trickle timer.
+  finite rank means the node is behind (`Parents.behind`): it keeps
+  selecting in its own version, keeps its preferred parent once that parent
+  has moved to the newer version (at its own rank) and forwards through it,
+  and solicits with backoff until it adopts the version: at once (at most
+  once per Imin), then after Imin, the gap doubling up to the presence
+  period; a detach ends them (the hold's solicitation follows). A frame of
+  an older version resets the Trickle timer: the solicitations and every
+  other frame of a node behind make its newer neighbours answer within
+  Imin.
 - **Detach** (poisoning, §9 loop freedom): when no candidate remains, the
   node advertises rank 255 at once (Trickle reset), selects nothing for
   2 Imin (``Parents.hold_ms``), then stops its Trickle timer and sends a
@@ -68,7 +73,8 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   way).
 - **Solicitation**: a node without route solicits at boot after a random
   delay in [0, Imin], at the end of the detach hold, then once per presence
-  period while it has no route.
+  period while it has no route; a node behind a newer version, with
+  backoff (above).
 - **Root**: rank 0, never adopts. **Beacon** (§16): one DODAG information
   advertisement, priority 2, every presence period jittered by ±10 % (§7),
   the timer re-armed from each firing; it runs beside Trickle, whose resets
@@ -120,7 +126,6 @@ INFO_SIZE = 8
 DESYNC_SLOTS = 4  # random delay of the poison and solicitations (CW_MIN slots, §8)
 TOPOLOGY_ON_CHANGE = 0x01  # flags bit 0: topology report on change (deployment, §17)
 HOLD_IMIN = 2  # detach hold, in Imin (§9)
-BEHIND_IMIN = 2  # Imin a node keeps its parents while behind a newer version
 
 # Topology period (s) per SF 7-12, SILy profile (§16).
 TOPOLOGY_S = (180, 300, 600, 900, 3600, 3600)
@@ -292,7 +297,7 @@ class Dodag:
         self._poison_at = None  # poison advertisement due
         self._ask_at = None  # solicitation for the DODAG information of another version
         self._asked = None  # time of the last one (at most one per Imin)
-        self._behind_until = None  # behind a newer version: parents kept until
+        self._ask_gap = None  # behind a newer version: gap to the next one (backoff)
         self._advert = None  # (slot, message) of the last advertisement queued
         self._rank_advert = None  # time of the last advertisement after a rank error
         self._solicit = None  # ... and of the last solicitation
@@ -392,9 +397,10 @@ class Dodag:
             self.trickle.reset(now, True)
         else:
             c.newer += 1
-            if not self.root:
-                if self._behind_until is None:
-                    self._behind_until = now + BEHIND_IMIN * self.imin_ms
+            p = self.parents
+            if not self.root and not p.behind:
+                p.behind = True  # solicit with backoff until adopted
+                self._ask_gap = self.imin_ms
                 self._ask(now)
         return n
 
@@ -470,7 +476,6 @@ class Dodag:
             self._solicit_at,
             self._poison_at,
             self._ask_at,
-            self._behind_until,
         ):
             if u is not None and (t is None or u < t):
                 t = u
@@ -494,18 +499,20 @@ class Dodag:
             self._poison_at = None
             if not self.attached:
                 self._advertise(True)
-        if self._behind_until is not None and now >= self._behind_until:
-            self._behind_until = None
-            self._dirty = True  # stop keeping the parents of the old version
+        p = self.parents
         if self._ask_at is not None and now >= self._ask_at:
             self._ask_at = None
             self._asked = now
             self._send_solicitation()
-        p = self.parents
+            if p.behind:  # again after the gap, doubled up to the presence period
+                gap = self._ask_gap
+                self._ask_at = now + gap
+                period = self.engine.neighbours.period_ms
+                self._ask_gap = 2 * gap if 2 * gap < period else period
         due = self._dirty or (self._check_at is not None and now >= self._check_at)
         if p.hold_until is not None and now >= p.hold_until:
             due = True
-        if due and self.configured and self._behind_until is None:
+        if due and self.configured:
             self._dirty = False
             p.recompute(now)
             self._apply(p.events(), now)
@@ -551,6 +558,7 @@ class Dodag:
     def _poison(self, now):
         self.engine.rank = RANK_INFINITE
         self.counters.poisons += 1
+        self._ask_at = None  # no longer behind: the hold's solicitation follows
         self.trickle.reset(now)
         self._poison_at = now + self._desync()
         hold = self.parents.hold_until
@@ -562,7 +570,6 @@ class Dodag:
         self.engine.dodag_version = version
         self.configured = True
         self.counters.adoptions += 1
-        self._behind_until = None
         self._ask_at = None
         self._dirty = False
         self.parents.on_new_version(version, now)
