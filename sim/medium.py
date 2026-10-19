@@ -32,6 +32,9 @@ Model, per transmission of ``airtime_ms(len(frame))`` ms over [start, end):
 - **Airtime**: ``TX_DONE`` reports the computed time on air; per-node
   statistics give the time spent transmitting and the time the channel was
   heard busy (`Stats`).
+- **Observation**: ``on_transmit``, if set, is called with (source, start,
+  end) at the start of each transmission, and `links` lists the scripted
+  links; neither changes what the medium does.
 
 Events reach nodes through the scheduler, never re-entrantly. A transmission
 or carrier sense requested while the node transmits raises RuntimeError (a
@@ -157,6 +160,7 @@ class Medium:
         self.capture_db = capture_db
         self.sense_ms = sense_ms
         self.trace = [] if trace else None
+        self.on_transmit = None
         self.ports = {}
         self._order = []  # ports in attach order: deterministic iteration
         self._links = {}  # (src, dst) -> Link
@@ -196,6 +200,10 @@ class Medium:
     def get_link(self, src, dst):
         """Return the `Link` src -> dst, or None."""
         return self._links.get((src, dst))
+
+    def links(self):
+        """Return [(src, dst, `Link`)] of every scripted link, up or cut."""
+        return [(src, dst, link) for (src, dst), link in self._links.items()]
 
     def cut(self, src, dst):
         """Cut the directed link src -> dst (kept for restore)."""
@@ -247,6 +255,8 @@ class Medium:
         port._tx = tx
         port.stats.tx_count += 1
         port.stats.tx_ms += duration
+        if self.on_transmit is not None:
+            self.on_transmit(port.address, now, now + duration)
         for r in port._rx:  # half duplex: receptions in progress are lost
             if r.end > now and r.fate is None:
                 r.fate = HALF_DUPLEX
