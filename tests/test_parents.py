@@ -615,6 +615,107 @@ class Detach(unittest.TestCase):
         self.assertEqual(p.detach(0), DETACHED)
 
 
+class AnswerWindow(unittest.TestCase):
+    """Every solicitation of a detached node opens an answer window: no
+    selection until its close, then the best candidate heard after the
+    solicitation that ended the hold (TLA+ `Rejoin = "window"`, RejoinBest)."""
+
+    def detached(self):
+        # Attached through A, detached at 1000; the hold (500 ms) ends at
+        # the solicitation of 1500, which opens the window (300 ms).
+        self.net = Net()
+        self.net.hear(A, 8, 900)
+        p = Parents(self.net.table, hold_ms=500, window_ms=300)
+        p.recompute(900)
+        p.detach(1000)
+        self.assertIsNone(p.window_until)
+        self.assertTrue(p.solicited(1500))
+        self.assertEqual((p.poisoned_at, p.window_until), (1500, 1800))
+        return p
+
+    def test_best_candidate_heard_in_the_window_taken_at_its_close(self):
+        p = self.detached()
+        self.net.hear(D, 0, 1400)  # heard before the solicitation: no candidate
+        self.net.hear(B, 24, 1550)  # first answer: path cost 32
+        self.assertEqual(p.recompute(1550), 0)
+        self.net.hear(C, 16, 1700)  # later and better by 8, less than the switch threshold
+        self.assertEqual(p.recompute(1799), 0)
+        self.assertEqual((p.preferred, p.rank), (None, RANK_INFINITE))
+        self.assertEqual(p.next_parent(B, 1700), HOLD)  # a class 1 drop selects nothing either
+        self.net.hear(B, 24, 1750)
+        events = p.recompute(1800)
+        self.assertTrue(events & ATTACHED)
+        self.assertEqual((p.members(), p.rank, p.window_until), ((C,), 24, None))
+
+    def test_empty_window_then_first_candidate_heard(self):
+        p = self.detached()
+        self.assertEqual(p.recompute(1800), 0)
+        self.assertIsNone(p.window_until)
+        self.net.hear(B, 24, 3500)  # A silent by now
+        self.assertTrue(p.recompute(3500) & ATTACHED)
+        self.assertEqual((p.preferred, p.rank), (B, 32))
+        # A better candidate heard afterwards needs the switch threshold.
+        self.net.hear(C, 16, 3550)
+        p.recompute(3550)
+        self.assertEqual((p.preferred, p.rank), (B, 32))
+
+    def test_periodic_and_boot_solicitations_open_a_window(self):
+        # At boot (no hold): only the window, no rejoin rule.
+        net = Net()
+        p = Parents(net.table, hold_ms=500, window_ms=300)
+        net.hear(B, 24, 50)
+        self.assertFalse(p.solicited(100))
+        self.assertEqual((p.window_until, p.poisoned_at), (400, None))
+        net.hear(C, 16, 200)
+        self.assertEqual(p.recompute(399), 0)
+        self.assertTrue(p.recompute(400) & ATTACHED)
+        self.assertEqual(p.preferred, C)
+        # Periodic, after a window closed empty: a new one; the rejoin rule
+        # stays that of the hold's solicitation.
+        p = self.detached()
+        self.assertEqual(p.recompute(1800), 0)
+        self.net.hear(D, 0, 1400)  # heard before the hold's solicitation
+        self.assertFalse(p.solicited(2000))
+        self.assertEqual((p.window_until, p.poisoned_at), (2300, 1500))
+        self.net.hear(B, 24, 2100)
+        self.assertEqual(p.recompute(2100), 0)
+        self.net.hear(C, 16, 2200)
+        self.assertTrue(p.recompute(2300) & ATTACHED)
+        self.assertEqual((p.preferred, p.rank), (C, 24))
+
+    def test_window_neither_opened_in_the_hold_nor_extended_nor_kept_by_a_detach(self):
+        self.net = Net()
+        self.net.hear(A, 8, 900)
+        p = Parents(self.net.table, hold_ms=500, window_ms=300)
+        p.recompute(900)
+        self.assertFalse(p.solicited(950))  # attached (behind a newer version)
+        self.assertIsNone(p.window_until)
+        p.detach(1000)
+        self.assertFalse(p.solicited(1200))  # in the hold
+        self.assertIsNone(p.window_until)
+        self.assertTrue(p.solicited(1500))
+        self.assertFalse(p.solicited(1700))  # another version heard: not extended
+        self.assertEqual(p.window_until, 1800)
+        self.net.hear(A, 8, 1750)
+        p.recompute(1800)
+        self.assertEqual(p.preferred, A)
+        p.detach(2000)
+        self.assertEqual((p.window_until, p.hold_until), (None, 2500))
+
+    def test_new_version_in_the_window_waits_for_its_close(self):
+        # Selecting at the adoption would take the first answer of the new
+        # version (TLA+ `Rejoin = "window_rejoin"` violates RejoinBest).
+        p = self.detached()
+        self.net.hear(B, 24, 1600, version=1)
+        self.assertEqual(p.on_new_version(1, 1600), 0)
+        self.assertEqual((p.version, p.rank, p.window_until, p.poisoned_at), (1, 255, 1800, 1500))
+        self.net.hear(D, 0, 1400, version=1)  # heard before the solicitation: no candidate
+        self.net.hear(C, 16, 1700, version=1)
+        self.assertEqual(p.recompute(1700), 0)
+        self.assertTrue(p.recompute(1800) & ATTACHED)
+        self.assertEqual((p.preferred, p.rank), (C, 24))
+
+
 class NewVersion(unittest.TestCase):
     def test_parents_of_new_version_any_rank(self):
         net = Net()

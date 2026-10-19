@@ -14,6 +14,7 @@ from mesh.dodag import (
     DESYNC_SLOTS,
     INFO_SIZE,
     TOPOLOGY_S,
+    WINDOW_SLOTS,
     Dodag,
     DodagInfo,
     compare_versions,
@@ -294,7 +295,8 @@ class Boot(_Case):
     def test_adopts_the_first_version_and_its_parameters(self):
         b = Bench()
         b.advance(b.imin + 100)
-        start = b.now
+        sol = b.solicitations()[0][0]  # at boot: it opened the answer window
+        slot = b.engine.slot_ms
         info = DodagInfo(1, 20, 120, 16, 40, EU)
         b.rx(self.p.info(16, 3, info))
         d = b.dodag
@@ -308,15 +310,43 @@ class Boot(_Case):
         self.assertEqual(d.trickle.imin, imin)
         self.assertEqual(d.trickle.imax, 20000)
         self.assertEqual(d.parents.hold_ms, 2 * imin)
+        self.assertEqual(d.parents.window_ms, imin + WINDOW_SLOTS * slot)
         self.assertEqual(d.parents.max_increase, 40)
         self.assertEqual(d.counters.adoptions, 1)
+        # Adopted at once, the parent selected at the close of the window
+        # (opened under the default Imin of 32 slots).
+        self.assertEqual((d.parents.preferred, b.engine.rank), (None, RANK_INFINITE))
+        close = sol + (32 + WINDOW_SLOTS) * slot
+        self.assertEqual(d.parents.window_until, close)
+        b.advance(close - 1)
+        self.assertEqual(b.engine.rank, RANK_INFINITE)
+        b.advance(close)
         # First parent: attached, Trickle reset, advertised within Imin.
         self.assertEqual((d.parents.preferred, b.engine.rank), (P, 24))
+        start = b.now
         b.imin = imin
         t, h = self.assertAdvertWithin(b, start, version=3, rank=24)
         self.assertEqual(b.port9(t)[0][2], bytes(encode_info(info)))
         b.advance(start + 30000)  # P still a parent (2.5 presence periods: 50 s)
         self.assertEqual(len(b.solicitations(start)), 0)
+
+    def test_boot_takes_the_best_answer_of_its_window(self):
+        b = Bench()
+        b.advance(b.imin + 100)
+        d = b.dodag
+        close = d.parents.window_until
+        self.assertEqual(close, b.solicitations()[0][0] + b.imin + WINDOW_SLOTS * b.engine.slot_ms)
+        b.rx(self.p.info(24, 3))  # first answer: path cost 32
+        self.assertEqual((d.version, b.engine.rank), (3, RANK_INFINITE))
+        b.advance(b.now + 100)
+        b.rx(self.q.info(16, 3))  # better by 8, less than the switch threshold
+        b.advance(close)
+        self.assertEqual((d.parents.members(), b.engine.rank), ((Q,), 24))
+        # The version adopted in the window is owed at the attach: frames
+        # without DODAG information do not suppress the advertisement.
+        b.rx(self.p.frame(24, 3))
+        b.rx(self.q.frame(16, 3))
+        self.assertAdvertWithin(b, close, version=3, rank=24)
 
     def test_no_parent_before_adoption(self):
         b = Bench()
@@ -532,8 +562,11 @@ class Adoption(_Case):
         ended = d.parents.poisoned_at
         self.assertTrue(ended >= start + 2 * b.imin, ended)
         self.assertTrue(ended in [t for t, h in b.solicitations(start)])
-        # Heard after the solicitation: adopted, attached at any rank.
+        # Heard after the solicitation: adopted at once, attached at any
+        # rank at the close of the answer window.
         b.rx(self.q.info(40, 2))
+        self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (2, None, RANK_INFINITE))
+        b.advance(d.parents.window_until)
         self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (2, Q, 48))
 
 
@@ -689,11 +722,41 @@ class Resets(_Case):
         self.assertEqual(len(sol), 1)
         self.assertEqual((d.parents.preferred, b.engine.rank), (None, RANK_INFINITE))
         self.assertEqual(d.parents.poisoned_at, sol[0][0])
-        # Rejoined through Q, heard after the solicitation.
+        # Answer window of Imin + 8 slots from the solicitation: Q heard
+        # first, then S, better by less than the switch threshold.
+        close = sol[0][0] + b.imin + WINDOW_SLOTS * b.engine.slot_ms
+        self.assertEqual(d.parents.window_until, close)
+        b.rx(self.q.frame(20, 3))
+        b.advance(b.now + b.imin // 2)
+        b.rx(self.s.frame(12, 3))
+        b.advance(close - 1)
+        self.assertEqual((d.parents.preferred, b.engine.rank), (None, RANK_INFINITE))
+        # Rejoined at the close through the best one heard after the solicitation.
+        b.advance(close)
+        self.assertEqual((d.parents.preferred, b.engine.rank), (S, 20))
+        self.assertEqual(d.parents.members(), (S,))
+        # First parent after the detach: Trickle reset.
+        self.assertAdvertWithin(b, close, rank=20)
+
+    def test_empty_window_then_first_candidate_heard(self):
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        d = b.dodag
+        b.rx(self.p.frame(RANK_INFINITE, 3))  # the parent's poison: detached
+        late = DESYNC_SLOTS * b.engine.slot_ms + 100
+        b.advance(b.now + 2 * b.imin + late)
+        close = d.parents.window_until
+        sol = b.solicitations()[-1][0]
+        self.assertEqual(close, sol + b.imin + WINDOW_SLOTS * b.engine.slot_ms)
+        b.advance(close)
+        self.assertIsNone(d.parents.window_until)
+        self.assertEqual(b.engine.rank, RANK_INFINITE)
+        # Nothing heard in the window: the first candidate heard is taken.
+        b.advance(close + 500)
         b.rx(self.q.frame(20, 3))
         self.assertEqual((d.parents.preferred, b.engine.rank), (Q, 28))
-        # First parent after the detach: Trickle reset.
-        self.assertAdvertWithin(b, b.now, rank=28)
+        b.rx(self.s.frame(12, 3))  # better by 8: kept (switch threshold 12)
+        self.assertEqual((d.parents.preferred, b.engine.rank), (Q, 28))
 
     def test_detached_until_the_solicitation_goes_on_air(self):
         b = self.attached(3)
@@ -747,8 +810,13 @@ class Resets(_Case):
         self.assertEqual(len(times), 3)
         for t0, t1 in zip(times, times[1:]):
             self.assertTrue(PERIOD <= t1 - t0 <= PERIOD + late, times)
-        # An answer heard after the poison: rejoined.
+        # An answer heard in the window of the third solicitation: rejoined
+        # at its close.
         b.rx(self.p.info(16, 3))
+        close = b.dodag.parents.window_until
+        self.assertEqual(close, times[2] + b.imin + WINDOW_SLOTS * b.engine.slot_ms)
+        self.assertEqual(b.engine.rank, RANK_INFINITE)
+        b.advance(close)
         self.assertEqual((b.dodag.parents.preferred, b.engine.rank), (P, 24))
         b.advance(b.now + PERIOD + 500)
         self.assertEqual(len(b.solicitations(detach)), 3)

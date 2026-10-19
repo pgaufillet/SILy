@@ -44,20 +44,28 @@ infinite: no route or poisoned).
   ``hold_ms`` (2 Imin, set by the Trickle step; 0 by default), then until
   its solicitation goes on air (`solicited`, ``soliciting`` meanwhile); it
   then rejoins through neighbours heard after that solicitation, at any
-  rank (without hold: after the poison). A child that lost the poison
-  hears the solicitation (rank 255) and detaches in turn, so that it is no
-  candidate (§9, TLA+ `DODAG`: no loop with at most one loss in a row on a
-  link). A loop formed despite it (two losses in a row) is not broken by
-  the rank rule, each member following the other's increase: it ends by a
-  switch or when a member's path cost passes the bound (§9).
+  rank (without hold: after the poison). **Answer window**: every
+  solicitation of a detached node (the one ending the hold, the periodic
+  ones without route, the one at boot) opens a window of ``window_ms``
+  (Imin and a margin, set by the Trickle step; 0 by default) during which
+  it selects nothing; at its close it takes the lowest path cost among the
+  candidates heard meanwhile (no switch threshold: it has no preferred
+  parent), and if none was heard, the first candidate heard afterwards.
+  A child that lost the poison hears the solicitation (rank 255) and
+  detaches in turn, so that it is no candidate (§9, TLA+ `DODAG`: no loop
+  with at most one loss in a row on a link). A loop formed despite it
+  (two losses in a row) is not broken by the rank rule, each member
+  following the other's increase: it ends by a switch or when a member's
+  path cost passes the bound (§9).
 - **Parent flags**: the set's members are flagged in the neighbour table
   (`NeighbourTable.set_parent`), so that eviction spares them.
 
 Entry points for the later steps: `recompute` (after frames are heard, at
-each presence period, on a timer), `next_parent` / `reroute` (the link
-engine's ``reroute``: class 1 attempts exhausted on a parent, §12), `detach`,
-`solicited` and `on_new_version` (Trickle and DODAG version, §9). Each returns event
-flags (`PARENT_CHANGED`, `RANK_CHANGED`, `RANK_INCREASED`, `DETACHED`,
+each presence period, on a timer, at the close of the answer window),
+`next_parent` / `reroute` (the link engine's ``reroute``: class 1 attempts
+exhausted on a parent, §12), `detach`, `solicited` and `on_new_version`
+(Trickle and DODAG version, §9). Each returns event flags
+(`PARENT_CHANGED`, `RANK_CHANGED`, `RANK_INCREASED`, `DETACHED`,
 `ATTACHED`), also accumulated until read by `events`: the caller copies
 ``rank`` and ``version`` into the frame header (``LinkEngine.rank``,
 ``dodag_version``), resets Trickle, sends its presence at once after a
@@ -70,9 +78,11 @@ bound L + 56 makes a candidate unusable (as a path cost above 254 does),
 the node detaching when none remains; a dropped parent stays excluded
 until heard again; the root keeps rank 0 and selects nothing; a
 solicitation sent during the hold's 2 Imin (another version heard) does
-not end it; a new version does not end the hold nor lift its rejoin rule
-(its parents are taken at any rank, among the neighbours heard after the
-solicitation).
+not end it, nor opens a window; a new version does not end the hold or
+the window nor lift its rejoin rule (its parents are taken at any rank,
+among the neighbours heard after the solicitation, at the window's close);
+a solicitation sent while the window is open (another version heard) does
+not extend it.
 """
 
 from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, UPWARD
@@ -123,23 +133,27 @@ class Parents:
 
     table: its `NeighbourTable`; root: True on the root (rank 0, no parent);
     max_increase: MaxRankIncrease; hold_ms: selection pause after a detach
-    (then until `solicited`);
+    (then until `solicited`); window_ms: answer window after a solicitation
+    of a detached node;
     clock: function() -> now (ms) used by `reroute`, which receives no time
     (None: the time of the last `recompute`).
 
     Read: ``rank`` (advertised), ``version``, ``lowest`` (L, None after a
     detach or a new version), ``preferred`` (address or None), ``cost``
     (path cost through it at the last selection), `members`,
-    ``hold_until``, ``soliciting``, ``poisoned_at``; counters ``switches``,
-    ``detaches``, ``drops``. Read and set: ``behind`` (a newer version
-    heard, not adopted yet).
+    ``hold_until``, ``soliciting``, ``poisoned_at``, ``window_until``;
+    counters ``switches``, ``detaches``, ``drops``. Read and set:
+    ``behind`` (a newer version heard, not adopted yet).
     """
 
-    def __init__(self, table, root=False, max_increase=MAX_RANK_INCREASE, hold_ms=0, clock=None):
+    def __init__(
+        self, table, root=False, max_increase=MAX_RANK_INCREASE, hold_ms=0, window_ms=0, clock=None
+    ):
         self.table = table
         self.root = root
         self.max_increase = max_increase
         self.hold_ms = hold_ms
+        self.window_ms = window_ms
         self.clock = clock
         self.version = 0
         self.rank = RANK_ROOT if root else RANK_INFINITE
@@ -149,6 +163,7 @@ class Parents:
         self.poisoned_at = None  # last detach, then the solicitation ending its hold
         self.hold_until = None  # end of the detach hold's 2 Imin
         self.soliciting = False  # hold over, waiting for the solicitation to go on air
+        self.window_until = None  # close of the answer window of a detached node
         self.behind = False  # a newer version heard, not adopted yet
         self.now = None
         self.switches = 0
@@ -226,11 +241,18 @@ class Parents:
         """A solicitation went on air at now: it ends the detach hold once its time is over.
 
         Only neighbours heard after now are candidates from then on (§9:
-        rejoin through neighbours heard after the solicitation). Returns True
-        if it ended the hold.
+        rejoin through neighbours heard after the solicitation). A
+        solicitation of a detached node outside the hold opens the answer
+        window, unless one is open. Returns True if it ended the hold.
         """
-        if not self.soliciting and (self.hold_until is None or now < self.hold_until):
+        if self.rank != RANK_INFINITE:
+            return False  # attached (behind a newer version), or the root
+        if self.hold_until is not None and now < self.hold_until:
             return False
+        if self.window_until is None or now >= self.window_until:
+            self.window_until = now + self.window_ms
+        if not self.soliciting and self.hold_until is None:
+            return False  # at boot, or periodic without route
         self.soliciting = False
         self.hold_until = None
         self.poisoned_at = now
@@ -311,6 +333,10 @@ class Parents:
             self.soliciting = True
         if self.soliciting:
             return 0  # until `solicited`
+        if self.window_until is not None:
+            if now < self.window_until:
+                return 0  # answers still to come
+            self.window_until = None
         best = []  # (path cost, -margin, address, rank), lowest first
         for n in table.entries():
             cost = self.candidate_cost(n, now)
@@ -367,6 +393,7 @@ class Parents:
         self.poisoned_at = now
         self.hold_until = now + self.hold_ms if self.hold_ms else None
         self.soliciting = False
+        self.window_until = None
         self.behind = False
         self.detaches += 1
         events = DETACHED

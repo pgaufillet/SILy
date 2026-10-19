@@ -21,8 +21,8 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   frame was heard (after the frame's messages, so that a DODAG information
   message of a new version is adopted first), when a member falls silent
   (the silence limit, `mesh.neighbours.silence_ms`: 2.5 presence periods),
-  when a member's acknowledgement failures age out (its ETX may fall) and
-  when the detach hold ends.
+  when a member's acknowledgement failures age out (its ETX may fall),
+  when the detach hold ends and when the answer window closes.
 - **Advertisements**: when the Trickle timer says so, a frame to every
   neighbour holding one DODAG information message (23 B), priority 1 (every
   Trickle advertisement follows a reset, §6); one still queued (the root
@@ -47,7 +47,9 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   version, its own included. It takes the network-wide parameters
   (periods, Imin, maximum rank increase, flags), resets L
   (`Parents.on_new_version`, which keeps a detach hold and its rejoin
-  rule) and its Trickle timer. A message with another regional profile
+  rule) and its Trickle timer, the DODAG information owed (port 9 messages
+  only suppress it); a node without route resets it when it attaches (in
+  an answer window, below). A message with another regional profile
   identifier is not adopted and is counted (``foreign_profile``, MP22), as
   is a malformed one.
 - **Across versions** (§9): a frame of a newer version from a neighbour of
@@ -66,8 +68,7 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   solicitation without selecting; the hold lasts until the solicitation
   goes on air (`Parents.solicited`, from ``sent``: a full queue or the duty
   cycle keep the node detached), and the node rejoins only through
-  neighbours heard after it (selection at each frame heard: the first
-  candidate heard is taken). The poison is sent once: a child that lost it
+  neighbours heard after it. The poison is sent once: a child that lost it
   hears the solicitation (rank 255) and detaches in turn.
   The poison and the solicitations leave after a random delay of at most
   `DESYNC_SLOTS` slots (the frame header says rank 255 at once): nodes
@@ -80,6 +81,20 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   delay in [0, Imin], at the end of the detach hold, then once per presence
   period while it has no route; a node behind a newer version, with
   backoff (above).
+- **Answer window**: a solicitation of a node without route (at boot, at
+  the end of the hold, the periodic ones; `Parents.solicited`) opens a
+  window of Imin + `WINDOW_SLOTS` slots from the time it goes on air
+  (``Parents.window_ms``), during which the node selects nothing. The
+  neighbours reset their Trickle timers at the end of the solicitation (at
+  most one slot on air) and answer before Imin; an answer then waits at
+  most one busy channel sense (a backoff of at most `mesh.link.CW_MIN`
+  slots, §8) and takes at most 1.25 slots on air (23 B): 1 + 4 + 2 slots,
+  and one more for the step. At its close the node takes the best
+  candidate heard (lowest path cost, §9), or with none the first candidate
+  heard afterwards (selection at each frame heard). A version adopted in
+  the window keeps it (`Parents.on_new_version`); at boot, the first DODAG
+  information is adopted at once (parameters), the parent selected at the
+  close of the window if it is still open.
 - **Root**: rank 0, never adopts. **Beacon** (§16): one DODAG information
   advertisement, priority 2, every presence period jittered by ±10 % (§7),
   the timer re-armed from each firing; it runs beside Trickle, whose resets
@@ -131,6 +146,7 @@ INFO_SIZE = 8
 DESYNC_SLOTS = 4  # random delay of the poison and solicitations (CW_MIN slots, §8)
 TOPOLOGY_ON_CHANGE = 0x01  # flags bit 0: topology report on change (deployment, §17)
 HOLD_IMIN = 2  # detach hold, in Imin (§9)
+WINDOW_SLOTS = 8  # answer window beyond Imin: solicitation 1 + backoff 4 + answer 2 + step 1
 
 # Topology period (s) per SF 7-12, SILy profile (§16).
 TOPOLOGY_S = (180, 300, 600, 900, 3600, 3600)
@@ -306,6 +322,7 @@ class Dodag:
         self._advert = None  # (slot, message) of the last advertisement queued
         self._rank_advert = None  # time of the last advertisement after a rank error
         self._solicit = None  # ... and of the last solicitation
+        self._info_owed = False  # a version adopted: Trickle reset with its information owed
         self.changed = None  # function(events, now) after events are applied
         # Extension points: each wrapper calls the engine's previous method.
         self._base_heard = engine.heard
@@ -336,6 +353,7 @@ class Dodag:
         engine.neighbours.set_period(period)
         self.trickle.configure(self.imin_ms, period)
         self.parents.hold_ms = HOLD_IMIN * self.imin_ms
+        self.parents.window_ms = self.imin_ms + WINDOW_SLOTS * engine.slot_ms
         self.parents.max_increase = info.max_increase
 
     # --- Entry points ------------------------------------------------------------------
@@ -425,7 +443,8 @@ class Dodag:
                 if len(m.payload):
                     info = True
                 elif not self.root:
-                    self.parents.solicited(now)  # ends the detach hold
+                    self.parents.solicited(now)  # ends the detach hold, opens the window
+                    self._watch()  # its close
         self.trickle.transmitted(info)
 
     def _on_info(self, origin, msg, header):
@@ -522,6 +541,8 @@ class Dodag:
         due = self._dirty or (self._check_at is not None and now >= self._check_at)
         if p.hold_until is not None and now >= p.hold_until:
             due = True
+        if p.window_until is not None and now >= p.window_until:
+            due = True
         if due and self.configured:
             self._dirty = False
             p.recompute(now)
@@ -532,15 +553,17 @@ class Dodag:
                 self._send_solicitation()
                 self._solicit_at = now + self.engine.neighbours.period_ms + self._desync()
 
-    def _apply(self, events, now, need_info=False):
+    def _apply(self, events, now):
         p = self.parents
         if events & DETACHED:
+            self._info_owed = False
             self._poison(now)
         else:
             self.engine.rank = p.rank
             if events & ATTACHED:
                 self._solicit_at = None
-            if need_info and self.attached:
+            if self._info_owed and self.attached:
+                self._info_owed = False
                 self.trickle.reset(now, True)
             elif events & (ATTACHED | RANK_INCREASED):
                 self.trickle.reset(now)
@@ -552,9 +575,13 @@ class Dodag:
 
     def _watch(self):
         # Next time a member of the parent set falls silent or its failures
-        # age out (same limit, `NeighbourTable.expire`), or the hold ends.
+        # age out (same limit, `NeighbourTable.expire`), the hold ends or the
+        # answer window closes (no selection before the first adoption).
         p = self.parents
         t = p.hold_until
+        w = p.window_until
+        if w is not None and self.configured and (t is None or w < t):
+            t = w
         limit = silence_ms(self.engine.neighbours.period_ms)
         for a in p.members():
             n = self.engine.neighbours.get(a)
@@ -583,7 +610,8 @@ class Dodag:
         self._ask_at = None
         self._dirty = False
         self.parents.on_new_version(version, now)
-        self._apply(self.parents.events(), now, True)
+        self._info_owed = True  # at once, or once attached (answer window)
+        self._apply(self.parents.events(), now)
 
     # --- Sending -----------------------------------------------------------------------------
 

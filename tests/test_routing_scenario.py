@@ -251,19 +251,19 @@ class Forming(unittest.TestCase):
         self.assertEqual([m.rank(n) is not None and m.rank(n) < 255 for n in NODES], [True] * 5)
         self.assertEqual(m.consistent(NODES), [])
         self.assertEqual([m.preferred(n) for n in (A, B)], [ROOT, ROOT])
-        # C, D: A (larger margin) at equal path cost; a frame lost to a
-        # collision while the windows fill may make B cheaper, by less than
-        # the switch threshold if the node had chosen A first (§9).
+        # C, D: A or B, at a path cost within the switch threshold of the
+        # other's (§9). A and B attach each at the close of its own answer
+        # window: C or D, whose window closed before, takes the first one
+        # heard (A by its larger margin only if both were candidates then);
+        # a frame lost to a collision while the windows fill may also make
+        # one cheaper, by less than the switch threshold.
         for n in (C, D):
             p = m.b(n).routing.parents
             cost = dict(
                 (x, p.candidate_cost(m.b(n).engine.neighbours.get(x), m.net.now)) for x in (A, B)
             )
-            if cost[A] == cost[B]:
-                self.assertEqual(p.preferred, A, cost)
-            else:
-                self.assertTrue(p.preferred in (A, B), cost)
-                self.assertTrue(cost[p.preferred] - min(cost.values()) < SWITCH_THRESHOLD, cost)
+            self.assertTrue(p.preferred in (A, B), cost)
+            self.assertTrue(cost[p.preferred] - min(cost.values()) < SWITCH_THRESHOLD, cost)
         self.assertTrue(m.preferred(E) in (C, D))
         # One hop of ETX close to 1 each (a frame lost to a collision while
         # the windows fill raises an ETX a little).
@@ -377,8 +377,8 @@ class RelayKilled(unittest.TestCase):
         self.assertTrue(took >= rel.relay_timeout_ms, took)
         # D, without traffic, switches when the relay has been silent for 2.5
         # periods. (A node that rejoins after its solicitation takes the
-        # first neighbour heard, §9: it may be D, whose parent is the dead
-        # relay; D then has traffic.)
+        # best candidate heard in its answer window, §9: it may be D, whose
+        # parent is the dead relay; D then has traffic.)
         if D in children and not m.b(D).engine.counters.tx_messages[APP]:
             self.assertTrue(switched(log, D, relay)[0] >= 5 * P // 2 - 11 * P // 10)
         # Every class 1 message reached the root once (local repair, §1).
@@ -882,8 +882,10 @@ class LoopCustody(unittest.TestCase):
         sent = []
 
         def on_detach(now):
-            # C's message reaches B shortly before its hold ends.
-            due = b.routing.parents.hold_until - 300
+            # C's message reaches B shortly before its answer window closes
+            # (C drops B after its class 1 attempts, about 2 s).
+            p = b.routing.parents
+            due = p.hold_until + p.window_ms - 1000
             m.net.at(due, lambda: sent.append(c.submit(APP, 1, ROOT, b"m")))
             # A heard again once the loop is over.
             m.net.at(now + 4 * m.imin, m.net.medium.restore, A, B)
@@ -904,3 +906,81 @@ class LoopCustody(unittest.TestCase):
         got = [p for o, p in m.root.inbox_from(APP) if o == C]
         failed = [f for f in c.failures if f[3] == sent[0]]
         self.assertTrue((len(got), len(failed)) in ((1, 0), (0, 1)), (got, failed))
+
+
+class RejoinBest(unittest.TestCase):
+    """TLA+ `DODAG_rejoin_*` on the code: root — A — C and root — B — F — D
+    — E. C (rank 16 under A) detaches when A dies; the links C — D and C —
+    E come up at its poison (D at 24, E at 32: no candidates of C at 16,
+    nor C, then detached, of D or E). After its solicitation C hears E
+    early (a report E sends at once), and D, better by 8, less than the
+    switch threshold: taking the first candidate heard would keep C on E
+    for good. C waits for the close of its answer window (Imin + 8 slots
+    after the solicitation) and takes D, the best candidate heard in it
+    (§9)."""
+
+    def test_rejoin_through_the_best_candidate_of_the_window(self):
+        f = 0x00F1
+        names = (ROOT, A, B, C, D, E, f)
+        links = (
+            (ROOT, A, 10),
+            (A, C, 10),
+            (ROOT, B, 10),
+            (B, f, 10),
+            (f, D, 10),
+            (D, E, 10),
+            (C, D, 10),
+            (C, E, 10),
+        )
+        m = Mesh(14, names, links)
+        medium = m.net.medium
+        medium.partition((C,), (D, E))
+        m.run(12 * m.imin + 3 * P)
+        for _ in range(60):
+            if [m.preferred(n) for n in (A, C, f, D, E)] == [ROOT, A, B, f, D]:
+                break
+            m.run(m.net.now + 1000)
+        else:
+            raise AssertionError("graph not formed")
+        c, e = m.b(C), m.b(E)
+        p = c.routing.parents
+        solicited = []  # times of C's solicitations at rank 255
+        heard = []  # (time, source) of the frames C hears after the first one
+        base_sent, base_heard = c.engine.sent, c.engine.heard
+
+        def sent(sel, counter, now):
+            base_sent(sel, counter, now)
+            if c.engine.rank != RANK_INFINITE:
+                return
+            medium.heal((C,), (D, E))  # from C's poison on
+            if any(x.port == DODAG_INFO and not len(x.payload) for x in sel.messages):
+                solicited.append(now)
+                if len(solicited) == 1:  # E has a report to send (class 0)
+                    m.net.at(now + 200, e.submit, APP, 0, ROOT, b"e")
+
+        def on_heard(header, rssi, snr, now):
+            if solicited and header.rank != RANK_INFINITE:
+                heard.append((now, header.source))
+            return base_heard(header, rssi, snr, now)
+
+        c.engine.sent = sent
+        c.engine.heard = on_heard
+        kill = m.net.now
+        log = m.watch((C,), kill)
+        m.b(A).power_loss(off_ms=OFF)
+        # Silence limit, hold, window (3.25 Imin and the random delays).
+        m.run(kill + 5 * P // 2 + 5 * m.imin)
+        self.assertEqual(c.routing.dodag.counters.poisons, 1)
+        self.assertTrue(solicited, log)
+        close = solicited[0] + c.routing.dodag.imin_ms + 8 * c.engine.slot_ms
+        # Both heard in the window.
+        sources = [s for t, s in heard if t < close]
+        self.assertTrue(E in sources and D in sources, heard)
+        # C rejoined at the close, through D, and keeps it.
+        rejoin = [(t + kill, x) for t, n, x, r in log if t + kill > solicited[0]]
+        self.assertTrue(rejoin, log)
+        self.assertEqual(rejoin[0][1], D, log)
+        self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
+        self.assertEqual([x for t, x in rejoin if x != D], [], log)
+        self.assertEqual([p.preferred, m.preferred(D), m.preferred(E)], [D, f, D])
+        self.assertEqual(m.consistent((B, C, D, E, f)), [])
