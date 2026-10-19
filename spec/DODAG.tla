@@ -109,11 +109,12 @@
 (*   solicitation, rank 255, is a second poison);                         *)
 (*   Fix5 = "repeat" (rejected): the poison is sent twice during the     *)
 (*   hold, the rejoin rule unchanged (neighbours heard after the detach).  *)
-(* - Follow = TRUE (rank following, the RPL rule): the preferred parent   *)
-(*   stays a candidate whatever its rank (of the node's version, finite,   *)
-(*   within the bound L + MaxInc); the node's rank becomes the path cost   *)
-(*   through it. FALSE (the code): candidates, the preferred parent        *)
-(*   included, must be strictly below the node's advertised rank.          *)
+(* - Follow = TRUE (rank following, the RPL rule, the code): the         *)
+(*   preferred parent stays a candidate whatever its rank (of the node's   *)
+(*   version, finite, within the bound L + MaxInc); the node's rank        *)
+(*   becomes the path cost through it. FALSE (the code before the fix):    *)
+(*   candidates, the preferred parent included, must be strictly below the *)
+(*   node's advertised rank.                                               *)
 (* - Behind = "keep" (no detach for lagging behind a version): a node     *)
 (*   behind a newer version keeps selecting in its own version and keeps  *)
 (*   its preferred parent when that parent has moved to the newer version  *)
@@ -121,19 +122,34 @@
 (*   different versions are not compared), until it adopts the newer      *)
 (*   version; it forwards through it meanwhile. Its frames, of the older  *)
 (*   version, make its newer neighbours owe a DODAG information (the      *)
-(*   solicitations with backoff are frames of the node like any other).   *)
-(*   Behind = "detach" (the code): selection paused for 2 Imin, then       *)
-(*   candidates of its own version only (a class 1 drop selects at once). *)
+(*   solicitations with backoff are frames of the node like any other;    *)
+(*   the code). Behind = "detach" (the code before the fix): selection     *)
+(*   paused for 2 Imin, then candidates of its own version only (a class 1 *)
+(*   drop selects at once).                                                *)
 (* - Adopt = "fresh" (adoption after the hold): a detached node adopts    *)
 (*   another version only once its hold is over (with Fix5 "solicit": from *)
-(*   a DODAG information heard after its solicitation). Adopt = "any" (the *)
-(*   code): at once, the hold ending; it lets a detached node adopt an    *)
-(*   older version from its own stale subtree (a loop).                   *)
+(*   a DODAG information heard after its solicitation; the code). Adopt =  *)
+(*   "any" (the code before the fix): at once, the hold ending; it lets a  *)
+(*   detached node adopt an older version from its own stale subtree (a    *)
+(*   loop).                                                                *)
+(* - Rejoin = "window" (answer window, with Fix5 "solicit"): a solicitation *)
+(*   of a detached node (the one ending its hold, then the periodic ones)  *)
+(*   opens an answer window of one Imin, during which the node selects     *)
+(*   nothing; at its close (WindowClose: an event, answers may come before *)
+(*   or after it) it takes the best candidate heard after the solicitation *)
+(*   ending its hold; with none, the first candidate heard afterwards. A   *)
+(*   detached node adopting another version in its window keeps the       *)
+(*   window and its rejoin rule (candidates heard after the solicitation). *)
+(*   Rejoin = "window_rejoin": the same, but an adoption selects at once.  *)
+(*   Rejoin = "first" (the code): the first candidate heard after the      *)
+(*   solicitation is taken (selection at every frame heard).              *)
+(*   Best = TRUE tracks the window as a ghost in "first" too (wh, rj) for  *)
+(*   RejoinBest.                                                           *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, TLC
 
 CONSTANTS
-    Graph,      \* "line", "diamond", "subtree", "follow" (see Edges)
+    Graph,      \* "line", "diamond", "subtree", "follow", "rejoin" (see Edges)
     Victim,     \* the relay that may die once (the root: none)
     Origins,    \* origins of the class 1 messages, one message each (named by its origin)
     MaxLoss,    \* frame and acknowledgement losses overall
@@ -144,10 +160,12 @@ CONSTANTS
     Fix5,       \* "none" (the code before fix 5), "solicit" (the code) or "repeat"
     Ghosts,     \* BOOLEAN: count loop formations, rank errors, cross-version forwards (witnesses only)
     Acks,       \* "atomic" (first model) or "frame" (acknowledgements are frames, the code)
-    Follow,     \* BOOLEAN: follow the preferred parent's rank increase (FALSE: the code)
-    Behind,     \* node behind a newer version: "detach" (the code) or "keep"
+    Follow,     \* BOOLEAN: follow the preferred parent's rank increase (TRUE: the code)
+    Behind,     \* node behind a newer version: "detach" (the code before the fix) or "keep"
     Versions,   \* 1 (one DODAG version) or 2 (the root may issue a new version once)
-    Adopt       \* detached node and another version: "any" (the code) or "fresh"
+    Adopt,      \* detached node and another version: "any" (the code before the fix) or "fresh"
+    Rejoin,     \* rejoin after the solicitation: "first" (the code), "window" or "window_rejoin"
+    Best        \* BOOLEAN: track the answer window (ghosts wh, rj) for RejoinBest
 
 NONE == -1
 Root == 0
@@ -167,6 +185,11 @@ LoopCap == 2               \* saturation of the loop formation counter
 (* - follow: the diamond with a costly link 2 - 3 (ETX 2); relay 1 dies:  *)
 (*   3 falls back on 2 at a higher rank (2 -> 3), reaching the rank of its *)
 (*   child 4 (3), whose only neighbour it is.                              *)
+(* - rejoin: 0 - 1 - 2, 2 - 3, 2 - 4, 3 and 4 children of the root through *)
+(*   costly links (0 - 3 ETX 2, 0 - 4 ETX 3); relay 1 dies: 2 (rank 2)     *)
+(*   detaches (3 at rank 2, 4 at rank 3 are not below it) and rejoins      *)
+(*   through 3 (path cost 3) or 4 (4), a gain of one hop, below the switch *)
+(*   threshold: the parent taken at the rejoin stays.                      *)
 (***************************************************************************)
 Edges ==
     CASE Graph = "line"    -> {<<0, 1, 1>>, <<1, 2, 1>>, <<2, 3, 1>>}
@@ -174,6 +197,8 @@ Edges ==
       [] Graph = "subtree" -> {<<0, 1, 1>>, <<1, 2, 1>>, <<1, 3, 1>>, <<2, 3, 1>>, <<3, 4, 1>>,
                                <<0, 4, 3>>}
       [] Graph = "follow"  -> {<<0, 1, 1>>, <<0, 2, 1>>, <<1, 3, 1>>, <<2, 3, 2>>, <<3, 4, 1>>}
+      [] Graph = "rejoin"  -> {<<0, 1, 1>>, <<1, 2, 1>>, <<0, 3, 2>>, <<2, 3, 1>>, <<0, 4, 3>>,
+                               <<2, 4, 1>>}
 
 Nodes == {e[1] : e \in Edges} \cup {e[2] : e \in Edges}
 \* Constant functions (computed once by TLC).
@@ -196,6 +221,11 @@ ASSUME Acks \in {"atomic", "frame"}
 ASSUME Fix3 \in {"none", "retake", "custody", "refined"} /\ Fix5 \in {"none", "solicit", "repeat"}
 ASSUME Follow \in BOOLEAN /\ Behind \in {"detach", "keep"} /\ Versions \in {1, 2}
 ASSUME Adopt \in {"any", "fresh"}
+ASSUME Rejoin \in {"first", "window", "window_rejoin"} /\ Best \in BOOLEAN
+ASSUME (Rejoin # "first" \/ Best) => Fix5 = "solicit"
+
+\* The answer window is tracked (a real window, or the ghost of RejoinBest).
+Track == Rejoin # "first" \/ Best
 
 \* Poison frames per detach (dodag.py:551-557: once).
 Poisons == IF Fix5 = "repeat" THEN 2 ELSE 1
@@ -229,6 +259,9 @@ VARIABLES
     behind,    \* heard a frame of finite rank of a newer version, not adopted yet
     sol,       \* Behind "detach": behind and its solicitation sent
     owe,       \* a Trickle reset owes a DODAG information (older neighbour, solicitation, adoption)
+    win,       \* answer window open (Track; a ghost when Rejoin = "first")
+    wh,        \* wh[k][c]: c heard by k in its answer window (Best)
+    rj,        \* rank taken at the rejoin in the window, NONE if none (Best)
     lost,      \* losses so far
     consec,    \* consec[s][k]: consecutive frames of s lost by k
     sub,       \* message submitted
@@ -243,7 +276,7 @@ VARIABLES
     xv         \* an upward message was taken by a node of another version than its sender
 
 routing == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
-             ver, vview, behind, sol, owe>>
+             ver, vview, behind, sol, owe, win, wh, rj>>
 msgvars == <<sub, cp, giver, delivered, err, errFrom>>
 vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv>>
 
@@ -264,6 +297,8 @@ TypeOK ==
     /\ fresh \in [Nodes -> [Nodes -> BOOLEAN]] /\ dropped \in [Nodes -> [Nodes -> BOOLEAN]]
     /\ ver \in [Nodes -> Vers] /\ vview \in [Nodes -> [Nodes -> Vers]]
     /\ behind \in [Nodes -> BOOLEAN] /\ sol \in [Nodes -> BOOLEAN] /\ owe \in [Nodes -> BOOLEAN]
+    /\ win \in [Nodes -> BOOLEAN] /\ wh \in [Nodes -> [Nodes -> BOOLEAN]]
+    /\ rj \in [Nodes -> 0..INF \cup {NONE}]
     /\ lost \in 0..MaxLoss /\ consec \in [Nodes -> [Nodes -> 0..MaxConsec]]
     /\ sub \in [Msgs -> BOOLEAN] /\ cp \in [Msgs -> [Nodes -> Copies]]
     /\ giver \in [Msgs -> [Nodes -> Nodes \cup {NONE}]]
@@ -298,11 +333,12 @@ GraphConnected(n) == n \in Reach({Root}, Cardinality(Nodes))
 (* attached from rank 255).                                                *)
 (***************************************************************************)
 Rec(k) == [rank |-> rank[k], pref |-> pref[k], low |-> low[k], hold |-> hold[k],
-           poisoned |-> poisoned[k], toSend |-> toSend[k], ver |-> ver[k], behind |-> behind[k]]
+           poisoned |-> poisoned[k], toSend |-> toSend[k], ver |-> ver[k], behind |-> behind[k],
+           win |-> win[k]]
 
 KeepR(R) == [rank |-> R.rank, pref |-> R.pref, low |-> R.low, hold |-> R.hold,
              poisoned |-> R.poisoned, toSend |-> R.toSend, ver |-> R.ver, behind |-> R.behind,
-             det |-> FALSE, chg |-> FALSE, att |-> FALSE]
+             win |-> R.win, det |-> FALSE, chg |-> FALSE, att |-> FALSE]
 
 Keep(k) == KeepR(Rec(k))
 
@@ -346,7 +382,7 @@ SelCore(k, V, VV, Dr, Fr, R) ==
                   \* dodag.py:551-557): rank 255, L and set forgotten, hold.
                   [rank |-> INF, pref |-> NONE, low |-> NONE, hold |-> TRUE,
                    poisoned |-> TRUE, toSend |-> Poisons, ver |-> R.ver, behind |-> FALSE,
-                   det |-> TRUE, chg |-> TRUE, att |-> FALSE]
+                   win |-> FALSE, det |-> TRUE, chg |-> TRUE, att |-> FALSE]
         ELSE LET lowest == Min({cf[c] : c \in C})
                  best == Min({c \in C : cf[c] = lowest})
                  \* the preferred parent stays unless beaten by the threshold (parents.py:293-299)
@@ -356,19 +392,22 @@ SelCore(k, V, VV, Dr, Fr, R) ==
              IN  [rank |-> r, pref |-> ch,
                   low |-> IF R.low = NONE \/ r < R.low THEN r ELSE R.low,   \* parents.py:317-318
                   hold |-> FALSE, poisoned |-> FALSE, toSend |-> 0,          \* parents.py:314-316
-                  ver |-> R.ver, behind |-> R.behind,
+                  ver |-> R.ver, behind |-> R.behind, win |-> R.win,
                   det |-> FALSE, chg |-> ch # pref[k], att |-> rank[k] = INF]
 
 \* Selection after an event at k: nothing during the hold (parents.py:275-281); the root
-\* selects nothing; Behind "detach": nothing while behind (dodag.py:508).
+\* selects nothing; Behind "detach": nothing while behind (dodag.py:508); Rejoin
+\* "window", "window_rejoin": a detached node selects nothing in its answer window.
+InWindow(R) == Rejoin # "first" /\ R.win /\ R.rank = INF
+
 Sel(k, V, VV, Dr, Fr, R) ==
-    IF k = Root \/ R.hold \/ (Behind = "detach" /\ R.behind) THEN KeepR(R)
+    IF k = Root \/ R.hold \/ InWindow(R) \/ (Behind = "detach" /\ R.behind) THEN KeepR(R)
     ELSE SelCore(k, V, VV, Dr, Fr, R)
 
 \* Selection after a class 1 drop (Parents.next_parent, parents.py:242-260: recompute
 \* called directly, not through the paused Dodag step).
 SelDrop(k, V, VV, Dr, Fr, R) ==
-    IF k = Root \/ R.hold THEN KeepR(R) ELSE SelCore(k, V, VV, Dr, Fr, R)
+    IF k = Root \/ R.hold \/ InWindow(R) THEN KeepR(R) ELSE SelCore(k, V, VV, Dr, Fr, R)
 
 (***************************************************************************)
 (* Effect of a selection on the queued copies of the node (Routing._changed,*)
@@ -390,11 +429,23 @@ Reshape(c, S) ==
 (* VV, drops Dr, fresh flags Fr (rows of detaching or attaching nodes      *)
 (* cleared: poisoned_at = now, parents.py:333; cleared at attach,          *)
 (* parents.py:316), owed DODAG information OW, solicitations SO, and the   *)
-(* ghost variables.                                                        *)
+(* ghost variables; s, H: the sender of the frame of this step and the     *)
+(* nodes that heard it (NONE, {}: no frame). Answer window (Best): wh      *)
+(* records the nodes heard in the window, rj the rank taken at a rejoin   *)
+(* in it; both restart when the window opens.                              *)
 (***************************************************************************)
-Commit(S, V, VV, Dr, Fr, OW, SO) ==
+CommitH(S, V, VV, Dr, Fr, OW, SO, s, H) ==
     LET NP == [k \in Nodes |-> S[k].pref]
-    IN  /\ rank' = [k \in Nodes |-> S[k].rank]
+    IN  /\ win' = [k \in Nodes |-> S[k].win]
+        /\ wh' = IF ~Best THEN wh
+                 ELSE [k \in Nodes |-> IF ~S[k].win \/ ~win[k] THEN AllF
+                                       ELSE IF k \in H THEN [wh[k] EXCEPT ![s] = TRUE]
+                                       ELSE wh[k]]
+        /\ rj' = IF ~Best THEN rj
+                 ELSE [k \in Nodes |-> IF S[k].win /\ ~win[k] THEN NONE
+                                       ELSE IF S[k].att THEN S[k].rank
+                                       ELSE IF S[k].det THEN NONE ELSE rj[k]]
+        /\ rank' = [k \in Nodes |-> S[k].rank]
         /\ pref' = NP
         /\ low' = [k \in Nodes |-> S[k].low]
         /\ hold' = [k \in Nodes |-> S[k].hold]
@@ -411,6 +462,8 @@ Commit(S, V, VV, Dr, Fr, OW, SO) ==
         /\ loops' = IF Ghosts /\ loops < LoopCap /\ Cycle(LiveP(NP)) /\ ~Cycle(LiveP(pref))
                     THEN loops + 1 ELSE loops
         /\ rl' = (rl \/ \E k \in Nodes : S[k].att /\ InCycle(k, LiveP(NP)))
+
+Commit(S, V, VV, Dr, Fr, OW, SO) == CommitH(S, V, VV, Dr, Fr, OW, SO, NONE, {})
 
 \* Owed information and solicitations after a step without frame: dropped when detached
 \* (Trickle stopped) or no longer behind.
@@ -463,13 +516,21 @@ Effect(s, H, dio, SS, SF, ann) ==
         Fr == [k \in Nodes |-> IF k = s THEN SF
                                ELSE IF k \in H /\ poisoned[k] THEN [fresh[k] EXCEPT ![s] = TRUE]
                                ELSE fresh[k]]
+        \* Rejoin "window", "window_rejoin": a detached node adopting keeps its rejoin
+        \* rule (candidates heard after the solicitation, parents.py poisoned_at) and
+        \* its answer window.
         R(k) == IF adopt(k)
                 THEN [rank |-> INF, pref |-> NONE, low |-> NONE, hold |-> FALSE,
-                      poisoned |-> FALSE, toSend |-> 0, ver |-> vs, behind |-> FALSE]
+                      poisoned |-> Rejoin # "first" /\ rank[k] = INF /\ poisoned[k],
+                      toSend |-> 0, ver |-> vs, behind |-> FALSE, win |-> win[k]]
                 ELSE [Rec(k) EXCEPT !.behind = behind[k] \/ newer(k)]
+        \* Rejoin "window_rejoin": an adoption selects at once, window or not.
+        SelK(k) == IF adopt(k) /\ Rejoin = "window_rejoin"
+                   THEN SelCore(k, V, VV, Dr, Fr, R(k))
+                   ELSE Sel(k, V, VV, Dr, Fr, R(k))
         \* TLCEval: computed once (a function constructor is otherwise evaluated at each use)
         S  == TLCEval([k \in Nodes |-> IF k = s THEN SS
-                                        ELSE IF k \in H THEN Sel(k, V, VV, Dr, Fr, R(k))
+                                        ELSE IF k \in H THEN SelK(k)
                                         ELSE Keep(k)])
         OW == [k \in Nodes |->
                  /\ S[k].rank # INF
@@ -486,7 +547,7 @@ HeaderFrame(s, SS, SF, dio, ann) ==
         LET H == Receivers(s) \ L
             E == Effect(s, H, dio, SS, SF, ann)
         IN  /\ LossOK(s, L, 0)
-            /\ Commit(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO)
+            /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, s, H)
             /\ FrameCounters(s, L, H, 0)
             /\ cp' = [m \in Msgs |-> [k \in Nodes |-> Reshape(cp[m][k], E.S[k])]]
             /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv>>
@@ -499,7 +560,9 @@ HeaderFrame(s, SS, SF, dio, ann) ==
 (*   information); with one version, dio is irrelevant (always FALSE);     *)
 (* - detached, in the hold, poison due: the poison (dodag.py:493-496);     *)
 (* - detached after the hold: a solicitation, once per presence period    *)
-(*   (dodag.py:512-516). Rank 255 in the header in both cases.             *)
+(*   (dodag.py:512-516). Rank 255 in the header in both cases. With the    *)
+(*   answer window (Track), it opens one; the window (Imin) closes before  *)
+(*   the next solicitation (a presence period later).                      *)
 (***************************************************************************)
 DioSet(s) == IF Versions = 1 \/ rank[s] = INF THEN {FALSE}
              ELSE IF s = Root THEN {TRUE} ELSE BOOLEAN
@@ -510,8 +573,8 @@ Announce1(s, dio) ==
           /\ HeaderFrame(s, Keep(s), fresh[s], dio, TRUE)
        \/ /\ rank[s] = INF /\ hold[s] /\ toSend[s] > 0 /\ ~dio
           /\ HeaderFrame(s, [Keep(s) EXCEPT !.toSend = toSend[s] - 1], fresh[s], FALSE, TRUE)
-       \/ /\ rank[s] = INF /\ ~hold[s] /\ ~dio
-          /\ HeaderFrame(s, Keep(s), fresh[s], FALSE, TRUE)
+       \/ /\ rank[s] = INF /\ ~hold[s] /\ ~dio /\ ~(Track /\ win[s])
+          /\ HeaderFrame(s, [Keep(s) EXCEPT !.win = Track], fresh[s], FALSE, TRUE)
 
 Announce(s) == \E dio \in DioSet(s) : Announce1(s, dio)
 
@@ -521,7 +584,8 @@ Announce(s) == \E dio \in DioSet(s) : Announce1(s, dio)
 (*   neighbours heard after the poison; without candidate, solicit (same   *)
 (*   step).                                                                *)
 (* - "solicit": solicit first; only neighbours heard after the            *)
-(*   solicitation are candidates (no selection in this step).              *)
+(*   solicitation are candidates (no selection in this step); with the     *)
+(*   answer window (Track), the solicitation opens it.                     *)
 (* The poison and the solicitations wait at most 4 slots (DESYNC_SLOTS),    *)
 (* the hold lasts 2 Imin = 64 slots: the hold of s ends after the first     *)
 (* poison of each neighbour (the coincidence of a neighbour detaching in   *)
@@ -532,7 +596,7 @@ HoldEnd(s) ==
     \* timing: a poison leaves within 4 slots of its detach (dodag.py:120, 555),
     \* far less than the 2 Imin hold; every neighbour's first poison is out.
     /\ \A k \in Nbr(s) : alive[k] => toSend[k] < Poisons
-    /\ LET free == [Keep(s) EXCEPT !.hold = FALSE]
+    /\ LET free == [Keep(s) EXCEPT !.hold = FALSE, !.win = Track]
            S0 == SelCore(s, view, vview, dropped, fresh, Rec(s))
            S == [k \in Nodes |-> IF k = s THEN S0 ELSE Keep(k)]
        IN  IF Fix5 = "solicit"
@@ -559,6 +623,24 @@ BehindEnd(k) ==
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S0)]]
     /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
 
+(***************************************************************************)
+(* Close of the answer window (Rejoin "window", "window_rejoin"), one Imin *)
+(* after the solicitation went on air: a node still detached selects the  *)
+(* best candidate heard after the solicitation ending its hold (at a      *)
+(* rejoin the switch threshold plays no part: the lowest path cost). An   *)
+(* event: the answers may come before or after it. Rejoin "first" with    *)
+(* Best: the ghost window closes, nothing else.                            *)
+(***************************************************************************)
+WindowClose(k) ==
+    /\ Track /\ alive[k] /\ win[k]
+    /\ LET R  == [Rec(k) EXCEPT !.win = FALSE]
+           S0 == IF Rejoin # "first" /\ rank[k] = INF
+                 THEN SelCore(k, view, vview, dropped, fresh, R) ELSE KeepR(R)
+           S  == [x \in Nodes |-> IF x = k THEN S0 ELSE Keep(x)]
+       IN  /\ Commit(S, view, vview, dropped, fresh, OwKeep(S), SoKeep(S))
+           /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S0)]]
+    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
+
 \* The root issues a new DODAG version (global repair, Dodag.set_version, dodag.py:359-369):
 \* Trickle reset with its DODAG information owed.
 NewVersion ==
@@ -566,7 +648,7 @@ NewVersion ==
     /\ ver' = [ver EXCEPT ![Root] = ver[Root] + 1]
     /\ owe' = [owe EXCEPT ![Root] = TRUE]
     /\ UNCHANGED <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
-                   vview, behind, sol, lost, consec, msgvars, loops, rl, rerr, xv>>
+                   vview, behind, sol, win, wh, rj, lost, consec, msgvars, loops, rl, rerr, xv>>
 
 (***************************************************************************)
 (* Silence (parents.py:164, dodag.py:536-549): a dead neighbour's entry   *)
@@ -587,7 +669,8 @@ Die ==
     /\ \A m \in Msgs, k \in Nodes : ~(cp[m][k].st = "p" /\ cp[m][k].hop = Victim /\ cp[m][k].acc = "exp")
     /\ alive' = [alive EXCEPT ![Victim] = FALSE]
     /\ UNCHANGED <<rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
-                   ver, vview, behind, sol, owe, lost, consec, msgvars, loops, rl, rerr, xv>>
+                   ver, vview, behind, sol, owe, win, wh, rj, lost, consec, msgvars, loops, rl,
+                   rerr, xv>>
 
 (***************************************************************************)
 (* Class 1.                                                                *)
@@ -682,7 +765,7 @@ SendData(s, m) ==
              released == Acks = "atomic" /\ got /\ ~passive /\ ~ackLost
          IN  /\ ackLost => (got /\ ~passive)
              /\ LossOK(s, L, extra)
-             /\ Commit(S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO)
+             /\ CommitH(S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, s, H)
              /\ FrameCounters(s, L, H, extra)
              /\ cp' = [mm \in Msgs |-> [k \in Nodes |->
                           IF mm = m /\ k = s THEN (IF released THEN NoCopy ELSE mine)
@@ -726,7 +809,7 @@ AckFrame(k, m) ==
                 THEN /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
                      /\ UNCHANGED <<routing, lost, consec, loops, rl>>
                 ELSE LET E == Effect(h, {k}, FALSE, Keep(h), fresh[h], FALSE)
-                     IN  /\ Commit(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO)
+                     IN  /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, h, {k})
                          /\ FrameCounters(h, {}, {k}, 0)
                          /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![k] =
                                       IF mm = m THEN NoCopy ELSE Reshape(cp[mm][k], E.S[k])]]
@@ -802,6 +885,7 @@ Init ==
     /\ ver = [n \in Nodes |-> 0] /\ vview = [k \in Nodes |-> [c \in Nodes |-> 0]]
     /\ behind = [n \in Nodes |-> FALSE] /\ sol = [n \in Nodes |-> FALSE]
     /\ owe = [n \in Nodes |-> FALSE]
+    /\ win = [n \in Nodes |-> FALSE] /\ wh = [k \in Nodes |-> AllF] /\ rj = [n \in Nodes |-> NONE]
     /\ lost = 0 /\ consec = [s \in Nodes |-> [k \in Nodes |-> 0]]
     /\ sub = [m \in Msgs |-> FALSE] /\ cp = [m \in Msgs |-> [n \in Nodes |-> NoCopy]]
     /\ giver = [m \in Msgs |-> [n \in Nodes |-> NONE]]
@@ -810,7 +894,7 @@ Init ==
     /\ loops = 0 /\ rl = FALSE /\ rerr = FALSE /\ xv = FALSE
 
 Protocol ==
-    \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s)
+    \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s) \/ WindowClose(s)
     \/ \E k, c \in Nodes : Expire(k, c)
     \/ \E s \in Nodes, m \in Msgs :
           SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s, m) \/ HoldExpire(s, m)
@@ -827,6 +911,8 @@ CopyStep(s, m) == SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s,
 \* reset; the root beacon), and the 2 Imin behind a newer version end.
 VNodes == IF Versions > 1 THEN Nodes ELSE {}
 BNodes == IF Versions > 1 /\ Behind = "detach" THEN Nodes ELSE {}
+\* The answer window closes.
+WNodes == IF Track THEN Nodes ELSE {}
 
 Fairness ==
     /\ \A s \in Nodes : WF_vars(Announce(s)) /\ WF_vars(HoldEnd(s))
@@ -835,6 +921,7 @@ Fairness ==
     /\ \A m \in Msgs : WF_vars(ErrorArrives(m))
     /\ \A s \in VNodes : WF_vars(owe[s] /\ Announce1(s, TRUE))
     /\ \A k \in BNodes : WF_vars(BehindEnd(k))
+    /\ \A k \in WNodes : WF_vars(WindowClose(k))
 
 Spec == Init /\ [][Next]_vars
 FairSpec == Spec /\ Fairness
@@ -903,6 +990,23 @@ KeepParent ==
 NoLagDetach ==
     [][\A n \in Nodes : (Detaches(n) /\ ~PLost(n)) => vview'[n][pref[n]] = ver[n]]_vars
 
+(***************************************************************************)
+(* Rejoin (answer window, Best): when a node's answer window closes with  *)
+(* the node attached through a parent taken in that window (rj), the path *)
+(* cost of that rejoin is minimal among the candidates heard in the window *)
+(* (wh), each judged by its last frame heard: finite rank, of the node's  *)
+(* version, not dropped, path cost within 254 (no L after a detach).       *)
+(* Losses: a neighbour whose answers were all lost is not among them.      *)
+(***************************************************************************)
+WinBest(k) ==
+    Min({INF} \cup {view[k][c] + Cost(k, c) :
+                      c \in {c \in Nbr(k) : /\ wh[k][c] /\ view[k][c] \notin {NONE, INF}
+                                            /\ vview[k][c] = ver[k] /\ ~dropped[k][c]
+                                            /\ view[k][c] + Cost(k, c) <= MaxRank}})
+
+RejoinBest ==
+    [][\A k \in Nodes : (win[k] /\ ~win'[k] /\ rj'[k] # NONE) => rj'[k] <= WinBest(k)]_vars
+
 \* Non-vacuity witnesses (each must be violated).
 NeverDelivered == \A m \in Msgs : ~delivered[m]
 NeverError == \A m \in Msgs : err[m] # "recv"
@@ -924,4 +1028,6 @@ NoLagParent ==
     ~\E n \in Nodes : /\ alive[n] /\ pref[n] # NONE /\ view[n][pref[n]] \notin {NONE, INF}
                       /\ vview[n][pref[n]] > ver[n]
 NoCrossVersion == ~xv
+\* Answer window: no node rejoins in its window (Best).
+NoWindowRejoin == [][\A k \in Nodes : (win[k] /\ ~win'[k]) => rj'[k] = NONE]_vars
 =============================================================================

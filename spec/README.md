@@ -3,9 +3,10 @@
 TLA+ models of the link estimation and timing rules of the mesh
 (MESH_DESIGN §7, §9, §12 class 1, §16), checked with TLC. They cover the
 three defects found by the M3-12 host scenarios (MESH_DESIGN §18, items 1, 2
-and 6) and the provisional choices made to fix them. A routing model,
-`DODAG` (last section), covers items 3 and 5, rank following and DODAG
-version lag. Each defect has a configuration of the current design that
+and 6) and the provisional choices made to fix them, and the options for
+a root beacon tolerating two consecutive losses. A routing model, `DODAG`
+(last section), covers items 3 and 5, rank following, DODAG version lag
+and the rejoin after a solicitation. Each defect has a configuration of the current design that
 must fail with a counterexample; the choices have configurations that must
 hold, plus configurations just beyond each bound that must fail (the bounds
 are tight).
@@ -24,10 +25,11 @@ sh spec/run.sh NAME  # one configuration, cfg/NAME.cfg
 `$TMPDIR/sily-spec`) can be set. Each output line gives the verdict (`ok`
 when the outcome is the expected one), the configuration, the expected
 outcome, the distinct states and the time; the exit status is 1 if any
-outcome differs from its expectation. A full run takes about 55 minutes on
+outcome differs from its expectation. A full run takes about 75 minutes on
 8 cores, most of it in `LinkCut`, the liveness configurations of `DODAG`
 and its two-version safety configurations on the diamond (≈ 8 and 3
-minutes).
+minutes; with the answer window and its ghost variables ≈ 15 minutes on 4
+cores).
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
@@ -103,6 +105,10 @@ they mirror (file:line, `src/mesh`).
 | Tr band | **empty** (74 > 72), at D = 0 | `KMiss_Tr72` |
 | `K_MISS` = 4 (owner, session 23): Tr = 90 ticks = 4.5T | no false alarm; 3 lost tolerated up to D = 1 (T/20), 4 detected at D = 0 | `KMiss_Tr90`, `Silence_root4_P1_Tr90`, `_D1`, `_D2`, `Silence_root4_P2_Tr90`, `_D1` |
 | Per-message samples (code) | one lost acknowledgement of an 8-message frame detaches the children even on a full window | `AckWindow_permessage_P4_full` |
+| Root beacon every half period (T = 10 ticks, presence period 20), Th unchanged (50) | 3 consecutive lost beacons tolerated up to D = 5 ticks (4 × 11 + D < 50), 6 fails; 2 tolerated up to the model's largest D, 8 ticks; 4 lost may go undetected until the next beacon (5 × 9 < 50); 5 detected up to D = 4, 5 fails | `Silence_half_*` |
+| Root beacon every 2/3 period (T = 20 ticks, presence period 30, Th = 75) | 2 consecutive lost beacons tolerated up to D = 8 ticks = 0.27 presence period (3 × 22 + D < 75), 9 fails; 3 lost drop the root | `Silence_twothirds_*` |
+| Root parent with its own threshold, beacon every period | 2 lost beacons tolerated from Th = 67 ticks = 3.35T (D = 0; 66 fails); at Th = 70 (3.5T) up to D = 3 (4 fails), 3 lost detected up to D = 2 (3 fails) | `Silence_rootth*` |
+| Root parent threshold against the root alarm (cut link to the root, report within 1 tick) | Th = 70: false alarm at Tr = 90 (K_MISS = 4), none from Tr = 94 = 4.7T (93 fails); Th = 67: false alarm at Tr = 90 (the band is empty) | `KMiss_rootth*` |
 | d_in / p_ack switch (anomaly 6) | without latch, an asymmetric link (d_in 10/16, p_ack good) jumps from rank 11 to 21 when a failure ages out at the 4th sample; with the latch P4Step holds and P3, P4, detection are unchanged | `AckWindow_nmin4_din_step`, `AckWindow_latch_*` |
 
 ## Abstractions (what is not modelled)
@@ -147,12 +153,35 @@ they mirror (file:line, `src/mesh`).
 - **P2 vs on-air delay**: with Th = 5T/2, P1 tolerates D ≤ T/4 but P2 only
   D ≤ T/5: between the two, two lost frames can go undetected until the
   next frame (detection then takes one more period).
+- **Root beacon and two consecutive losses**: with one beacon per period a
+  child of the root drops it after two consecutive lost beacons (gap up to
+  3 × 1.1 = 3.3 periods > 2.5); having no other candidate of lower rank, it
+  detaches with its subtree. A beacon every half period (±10 %) keeps the
+  silence threshold, hence the detection of a dead root or a cut link
+  (2.5 periods after the last frame heard, idle switch time unchanged), and
+  tolerates 3 consecutive lost beacons up to an on-air delay of T/4 (2 up to
+  0.4 T); its cost is one more beacon per period at the root (23 B, 7–14
+  s/h at SF7–12, 2–4 % of the root's budget; at SF8 it takes the presence
+  share of the channel, already at 99 %, to 103 %). A beacon every 2/3
+  period tolerates exactly 2 lost beacons (up to D = 0.27 period) for half
+  that cost. A threshold of its own for a parent that is the root needs
+  ≥ 3.35 periods to tolerate 2 losses, which with a report within T/20
+  raises the root alarm on a root child that re-attaches after a cut (no false alarm needs Tr > 1.1 + Th + report
+  delay: 4.7 periods at Th = 3.5), and lengthens the idle switch of a root
+  child by one period.
 - **Bad links seen only through presence**: from a full window, 13 lost
   presences (13 periods) are needed before the link becomes ineligible on
   its ETX; with class 1 traffic the 3-attempt drop acts within seconds.
+  Candidate rule, not modelled: a link whose newest 4 samples are failures
+  is ineligible (4 = the fresh-window bound, `AckWindow_nmin4_detect`);
+  one success or the ageing of the failures lifts it. Whether idle bad
+  links matter is for the bench measurements (loss patterns).
 - **Root acknowledgement batching**: one lost batch frame acknowledges
   several frames of the same relay, hence several failed samples even with
-  one sample per frame.
+  one sample per frame. Candidate fix: towards the root, timeouts of frames
+  sent within one batching delay of each other give one failed sample
+  (one sample per acknowledgement frame), which is `M = 1`, the case P4
+  already checks (`AckWindow_nmin4_P4`: P4 and P4Strong hold).
 - **Latch**: proposed mitigation of the d_in / p_ack switch; without it,
   anomaly 6 remains (bounded to a loss at the NMin-th sample of a link whose
   d_in and p_ack disagree).
@@ -165,9 +194,11 @@ validation, a relay death, DODAG versions and global repair — together
 with class 1 custody (hop-by-hop acknowledgement, duplicate cache, 3
 attempts and parent drop, holding, errors). It covers MESH_DESIGN §18 items
 3 (a looped class 1 message is lost without error) and 5 (single poison),
-and two later defects of the readings: a child cannot follow its preferred
-parent's rank increase (it detaches), and a node behind a new DODAG version
-detaches after one lost advertisement; against MP5, MP10, MP11 and MP12.
+and later defects of the readings: a child cannot follow its preferred
+parent's rank increase (it detaches), a node behind a new DODAG version
+detaches after one lost advertisement, and a node rejoins through the first
+neighbour that answers its solicitation, not the best; against MP5, MP10,
+MP11 and MP12.
 Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 
 ## Scope and abstractions
@@ -179,7 +210,10 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   dies: 2 and 3 can loop through each other before rejoining through 4);
   `follow`: the diamond with a costly 2-3 (ETX 2) (relay 1 dies: 3 falls
   back on 2 at rank 3, the rank of its child 4, whose only neighbour it
-  is). `Victim = 0`: no node dies.
+  is); `rejoin` 0-1, 1-2, 2-3, 2-4 and costly links 0-3 (ETX 2), 0-4 (ETX
+  3) (relay 1 dies: 2 detaches and rejoins through 3, path cost 3, or 4,
+  path cost 4, a gain below the switch threshold). `Victim = 0`: no node
+  dies.
 - **Ranks** in whole hops (MIN_HOP 8 = 1): the hysteresis of 4 never holds a
   change back, the switch threshold 12 is a gain of 2 hops; 254 and
   MaxRankIncrease 56 scaled to `MaxRank` = 6 and `MaxInc` = 3. Links always
@@ -212,8 +246,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   silence rule (a live one would need 2 lost presences in a row). Attached
   nodes may send a frame at any time (presence, Trickle advertisement,
   advertisement after a rank error, root beacon): no Imin/period bound is
-  checked, only orders of events. A node behind a newer version (the code)
-  keeps its parents for 2 Imin, which end after its solicitation and the
+  checked, only orders of events. A node behind a newer version (the code
+  before the fix, `Behind = "detach"`) keeps its parents for 2 Imin, which end after its solicitation and the
   DODAG information owed by each of its newer neighbours (answers within
   Imin); a class 1 drop selects at once, as `Parents.next_parent` does.
 - **Frames** carry the sender's rank and update every neighbour that hears
@@ -269,6 +303,12 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   that parent is of its version, when the path cost through it exceeds the
   bound L + MaxInc. A node whose preferred parent stays attached within the
   bound never detaches.
+- **RejoinBest** (MP12, action property): when a node's answer window
+  closes with the node attached through a parent taken in that window, the
+  path cost of that rejoin is the lowest among the candidates heard in the
+  window, each judged by its last frame heard (finite rank, of the node's
+  version, not dropped, within 254). With losses, a neighbour whose answers
+  were all lost is not among them.
 - **NoLagDetach** (MP10, action property): a node whose preferred parent is
   not lost never detaches because that parent moved to a newer version: no
   connected node detaches during a global repair.
@@ -278,7 +318,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   not below its own (`NoFollow`), a node detaches on the bound
   (`NoBoundDetach`), a node stays attached through a parent of a newer
   version (`NoLagParent`), a class 1 message is taken across versions
-  (`NoCrossVersion`).
+  (`NoCrossVersion`), a node rejoins at the close of its answer window
+  (`NoWindowRejoin`).
 
 ## Fixes modelled
 
@@ -300,27 +341,40 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   it (the solicitation, rank 255, is a second poison).
 - Fix 5, repeat (`"repeat"`, rejected): the poison is sent twice during the
   hold, the rejoin rule unchanged.
-- **Rank following** (`Follow = TRUE`, the RPL rule): the preferred parent
+- **Rank following** (`Follow = TRUE`, the RPL rule, the code): the preferred parent
   stays a candidate whatever its rank — of the node's version, finite, not
   dropped, path cost within L + MaxInc — and the node's rank becomes the
   path cost through it; the other candidates must still be strictly below
-  the node's advertised rank. `FALSE` (the code): every candidate, the
+  the node's advertised rank. `FALSE` (the code before the fix): every candidate, the
   preferred parent included.
-- **No detach behind a version** (`Behind = "keep"`): a node behind a newer
+- **No detach behind a version** (`Behind = "keep"`, the code): a node behind a newer
   version keeps selecting in its own version and keeps its preferred
   parent once that parent has moved to the newer version (heard at a
   finite rank, not dropped), at its own rank (ranks of different versions
   are not compared), until it adopts the newer version; it forwards
   through it meanwhile, and its frames, of the older version, make its
   newer neighbours owe a DODAG information (the solicitations with backoff
-  are frames of the node like any other). `"detach"` (the code): no
+  are frames of the node like any other). `"detach"` (the code before the fix): no
   selection for 2 Imin, then candidates of its own version only.
-- **Adoption after the hold** (`Adopt = "fresh"`): a detached node adopts
+- **Adoption after the hold** (`Adopt = "fresh"`, the code): a detached node adopts
   another version only once its hold is over, i.e. from a DODAG
   information heard after its solicitation (the rejoin rule of fix 5).
-  `"any"` (the code): at once, ending its hold.
+  `"any"` (the code before the fix): at once, ending its hold.
 - No detach behind a version with adoption at once (`Behind = "keep"`,
   `Adopt = "any"`, rejected): the adoption loop below remains.
+- **Answer window** (`Rejoin = "window"`): a solicitation of a detached
+  node (the one ending its hold, then the periodic ones) opens an answer
+  window of one Imin during which the node selects nothing; at its close
+  (`WindowClose`, an event: answers may come before or after it) the node
+  takes the candidate of lowest path cost heard after the solicitation
+  ending its hold (no switch threshold at a rejoin); with none, the first
+  candidate heard afterwards. A detached node that adopts another version
+  in its window keeps the window and the rejoin rule (candidates heard
+  after the solicitation). `"first"` (the code): selection at every frame
+  heard, the first candidate is taken. `"window_rejoin"` (rejected): the
+  window for the rejoin only, an adoption selects at once. `Best = TRUE`
+  tracks the window as ghost variables (`wh`: neighbours heard in it, `rj`:
+  rank taken at a rejoin in it), with `"first"` too, for `RejoinBest`.
 
 ## Results
 
@@ -352,6 +406,16 @@ Rank following and DODAG versions, on the code since fixes 3 and 5
 | All three fixes, two versions | no node detaches during a global repair (NoLagDetach, KeepParent); no loop with at most 1 consecutive loss per link; no silent loss (line ≤ 2 losses any pattern, diamond with relay death ≤ 1); MP5Live (line), MP10, LoopsEnd, RanksSettle, VersionSettle, RoutesSettle (line ≤ 2 losses, diamond with relay death ≤ 1, no message) | `DODAG_line_keep_*`, `DODAG_diamond_keep_*` |
 | Rejected: no detach behind a version, adoption at once | the adoption loop remains, as in the code (the loss in the trace plays no part) | `DODAG_diamond_keep_adoptany` |
 | Non-vacuity (versions) | a node lags behind the new version attached through a parent of that version, and its class 1 message is taken across versions | `DODAG_line_keep_witness_*` |
+
+Rejoin after the solicitation, on the code since the version fixes (rank
+following, no detach behind a version, adoption after the hold):
+
+| Item | Result | Configurations |
+|---|---|---|
+| Rejoin, current design | no loss: relay 1 dies, 2 detaches and solicits; 4 answers first and 2 rejoins through it (path cost 4); 3 answers in the window (path cost 3), one hop better, below the switch threshold: 2 stays on the worse path | `DODAG_rejoin_current_best` |
+| Answer window (fix) | the rejoin takes the best candidate heard in the window; no loop with at most 1 consecutive loss per link, no silent loss with 2 losses, no detach while the parent stays attached (rejoin graph, one version; subtree graph); with two versions, adoption in the window included, no loop, no detach behind a version (diamond); MP5Live, MP10, LoopsEnd, RanksSettle, CutOffLive, RoutesSettle (rejoin ≤ 2 losses, subtree ≤ 1), VersionSettle with versions (diamond ≤ 1, no message) | `DODAG_rejoin_window_*`, `DODAG_subtree_window_*`, `DODAG_diamond_window_*` |
+| Rejected: window for the rejoin only | a detached node adopting the new version in its window selects at once: it takes the first answerer of that version (4), and 3 answers after | `DODAG_rejoin_windowrejoin_best` |
+| Non-vacuity (window) | a node rejoins at the close of its window | `DODAG_rejoin_window_witness_rejoin` |
 
 **Loop bound (MP11).** With fix 5 and at most one consecutive loss per link
 no loop forms (checked on the line and the subtree graph). Beyond, a loop
@@ -447,6 +511,29 @@ loss per link, as fix 5 does for rejoins in one version.
   detached node adopts any version it hears") and the readings "a node
   behind a newer version keeps its parents up to 2 Imin", "a new version
   ends the hold" to update.
+- **Code changes for the answer window**: `Parents.solicited`
+  (parents.py:225-237) opens a window, `window_until = now + window_ms`
+  (one Imin, set by `Dodag._apply_info` beside `hold_ms`, dodag.py:338), for
+  every solicitation of a detached node that goes on air (`Dodag._sent`,
+  dodag.py:420-429: the one ending the hold, the periodic ones of
+  dodag.py:529-533, the boot one), and only the one ending the hold sets
+  `poisoned_at`; `Parents._select` (parents.py:302-313) returns no event
+  while the node is detached and `now < window_until`, then selects (at a
+  rejoin the lowest path cost wins: `best[0]`, no switch threshold, as
+  now); `Dodag._watch` (dodag.py:553-566) and `_routing` (dodag.py:523-524)
+  wake the selection at `window_until`, as at `hold_until`.
+  `Parents.on_new_version` (parents.py:239-272) keeps the window (its
+  `_select` honours it), so that an adoption in the window waits for its
+  close. At boot the first DODAG information is still adopted at once (the
+  parameters), the selection waits for the window of the boot
+  solicitation (not modelled: the model has no boot). The detach + rejoin
+  bound of §9 is unchanged (the window is the Imin already counted for the
+  answers); the rejoin comes at the close instead of the first answer. A
+  Trickle answer leaves within [Imin/2, Imin) of its reset, plus its desync
+  and time on air: a window of exactly Imin can miss the latest answers (a
+  margin of a few slots catches them; those after the close are taken only
+  by the switch threshold). MESH_DESIGN §9 (detach: "the first candidate
+  heard is taken"; solicitation) to update.
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
