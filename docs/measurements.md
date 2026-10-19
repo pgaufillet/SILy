@@ -10,6 +10,8 @@ deployed on both boards:
     --a /dev/serial/by-id/<board A> --b /dev/serial/by-id/<board B> --out results.json
 ```
 
+The last section times the simulator on the host (`make simbench`).
+
 ## 2026-10-17 — two T3S3 boards, SF7
 
 Conditions: two LilyGo T3S3 (ESP32-S3 at 240 MHz, SX1262), firmware
@@ -113,3 +115,36 @@ topology 60 s), board B as a node (address 2, `routing=True`), both with
 | Root reports | `PRESENCE 2 0 1` (parent 0, flag *first report*), then `TOPOLOGY 2 [[0, 20, true, 100]]` (margin 20 dB, parent-set member, 100 % delivery), `NODEINFO 2 dc5475db9604 bench2`, then `PRESENCE 2 0 0` one period later |
 | Counters | no rank error, loop, refusal or malformed report on either board |
 | Heap of the bench node with routing (`heap_engine`) | 31.3 KB (12.6–15.8 KB with static routes) |
+
+## 2026-10-19 — simulator speed, host
+
+`make simbench NODES=<n>` (`tools/simbench.py`, see its docstring): grid of
+n boards, the root at a corner, each board hearing its 4 grid neighbours;
+routing with presence period 10 s and topology period 60 s; one board in 7
+sends a class 1 message to the root every minute. 10 simulated minutes,
+seed 1, MicroPython 1.29.0 unix port with the 32 MB heap of `make test`.
+The last column is the same run without the simulator's allocation measures
+(below); both give the same digest.
+
+| Nodes | Events | Receptions | Wall clock | Per event | Without the measures |
+|---|---|---|---|---|---|
+| 16 | 24 613 | 9 986 | 2.5 s | 100 µs | 30.0 s |
+| 30 | 60 421 | 25 715 | 6.9 s | 115 µs | 92.8 s |
+| 64 | 163 763 | 74 015 | 23.5 s | 145 µs | 242.8 s |
+
+Events grow faster than nodes: the grid deepens, and reports cross more
+hops. Time spent (30 and 64 nodes alike): mesh cores 80 % (no function
+above 4 %), medium 10 %, scheduler and the rest 10 %. In the interpreter
+(callgrind, 30 nodes, 2 simulated minutes), 42 % of the instructions are the
+allocator's search for free blocks and 14 % garbage collection (53
+collections, each sweeping the whole 32 MB heap).
+
+The allocator looks for room for a multi-block object from the lowest free
+block on, a point only single-block allocations move forward. With nothing
+collecting the 32 MB heap before it is full, each such allocation scanned
+most of what was allocated since the last collection: 90 % of the time
+(callgrind, 16 nodes). Measures: the scheduler collects every megabyte
+allocated while it runs (`sim.scheduler.GC_THRESHOLD`; 512 KB gains 5 to
+10 % here but slows `make test` by 20 %), the fake retained memory is saved
+in place instead of into a new 2 KB object per frame, and the medium keeps
+each source's links instead of visiting every port per transmission.

@@ -37,6 +37,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 - `tests/` — host tests (`run.py` runner, `test_*.py` modules).
 - `tools/bench.py` — two-board bench measurements, run from the host over
   the serial ports; results in `docs/measurements.md`.
+- `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
+  a grid network (`make simbench`); figures in `docs/measurements.md`.
 - `tools/mesh_budget.py` — airtime budget and repair times of the mesh
   design (CPython 3), the source of the figures of `docs/MESH_DESIGN.md`.
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
@@ -56,6 +58,7 @@ esptool, ruff, codespell).
 make test                      # host tests on the MicroPython unix port
 make lint                      # ruff check, ruff format --check, codespell
 make check                     # lint + test
+make simbench NODES=30         # simulator wall clock for 10 simulated minutes
 make firmware                  # build the SILY_T3S3 firmware
 make flash PORT=/dev/ttyACM0   # flash it
 make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it
