@@ -11,6 +11,7 @@ import unittest
 
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
+from mesh.neighbours import silence_ms
 from mesh.parents import MIN_HOP, RANK_HYSTERESIS, link_cost
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
@@ -102,13 +103,13 @@ class Forming(unittest.TestCase):
         line.check_ranks(self)
         line.steady()
         # Steady state: nodes advertise nothing (without a reset), the root
-        # beacons once per period.
+        # beacons every half period (0.45 to 0.55 periods apart).
         start = line.net.now
         before = line.counts()
         line.run(start + 6 * PERIOD)
         line.check_quiet(self, before)
         beacons = line.port9(line.root) - before[0][0]
-        self.assertTrue(5 <= beacons <= 7, beacons)
+        self.assertTrue(10 <= beacons <= 14, beacons)
         self.assertEqual([b.routing.dodag.counters.poisons for b in line.nodes], [0] * 4)
         self.assertEqual(line.attached(), [True] * 4)
         # The presence reports of every node reach the root.
@@ -118,7 +119,7 @@ class Forming(unittest.TestCase):
 
 class GlobalRepair(unittest.TestCase):
     def test_new_version_crosses_one_imin_per_hop(self):
-        line = Line(4)
+        line = Line(6)
         line.run(12 * line.imin)
         line.steady()
         start = line.net.now
@@ -210,6 +211,71 @@ class LostInformation(unittest.TestCase):
         self.assertEqual([x.routing.parents.preferred for x in line.nodes], [ROOT, A, B, C])
         self.assertFalse(d.parents.behind)
         line.check_ranks(self)
+
+
+class RootBeaconsLost(unittest.TestCase):
+    """A, the root's only child, hears nothing else from the root than its
+    beacons (§9): the root's frames with a DODAG information message are lost
+    at A for a while. Two consecutive lost beacons stay under the silence
+    limit of 2.5 periods; a root switched off is detected at the limit."""
+
+    def _lose(self, line, count):
+        # The next count frames of the root carrying a DODAG information
+        # message are lost at A (link cut while on air); returns their times.
+        medium = line.net.medium
+        engine = line.root.engine
+        base = engine.sent
+        times = []
+
+        def sent(sel, counter, now):
+            base(sel, counter, now)
+            if len(times) < count and any(
+                m.port == DODAG_INFO and len(m.payload) for m in sel.messages
+            ):
+                times.append(now)
+                medium.cut(ROOT, A)
+                line.net.at(now + sel.toa_ms + 1, medium.restore, ROOT, A)
+
+        engine.sent = sent
+        return times
+
+    def test_two_lost_beacons_keep_the_subtree(self):
+        for seed in (8, 9):
+            line = Line(seed)
+            line.run(12 * line.imin)
+            line.steady()
+            a = line.nodes[0]
+            start = line.net.now
+            lost = self._lose(line, 2)
+            line.run(start + 4 * PERIOD)
+            self.assertEqual(len(lost), 2)
+            # A's last frame of the root is recent: it went on hearing
+            # beacons after the losses.
+            heard = a.engine.neighbours.get(ROOT).heard
+            self.assertTrue(heard > lost[1], (lost, heard))
+            self.assertEqual([b.routing.dodag.counters.poisons for b in line.nodes], [0] * 4)
+            self.assertEqual(line.attached(), [True] * 4)
+            self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
+
+    def test_root_off_detaches_its_child_at_the_silence_limit(self):
+        line = Line(8)
+        line.run(12 * line.imin)
+        line.steady()
+        a = line.nodes[0]
+        off = line.net.now
+        line.root.power_loss(off_ms=10**9)
+        line.run(off + 1000)  # a frame of the root on air when switched off
+        last = a.engine.neighbours.get(ROOT).heard
+        limit = last + silence_ms(PERIOD)
+        line.run(limit - 1)
+        dodag = a.routing.dodag
+        self.assertEqual((a.routing.parents.preferred, dodag.counters.poisons), (ROOT, 0))
+        # Detached at the limit (within a frame on air), before the hold
+        # of 2 Imin ends.
+        line.run(limit + line.imin)
+        self.assertEqual((dodag.counters.poisons, a.engine.rank), (1, RANK_INFINITE))
+        detach = a.routing.parents.poisoned_at
+        self.assertTrue(limit <= detach <= limit + 500, (limit, detach))
 
 
 class DetachRejoin(unittest.TestCase):

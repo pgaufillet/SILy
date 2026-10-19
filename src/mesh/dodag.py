@@ -95,13 +95,17 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   the window keeps it (`Parents.on_new_version`); at boot, the first DODAG
   information is adopted at once (parameters), the parent selected at the
   close of the window if it is still open.
-- **Root**: rank 0, never adopts. **Beacon** (§16): one DODAG information
-  advertisement, priority 2, every presence period jittered by ±10 % (§7),
-  the timer re-armed from each firing; it runs beside Trickle, whose resets
-  (solicitation, older version, new version) send their priority-1
-  advertisements without postponing or suppressing it, so that the root's
-  frames are never further apart than 1.1 periods while beacons are not
-  lost. `set_version` issues a version (and new parameters) and re-arms the
+- **Root**: rank 0, never adopts. **Beacon** (§9, §16): one DODAG
+  information advertisement, priority 2, every half presence period
+  jittered by ±10 % (§7), the timer re-armed from each firing; it runs
+  beside Trickle, whose resets (solicitation, older version, new version)
+  send their priority-1 advertisements without postponing or suppressing
+  it, so that the root's frames are never further apart than 0.55 periods
+  while beacons are not lost. Its children then tolerate three consecutive
+  lost beacons under the silence limit (2.5 periods) while the beacon's
+  on-air delay varies by up to a quarter period; at one beacon per period,
+  two lost beacons could leave a gap of 3.3 periods and detach a subtree.
+  `set_version` issues a version (and new parameters) and re-arms the
   beacon on the new period: the policy deciding when (global repair, §9)
   belongs to the root's later step.
 
@@ -394,7 +398,7 @@ class Dodag:
         self.engine.dodag_version = self.version
         self.parents.on_new_version(self.version, now)
         self.trickle.reset(now, True)
-        self._beacon_at = now + jittered(self.engine.neighbours.period_ms, self.engine.random)
+        self._beacon_at = self._next_beacon(now)
 
     # --- Link engine hooks ---------------------------------------------------------------
 
@@ -485,7 +489,7 @@ class Dodag:
         if not self.root:
             self._routing(now)
         elif self._beacon_at is not None and now >= self._beacon_at:
-            self._beacon_at = now + jittered(self.engine.neighbours.period_ms, self.engine.random)
+            self._beacon_at = self._next_beacon(now)
             self._advertise(False)
         due = self.trickle.poll(now)
         if due:
@@ -516,9 +520,13 @@ class Dodag:
         self._started = True
         if self.root:
             self.trickle.reset(now, True)
-            self._beacon_at = now + jittered(self.engine.neighbours.period_ms, self.engine.random)
+            self._beacon_at = self._next_beacon(now)
         else:
             self._solicit_at = now + randbelow(self.engine.random, self.imin_ms + 1)
+
+    def _next_beacon(self, now):
+        # Root: every half presence period, jittered.
+        return now + jittered(self.engine.neighbours.period_ms // 2, self.engine.random)
 
     def _desync(self):
         return randbelow(self.engine.random, DESYNC_SLOTS * self.engine.slot_ms + 1)

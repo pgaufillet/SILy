@@ -419,8 +419,12 @@ class PresenceAcknowledgement(unittest.TestCase):
         rep = line.node.routing.reporter.counters
         entry = line.node.engine.neighbours.get(R)
         self.assertTrue(rep.presence_acked >= 6, rep.presence_acked)
-        self.assertEqual(entry.ack_count, rep.presence_acked + rep.presence_unacked)
+        # One sample per presence: every success is in the window. A
+        # presence lost at R to a frame of the root (hidden from N) is a
+        # failure, removed from the window once the silence limit old (§9).
         self.assertEqual(entry.acknowledged(), rep.presence_acked)
+        total = rep.presence_acked + rep.presence_unacked
+        self.assertTrue(rep.presence_acked <= entry.ack_count <= total, (entry.ack_count, total))
         # R's parent is the root: no sample of its presence.
         r = line.relay
         self.assertEqual(r.routing.reporter.counters.presence_acked, 0)

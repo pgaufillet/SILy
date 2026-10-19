@@ -828,7 +828,10 @@ class Root(_Case):
         self.assertEqual((b.engine.rank, b.engine.dodag_version), (0, 5))
         return b
 
-    def test_beacon_every_presence_period_at_imax(self):
+    def test_beacon_every_half_presence_period_at_imax(self):
+        # Trickle at Imax sends nothing: every advertisement is a beacon,
+        # every half period +-10 % (§9: three lost beacons stay under the
+        # silence limit of 2.5 periods).
         b = self.root()
         b.steady([(self.p, 8, 5), (self.q, 8, 5)])
         start = b.now
@@ -837,29 +840,39 @@ class Root(_Case):
             b.rx(self.p.frame(8, 5))
             b.rx(self.q.frame(8, 5))
         sent = b.adverts(start)
-        self.assertTrue(4 <= len(sent) <= 6, len(sent))
+        self.assertTrue(9 <= len(sent) <= 11, len(sent))
+        times = [t for t, _ in sent]
+        gaps = [u - t for t, u in zip(times, times[1:])]
+        self.assertTrue(min(gaps) >= PERIOD * 9 // 20, gaps)
+        self.assertTrue(max(gaps) <= PERIOD * 11 // 20 + 200, gaps)
         self.assertEqual(b.port9(start)[0][2], bytes(encode_info(INFO)))
         self.assertEqual(sent[0][1].rank, 0)
 
     def test_beacon_not_postponed_by_trickle_resets(self):
         # A solicitation every second keeps the root's Trickle timer at Imin,
         # every advertisement suppressed by 2 port 9 messages heard: the
-        # beacon still leaves every presence period +-10 % (§7, §16).
+        # beacon still leaves every half presence period +-10 % (§7, §9).
         b = self.root()
         b.steady([(self.p, 8, 5), (self.q, 8, 5)])
         start = b.now
+        trickle = b.dodag.trickle
+        sends, suppressed = trickle.sends, trickle.suppressed
         for _ in range(5 * PERIOD // 1000):
             b.advance(b.now + 1000)
             b.rx(self.s.solicitation(5))
             b.rx(self.p.info(8, 5))
             b.rx(self.q.info(8, 5))
-        self.assertEqual(b.dodag.trickle.interval, b.imin)
+        self.assertEqual(trickle.interval, b.imin)
         times = [start] + [t for t, _ in b.adverts(start)]
         gaps = [u - t for t, u in zip(times, times[1:])]
-        self.assertTrue(4 <= len(gaps) <= 6, gaps)
-        self.assertTrue(max(gaps) <= PERIOD * 11 // 10 + 200, gaps)
-        self.assertTrue(min(gaps[1:]) >= PERIOD * 9 // 10, gaps)
-        self.assertTrue(b.dodag.trickle.suppressed >= 5 * PERIOD // b.imin, gaps)
+        self.assertTrue(9 <= len(gaps) <= 11, gaps)
+        self.assertTrue(max(gaps) <= PERIOD * 11 // 20 + 200, gaps)
+        self.assertTrue(min(gaps[1:]) >= PERIOD * 9 // 20, gaps)
+        # Every Trickle decision suppressed, one at least every 2 Imin (a
+        # decision comes Imin/2 to Imin after a reset; a reset while it is
+        # pending keeps it).
+        self.assertEqual(trickle.sends, sends)
+        self.assertTrue(trickle.suppressed - suppressed >= 5 * PERIOD // (2 * b.imin), gaps)
 
     def test_urgent_advertisement_raises_a_queued_beacon(self):
         # A Trickle advertisement (priority 1) due while the beacon
@@ -896,6 +909,12 @@ class Root(_Case):
         self.assertEqual(b.engine.neighbours.period_ms, 20000)
         t, h = self.assertAdvertWithin(b, start, version=6, rank=0)
         self.assertEqual(b.port9(t)[0][2], bytes(encode_info(info)))
+        # The beacon re-armed on half the new period (20 s), +-10 %.
+        self.assertTrue(start + 9000 <= b.dodag._beacon_at <= start + 11000, b.dodag._beacon_at)
+
+    def test_first_beacon_within_half_a_period_of_boot(self):
+        b = self.root()
+        self.assertTrue(PERIOD * 9 // 20 <= b.dodag._beacon_at <= PERIOD * 11 // 20)
 
     def test_root_adopts_nothing(self):
         b = self.root()
@@ -903,13 +922,23 @@ class Root(_Case):
         self.assertEqual((b.dodag.version, b.dodag.counters.newer), (5, 1))
         self.assertEqual(b.dodag.counters.solicits, 0)
 
+    def after_beacon(self, b):
+        """Advance just past the root's next beacon: none for 0.45 periods."""
+        sent = len(b.adverts())
+        while len(b.adverts()) == sent:
+            b.advance(b.now + 50)
+
     def test_root_answers_solicitations_and_older_versions(self):
+        # Each time right after a beacon, so that the advertisement within
+        # Imin is Trickle's answer, not the next beacon.
         b = self.root()
         b.steady()
+        self.after_beacon(b)
         start = b.now
         b.rx(self.s.solicitation())
         self.assertAdvertWithin(b, start, version=5)
         b.steady()
+        self.after_beacon(b)
         start = b.now
         b.rx(self.p.frame(8, 4))
         self.assertAdvertWithin(b, start, version=5)
