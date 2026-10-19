@@ -1,4 +1,4 @@
-"""LoRa time on air against the airtime budget (MESH_DESIGN §4, §16, C3)."""
+"""LoRa time on air against the airtime budget (MESH_DESIGN §4, §16)."""
 
 import unittest
 
@@ -29,8 +29,8 @@ _EXACT_US = {
 
 
 class BudgetFigures(unittest.TestCase):
-    def test_c3_twenty_bytes(self):
-        # C3: 20 B at 125 kHz, CR 4/5, preamble 8: 57 / 371 / 1319 ms.
+    def test_twenty_bytes(self):
+        # MESH_DESIGN §4: 20 B at 125 kHz, CR 4/5, preamble 8: 57 / 371 / 1319 ms.
         for sf, ms in ((7, 57), (10, 371), (12, 1319)):
             self.assertEqual((time_on_air_us(20, sf) + 500) // 1000, ms)
 

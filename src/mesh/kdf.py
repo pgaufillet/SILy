@@ -1,4 +1,4 @@
-"""Key derivation (MESH_DESIGN §14 key derivation, R13).
+"""Key derivation (MESH_DESIGN §14 key derivation).
 
 HMAC-SHA256 (RFC 2104) and PBKDF2-HMAC-SHA256 (RFC 8018) in Python:
 MicroPython has ``hashlib.sha256`` but no ``hmac``, and its hash objects have

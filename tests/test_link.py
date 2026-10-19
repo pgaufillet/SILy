@@ -1,4 +1,4 @@
-"""Link engine, driven step by step (MESH_DESIGN §6, §8, §13, §14; R14; MP5)."""
+"""Link engine, driven step by step (MESH_DESIGN §6, §8, §13, §14; MP5)."""
 
 import unittest
 

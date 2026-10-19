@@ -1,4 +1,4 @@
-"""HMAC-SHA256, PBKDF2-HMAC-SHA256 and network keys (MESH_DESIGN §14, R13).
+"""HMAC-SHA256, PBKDF2-HMAC-SHA256 and network keys (MESH_DESIGN §14).
 
 Expected values: RFC 4231 (HMAC), RFC 7914 §11 and CPython's
 ``hashlib.pbkdf2_hmac`` / ``hmac`` (PBKDF2 and the mesh derivation).

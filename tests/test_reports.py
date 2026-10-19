@@ -1,4 +1,4 @@
-"""Presence, topology and node information reports (MESH_DESIGN §11 ports 1, 2, 5; §16; R20, R24).
+"""Presence, topology and node information reports (MESH_DESIGN §11 ports 1, 2, 5; §16).
 
 Codecs on their own; the reporter on a line root — R — N of real link
 engines with their routing (`sim.net`, SF7, presence period 10 s, topology

@@ -1,7 +1,7 @@
 """Mesh ports and the transmit priority they imply (MESH_DESIGN §6, §11).
 
 Ports 0–15 belong to the mesh, 16–127 to applications at high priority,
-128–255 to applications at low priority (R14). The priority of a message is
+128–255 to applications at low priority. The priority of a message is
 implicit in its port, so that a relay deduces it for forwarded messages and
 the format carries no priority field. Port 9 is link-local: its sender knows
 whether it advertises after a Trickle reset (priority 1) or periodically

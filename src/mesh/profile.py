@@ -1,4 +1,4 @@
-"""Regional profiles and radio configuration validation (MESH_DESIGN §4, R12).
+"""Regional profiles and radio configuration validation (MESH_DESIGN §4).
 
 A profile is data: channel frequency, bandwidth and coding rate (fixed),
 maximum power (ERP or EIRP), and access rules (duty cycle and its window,
@@ -28,12 +28,12 @@ EIRP = 1  # ... as equivalent isotropic radiated power
 # ERP = EIRP - 2.15 dB (gain of a half-wave dipole over isotropic).
 DIPOLE_CDB = 215
 
-# SX1262 capabilities, which bound the custom profile (R12).
+# SX1262 capabilities, which bound the custom profile (§4).
 TX_POWER_MIN = -9  # dBm
 TX_POWER_MAX = 22  # dBm
 FREQUENCY_MIN = 150000000  # Hz
 FREQUENCY_MAX = 960000000  # Hz
-CUSTOM_BANDWIDTH_MAX = 125000  # Hz (R12: 7.8–125 kHz)
+CUSTOM_BANDWIDTH_MAX = 125000  # Hz (custom profile: 7.8–125 kHz, §4)
 
 # The mesh allows itself 90 % of the regulatory duty cycle (§4, §6).
 DUTY_CYCLE_MARGIN_PERCENT = 90

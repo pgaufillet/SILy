@@ -1,4 +1,4 @@
-"""Link engine (MESH_DESIGN §1 link layer; §6, §7, §8, §12, §13, §14; R14).
+"""Link engine (MESH_DESIGN §1 link layer; §6, §7, §8, §12, §13, §14).
 
 A `mesh.core.Core`: the same object runs on the board (asyncio runner and
 SX1262 adapter) and in the host simulator (`sim.node`). It owns the frame

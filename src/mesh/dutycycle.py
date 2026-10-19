@@ -1,4 +1,4 @@
-"""Duty-cycle accounting (MESH_DESIGN §6, R16).
+"""Duty-cycle accounting (MESH_DESIGN §6).
 
 Transmission time is accounted in ms over a sliding window of bins (60 bins
 of 60 s for a one-hour window). Each transmission is charged to the bin of

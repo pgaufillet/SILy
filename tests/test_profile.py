@@ -1,4 +1,4 @@
-"""Regional profiles and radio configuration validation (MESH_DESIGN §4, R12)."""
+"""Regional profiles and radio configuration validation (MESH_DESIGN §4)."""
 
 import unittest
 

@@ -1,4 +1,4 @@
-"""Duty-cycle accounting and port priorities (MESH_DESIGN §6, §11, R16)."""
+"""Duty-cycle accounting and port priorities (MESH_DESIGN §6, §11)."""
 
 import unittest
 

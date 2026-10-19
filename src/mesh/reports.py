@@ -1,4 +1,4 @@
-"""Presence, topology and node information reports (MESH_DESIGN §11 ports 1, 2, 5; §16; R20, R24).
+"""Presence, topology and node information reports (MESH_DESIGN §11 ports 1, 2, 5; §16).
 
 Codecs (little-endian; ValueError on a malformed payload):
 
@@ -59,7 +59,7 @@ and driven by its `mesh.dodag.Dodag`:
   `NODE_INFO_EVERY`-th one (when ``node_info`` is given).
 
 Hooks given by the application: ``extension`` (function() -> bytes, at most
-`MAX_EXTENSION`: SILy battery and mode, R23, read at each presence),
+`MAX_EXTENSION`: SILy battery and operating mode, read at each presence),
 ``tails`` (function() -> list of (port, oldest, last), the class 2 sender's
 idle unacknowledged flows, §12; filled in by the class 2 step, None until
 then), ``next_key`` (function() -> bool; by default, a key is loaded for the
