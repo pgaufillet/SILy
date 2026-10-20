@@ -47,7 +47,8 @@ outcome differs from its expectation. A full run takes about 75 minutes on
 8 cores, most of it in `LinkCut`, the liveness configurations of `DODAG`
 and its two-version safety configurations on the diamond (≈ 8 and 3
 minutes; with the answer window and its ghost variables ≈ 15 minutes on 4
-cores).
+cores), plus about 1.5 hours for the link cost rise configurations
+(`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 35 minutes each).
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
@@ -226,9 +227,10 @@ class 1 message is lost without error) and 5 (single poison) of the first
 section,
 and later defects of the readings: a child cannot follow its preferred
 parent's rank increase (it detaches), a node behind a new DODAG version
-detaches after one lost advertisement, and a node rejoins through the first
-neighbour that answers its solicitation, not the best; against MP5, MP10,
-MP11 and MP12.
+detaches after one lost advertisement, a node rejoins through the first
+neighbour that answers its solicitation, not the best, and a node
+whose link cost rises takes its own descendant as parent without any
+loss; against MP5, MP10, MP11 and MP12.
 Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 
 ## Scope and abstractions
@@ -248,10 +250,13 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   change back, the switch threshold 12 is a gain of 2 hops; 254 and
   MaxRankIncrease 56 scaled to `MaxRank` = 6 and `MaxInc` = 3. Links always
   eligible (no ETX estimation: `AckWindow`/`LinkCut` cover it). Parent sets
-  not truncated to 3 (degree ≤ 3). A parent's rank rises only by a local
-  repair to a worse parent after a relay death (`follow` graph, loops); a
-  rise of its link ETX after lost samples has the same effect on its
-  children and is not modelled separately.
+  not truncated to 3 (degree ≤ 3). Link costs are fixed (`Rise = 0`, a
+  rank then rises only by a local repair after a relay death, `follow`
+  graph) or rise (`Rise` > 0, below): the environment raises a node's
+  cost to one neighbour by one hop at a time, `Rise` hops overall, at any
+  moment (its ETX after failed samples); the node reads it at its next
+  selection, after the next frame it hears, as the code does. Costs never
+  fall back.
 - **Versions** (`Versions = 2`; `1`: one version, the first model):
   versions 0 and 1, the root issues 1 once at any moment (the policy
   deciding when, at most one version per 4 periods, is not modelled). Every
@@ -406,6 +411,17 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   window for the rejoin only, an adoption selects at once. `Best = TRUE`
   tracks the window as ghost variables (`wh`: neighbours heard in it, `rj`:
   rank taken at a rejoin in it), with `"first"` too, for `RejoinBest`.
+- **Rank test of the other candidates** (`Thr`): a candidate other
+  than the preferred parent must have a rank strictly below `"rank"` (the
+  code: the node's current rank, set by its last selection, on air or not),
+  `"air"` (the rank of the node's last frame), `"minair"` (the lowest of
+  both) or `"low"` (**retained**: L, the lowest rank the node has had since
+  it attached or adopted its version, never above its current rank).
+  `IncAdv = TRUE` (rejected) is the idealised limit of "a rank increase is
+  advertised at once": the node's frame with the new rank is the very next
+  step; `FALSE`, the code, leaves it to any later moment (a Trickle
+  advertisement or the next presence), which is also what an advertisement
+  queued at once is in this event abstraction.
 
 ## Results
 
@@ -448,8 +464,39 @@ following, no detach behind a version, adoption after the hold):
 | Rejected: window for the rejoin only | a detached node adopting the new version in its window selects at once: it takes the first answerer of that version (4), and 3 answers after | `DODAG_rejoin_windowrejoin_best` |
 | Non-vacuity (window) | a node rejoins at the close of its window | `DODAG_rejoin_window_witness_rejoin` |
 
+Link cost rises, on the code since the answer window, `Rise` hops
+of cost rise overall:
+
+| Item | Result | Configurations |
+|---|---|---|
+| Loop after a link cost rise, current design | no loss, chain 0-1-2, 4 hops of rise on 1's link to 0: at a frame of 0, 1 reads 2 of them and its rank goes 1 → 3, not put on air; after 2 more, the path through 0 (5) passes the bound L + MaxInc = 4; at the next frame of 0, 1 drops 0 and takes 2, heard at its old rank 2 < 3 (path cost 3): loop 1 → 2 → 1, 2 having heard nothing of 1 since (3 hops: no loop). Siblings, subtree graph, 1 hop of rise and relay 1's death, no loss: 1's rank rises to 2 and goes on air, 2 and 3 follow (rank 3) without sending it; 1 dies and each takes the other, seen at 2 < 3 (loop 2 → 3 → 2), the case seen in the simulator. Fewest hops of rise for a loop without loss with relay 1's death: line 2, follow 3, diamond and rejoin 4 | `DODAG_chain_current_loop`, `DODAG_subtree_current_rise` |
+| Rejected: rank increase advertised at once | in the event model an advertisement queued at once still leaves the window between the increase and its frame: the trace above (1's frame is due, 0's frame comes first). At its idealised limit (`IncAdv`: the frame is the very next step, which no radio gives) no loop without loss, a loop with one loss (the advertisement lost by 2, which keeps rank 2) | `DODAG_chain_current_loop`, `DODAG_chain_advertise_nocycle`, `DODAG_chain_advertise_loss` |
+| Rejected: test against the rank on air, or the lowest of it and the current rank | no loss: 1 puts rank 4 on air, 2 follows (rank 5) but has not sent it; 1 still hears 2 at 2 < 4 and takes it. A child's rank comes from a rank the node sent, but the node may hear an older rank of the child still: the last rank sent bounds nothing | `DODAG_chain_air_loop`, `DODAG_chain_minair_loop` |
+| Retained: test against L | no loop with at most 1 consecutive loss per link: chain, Rise 4, ≤ 2 losses (12 790 states, 7 s); line, relay 1 dies, a message, Rise 2, ≤ 2 losses, also no silent loss and no detach while the parent stays attached (2 986 432 states, 23 min); subtree, relay 1 dies, Rise 1, ≤ 2 losses, also KeepParent (722 276 states, 36 min). No loop without loss, relay 1 dies, Rise 4 (checked once, not kept: line 16 s, diamond 2 min, follow 3 min, rejoin 5 min, subtree 3.6 million states, 50 min). Liveness: MP5Live, MP10, LoopsEnd, RanksSettle, CutOffLive, RoutesSettle on the chain, Rise 4, a message, ≤ 2 losses in any pattern (102 365 states, 9 min); LoopsEnd, RanksSettle, MP10Live, CutOffLive, RoutesSettle on the line, relay 1 dies, a message, Rise 2, ≤ 2 losses in any pattern (879 344 states, 22 min) and on the subtree graph, relay 1 dies, Rise 1, ≤ 1 loss (24 930 states, 2 min). With fixed costs, every earlier `DODAG` configuration run with this test (`Thr = "low"`) keeps its expected outcome: the 35 that hold still hold, the 27 defects and witnesses still fail on the same property (loops after two consecutive losses included: the rule does not cover views older than an attach) | `DODAG_*_low_*` |
+
+**Why L.** Every rank a node puts on air since it attached is at least
+L; a child's rank is the rank it heard from its parent plus a link cost
+(≥ 8, more than the hysteresis of 3 it may lag), so it is strictly
+above every rank of its parent it ever used. A node switching to a
+candidate c has `rank(c) < L(node)`, and c's ranks since its attach are
+≥ L(c), so `L(c) ≤ rank(c) < L(node)`: down any chain of preferred
+parents, the ranks a descendant advertised since its attach are above the
+L of each of its ancestors, and an ancestor testing against its L never takes it,
+whatever was lost or not yet sent, as long as no view predates the
+ancestor's attach (fix 5: one consecutive loss tolerated). This is the
+feasibility condition of DUAL (EIGRP), L playing the feasible distance and
+the detach-hold-rejoin its active state. The current rank fails because it
+rises without the descendants knowing; the rank on air fails because the
+descendants' ranks reach the node later than the node's rank reaches them.
+Cost: a node whose rank has risen above L moves only to a neighbour below
+L, otherwise it follows its parent (to the bound) or detaches and rejoins,
+L restarting. The first local repair after a parent loss is unchanged
+when the node was at its lowest rank (its current rank is then L).
+
 **Loop bound (MP11).** With fix 5 and at most one consecutive loss per link
-no loop forms (checked on the line and the subtree graph). Beyond, a loop
+no loop forms (checked on the line and the subtree graph) as long as link
+costs do not rise; with rises, only with the candidates tested against L
+(above). Beyond, a loop
 is broken by the first frame of its inconsistent member heard by its child
 in the loop: around a cycle ranks cannot all decrease, so some member's
 parent advertises a rank not below the member's own, and on hearing it the
@@ -565,12 +612,35 @@ How each fix is implemented, what it costs, and the limits accepted.
   only by the switch threshold), hence the 8 slots of margin, which the
   detach + rejoin time of MESH_DESIGN §9 includes (detach; Trickle,
   solicitation).
+- **Code changes for the loop after a link cost rise**: `Parents.candidate_cost` (parents.py:207):
+  the rank test of a candidate other than the preferred parent compares
+  with L, `n.rank >= (self.rank if self.lowest is None else self.lowest)`
+  (``lowest`` never exceeds ``rank``; detached, ``lowest`` is None and the
+  rank 255); `_select` (parents.py:381-383): the secondary members kept
+  are those below the new ``lowest`` (set at parents.py:377-378), not
+  below ``rank``, so that the set never holds a member the next selection
+  would refuse. No new state, nothing on air, no change to Trickle: the
+  rule holds whatever is suppressed or lost. MESH_DESIGN §9 (bounded rank
+  increase, candidates) states it with L instead of the current rank.
+  Simulator (`make large RUN="relay-death star 1"`, a diagnostic outside
+  the repository): every one of the 31 switches that closed a cycle took a
+  neighbour heard at a rank not below the node's L (often two siblings at
+  the same L, both risen, taking each other), 29 of them with the node's
+  rank above the rank of its last frame; with the test against L patched
+  in, no cycle on that run nor on `lossy geometric 1` (10 before); on
+  `relay-death star 2` the 25 cycles became 4, all from one rejoin through
+  a node that still saw the rejoining node at its rank from before its
+  detach (residual below). Class 1 delivery fell on these runs
+  (`lossy geometric 1`: 289 → 282 delivered; the star runs, failing already
+  under the hidden-terminal collapse, also lost messages silently and broke MP10 once): the cost of
+  the restriction (fewer local repairs, more detaches) is to be measured on
+  the whole suite before the rule is adopted.
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
   information parameters left out; whole-hop link costs (no count-up
-  through hysteresis or fractional ETX, a parent's rise comes from a local
-  repair, not from its ETX); acknowledgement frames heard by their
+  through hysteresis or fractional ETX; cost rises in whole hops, only
+  with `Rise` > 0, never falling back); acknowledgement frames heard by their
   destination only; liveness with acknowledgements as frames checked on the
   subtree graph with 1 loss only (≈ 4 minutes), with versions on the line
   (≤ 2 losses) and on the diamond with a relay death (≤ 1 loss, no
@@ -578,6 +648,13 @@ How each fix is implemented, what it costs, and the limits accepted.
 
 ## Open points
 
+- **Views older than an attach** (residual of the cost rise fix): the test against L
+  assumes no node holds a view of an ancestor older than that ancestor's
+  last attach (rank 255 heard since). Fix 5 ensures it with at most one
+  consecutive loss per link; in the simulator's star (hidden-terminal collapse) a
+  descendant that heard none of the node's frames since its detach (poison
+  and solicitation included) takes part in a loop after the rejoin, and L,
+  restarted, no longer excludes it.
 - **Global repair wave**: a solicitation of finite rank (only a node behind
   a newer version sends one) answered by newer neighbours only, so that the
   node's own children no longer answer it in the window of its parent's

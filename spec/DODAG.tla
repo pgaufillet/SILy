@@ -37,6 +37,28 @@
 (* scaled down. Parent sets are not truncated to 3 members (every node    *)
 (* has at most 3 neighbours).                                              *)
 (*                                                                         *)
+(* Link cost rises (Rise > 0): the environment raises the                 *)
+(* cost of a link as seen by one node (its ETX after failed samples,       *)
+(* neighbours.py:198, link_cost parents.py:109-112) by one hop at a time, *)
+(* Rise hops overall (CostUp). The node reads the new cost at its next    *)
+(* selection, after the next frame it hears (dodag.py:20-25, 409, 549-557).*)
+(* Rise = 0: fixed costs, the earlier configurations.                     *)
+(* Rank test of the candidates other than the preferred parent (Thr):     *)
+(* - "rank" (the code, parents.py:207): strictly below the node's current *)
+(*   rank, the one its last selection set (not necessarily on air yet);   *)
+(* - "air": strictly below the rank carried by the node's last frame;     *)
+(* - "minair": strictly below the lowest of both;                          *)
+(* - "low": strictly below L, the lowest rank of the node since it        *)
+(*   attached or adopted its version (parents.py:377-378), never above    *)
+(*   its current rank.                                                     *)
+(* IncAdv = TRUE: the idealised limit of "a rank increase is advertised at *)
+(* once": the node's frame with its new rank is the very next step (no    *)
+(* other event anywhere in between). FALSE (the code: a Trickle reset,     *)
+(* dodag.py:576-577, whose advertisement k = 2 frames heard may suppress, *)
+(* trickle.py:11-14): the next frame of the node comes at any later time,  *)
+(* as every Announce; an advertisement sent "at once" through a queue,     *)
+(* carrier sense and duty cycle is the same in this event abstraction.    *)
+(*                                                                         *)
 (* DODAG versions (Versions = 2; Versions = 1: one version, as the first  *)
 (* model): versions are 0 and 1, the root issues version 1 once, at any   *)
 (* moment (NewVersion: operator, parameter change or inconsistency; the    *)
@@ -150,7 +172,7 @@
 EXTENDS Integers, FiniteSets, TLC
 
 CONSTANTS
-    Graph,      \* "line", "diamond", "subtree", "follow", "rejoin" (see Edges)
+    Graph,      \* "chain", "line", "diamond", "subtree", "follow", "rejoin" (see Edges)
     Victim,     \* the relay that may die once (the root: none)
     Origins,    \* origins of the class 1 messages, one message each (named by its origin)
     MaxLoss,    \* frame and acknowledgement losses overall
@@ -166,7 +188,10 @@ CONSTANTS
     Versions,   \* 1 (one DODAG version) or 2 (the root may issue a new version once)
     Adopt,      \* detached node and another version: "any" (the code before the fix) or "fresh"
     Rejoin,     \* rejoin after the solicitation: "first" (the code), "window" or "window_rejoin"
-    Best        \* BOOLEAN: track the answer window (ghosts wh, rj) for RejoinBest
+    Best,       \* BOOLEAN: track the answer window (ghosts wh, rj) for RejoinBest
+    Rise,       \* link cost rises, in hops overall (0: fixed costs)
+    Thr,        \* rank test of the other candidates: "rank" (the code), "air", "minair" or "low"
+    IncAdv      \* BOOLEAN: a rank increase goes on air in the very next step (idealised)
 
 NONE == -1
 Root == 0
@@ -177,6 +202,7 @@ LoopCap == 2               \* saturation of the loop formation counter
 
 (***************************************************************************)
 (* Graphs: edges <<a, b, cost>>, cost in hops (ETX).                       *)
+(* - chain: 0 - 1 - 2 (link cost rises: the smallest loop).                *)
 (* - line: 0 - 1 - 2 - 3; relay 1 dies: 2 and 3 are cut off.               *)
 (* - diamond: 0 - 1, 0 - 2, 1 - 3, 2 - 3, 3 - 4; relay 1 dies: 3 falls    *)
 (*   back on 2 (local repair), 4 follows.                                  *)
@@ -193,7 +219,8 @@ LoopCap == 2               \* saturation of the loop formation counter
 (*   threshold: the parent taken at the rejoin stays.                      *)
 (***************************************************************************)
 Edges ==
-    CASE Graph = "line"    -> {<<0, 1, 1>>, <<1, 2, 1>>, <<2, 3, 1>>}
+    CASE Graph = "chain"   -> {<<0, 1, 1>>, <<1, 2, 1>>}
+      [] Graph = "line"    -> {<<0, 1, 1>>, <<1, 2, 1>>, <<2, 3, 1>>}
       [] Graph = "diamond" -> {<<0, 1, 1>>, <<0, 2, 1>>, <<1, 3, 1>>, <<2, 3, 1>>, <<3, 4, 1>>}
       [] Graph = "subtree" -> {<<0, 1, 1>>, <<1, 2, 1>>, <<1, 3, 1>>, <<2, 3, 1>>, <<3, 4, 1>>,
                                <<0, 4, 3>>}
@@ -208,7 +235,7 @@ CostF == [p \in Nodes \X Nodes |->
             IF \E e \in Edges : {e[1], e[2]} = {p[1], p[2]}
             THEN (CHOOSE e \in Edges : {e[1], e[2]} = {p[1], p[2]})[3] ELSE 0]
 Nbr(n) == NbrF[n]
-Cost(n, m) == CostF[<<n, m>>]
+Cost(n, m) == CostF[<<n, m>>]          \* initial cost (the formed DODAG)
 Msgs == Origins
 Orig(m) == m
 Vers == 0..(Versions - 1)
@@ -224,6 +251,10 @@ ASSUME Follow \in BOOLEAN /\ Behind \in {"detach", "keep"} /\ Versions \in {1, 2
 ASSUME Adopt \in {"any", "fresh"}
 ASSUME Rejoin \in {"first", "window", "window_rejoin"} /\ Best \in BOOLEAN
 ASSUME (Rejoin # "first" \/ Best) => Fix5 = "solicit"
+ASSUME Rise \in Nat /\ Thr \in {"rank", "air", "minair", "low"} /\ IncAdv \in BOOLEAN
+
+\* The rank of the last frame is tracked (otherwise constant).
+TrackAir == Thr \in {"air", "minair"}
 
 \* The answer window is tracked (a real window, or the ghost of RejoinBest).
 Track == Rejoin # "first" \/ Best
@@ -274,12 +305,20 @@ VARIABLES
     loops,     \* loop formations, saturated at LoopCap
     rl,        \* a rejoin (attachment from rank 255) closed a loop
     rerr,      \* a rank error was detected (data-path validation)
-    xv         \* an upward message was taken by a node of another version than its sender
+    xv,        \* an upward message was taken by a node of another version than its sender
+    dc,        \* dc[k][c]: rise of k's link cost to c, in hops (Rise)
+    rises,     \* link cost rises so far
+    air,       \* air[k]: rank carried by k's last frame (TrackAir; otherwise constant)
+    inc        \* inc[k]: k's rank rose since its last frame (IncAdv; otherwise FALSE)
 
-routing == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
-             ver, vview, behind, sol, owe, win, wh, rj>>
+routing0 == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
+              ver, vview, behind, sol, owe, win, wh, rj>>
+routing == <<routing0, dc, rises, air, inc>>
 msgvars == <<sub, cp, giver, delivered, err, errFrom>>
 vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv>>
+
+\* Link cost of k to c, as k currently estimates it.
+LCost(k, c) == Cost(k, c) + dc[k][c]
 
 Copies == [st : {"no", "q", "p", "h"}, hop : Nodes \cup {NONE}, att : 0..ATTEMPTS,
            acc : {"no", "pas", "exp"}]
@@ -306,6 +345,8 @@ TypeOK ==
     /\ delivered \in [Msgs -> BOOLEAN] /\ err \in [Msgs -> {"none", "sent", "recv"}]
     /\ errFrom \in [Msgs -> Nodes \cup {NONE}]
     /\ loops \in 0..LoopCap /\ rl \in BOOLEAN /\ rerr \in BOOLEAN /\ xv \in BOOLEAN
+    /\ dc \in [Nodes -> [Nodes -> 0..Rise]] /\ rises \in 0..Rise
+    /\ air \in [Nodes -> 0..INF] /\ inc \in [Nodes -> BOOLEAN]
 
 (***************************************************************************)
 (* Chains of preferred parents (dead nodes have none).                     *)
@@ -344,10 +385,11 @@ KeepR(R) == [rank |-> R.rank, pref |-> R.pref, low |-> R.low, hold |-> R.hold,
 Keep(k) == KeepR(Rec(k))
 
 (***************************************************************************)
-(* Parent selection (Parents._select, parents.py:270-325).                 *)
-(* Candidate (Parents.candidate_cost, parents.py:160-173): a neighbour     *)
-(* of the node's version (parents.py:162) with a finite rank strictly     *)
-(* below the node's advertised rank (any finite rank when detached;       *)
+(* Parent selection (Parents._select, parents.py:324-385).                 *)
+(* Candidate (Parents.candidate_cost, parents.py:193-220): a neighbour     *)
+(* of the node's version (parents.py:201) with a finite rank strictly     *)
+(* below the threshold of Thr, ThrR (the code: the node's current rank,   *)
+(* parents.py:207; any finite rank when detached;                         *)
 (* Follow: the preferred parent at any finite rank), heard within 2       *)
 (* periods (an entry), heard after the poison while detached               *)
 (* (parents.py:166), not dropped after failed attempts (parents.py:168),  *)
@@ -360,15 +402,23 @@ BoundR(R) == IF R.low = NONE THEN MaxRank
              ELSE IF R.low + MaxInc < MaxRank THEN R.low + MaxInc ELSE MaxRank
 Bound(k) == BoundR(Rec(k))
 
+\* Rank threshold of the candidates other than the preferred parent (INF when detached;
+\* "minair": once the poison is on air, before which the hold selects nothing).
+ThrR(k, R) ==
+    CASE Thr = "rank"   -> R.rank
+      [] Thr = "low"    -> IF R.low = NONE THEN R.rank ELSE R.low
+      [] Thr = "air"    -> IF R.rank = INF THEN INF ELSE air[k]
+      [] Thr = "minair" -> IF air[k] < R.rank THEN air[k] ELSE R.rank
+
 CandCost(k, c, V, VV, Dr, Fr, R) ==
     LET v == V[k][c] IN
     IF v = NONE \/ v = INF \/ Dr[k][c] THEN NONE
     ELSE IF VV[k][c] = R.ver
-    THEN IF /\ \/ v < R.rank
+    THEN IF /\ \/ v < ThrR(k, R)
                \/ Follow /\ c = R.pref
             /\ ~R.poisoned \/ Fr[k][c]
-            /\ v + Cost(k, c) <= BoundR(R)
-         THEN v + Cost(k, c) ELSE NONE
+            /\ v + LCost(k, c) <= BoundR(R)
+         THEN v + LCost(k, c) ELSE NONE
     ELSE IF Behind = "keep" /\ R.behind /\ c = R.pref /\ VV[k][c] > R.ver
     THEN R.rank
     ELSE NONE
@@ -433,11 +483,16 @@ Reshape(c, S) ==
 (* ghost variables; s, H: the sender of the frame of this step and the     *)
 (* nodes that heard it (NONE, {}: no frame). Answer window (Best): wh      *)
 (* records the nodes heard in the window, rj the rank taken at a rejoin   *)
-(* in it; both restart when the window opens.                              *)
+(* in it; both restart when the window opens. The sender's frame carries  *)
+(* its rank (air, TrackAir); inc (IncAdv): a rank increase not yet on air. *)
 (***************************************************************************)
 CommitH(S, V, VV, Dr, Fr, OW, SO, s, H) ==
     LET NP == [k \in Nodes |-> S[k].pref]
-    IN  /\ win' = [k \in Nodes |-> S[k].win]
+    IN  /\ air' = IF TrackAir /\ s # NONE THEN [air EXCEPT ![s] = rank[s]] ELSE air
+        /\ inc' = IF ~IncAdv THEN inc
+                  ELSE [k \in Nodes |-> k # s /\ S[k].rank # INF /\ (inc[k] \/ S[k].rank > rank[k])]
+        /\ UNCHANGED <<dc, rises>>
+        /\ win' = [k \in Nodes |-> S[k].win]
         /\ wh' = IF ~Best THEN wh
                  ELSE [k \in Nodes |-> IF ~S[k].win \/ ~win[k] THEN AllF
                                        ELSE IF k \in H THEN [wh[k] EXCEPT ![s] = TRUE]
@@ -649,7 +704,8 @@ NewVersion ==
     /\ ver' = [ver EXCEPT ![Root] = ver[Root] + 1]
     /\ owe' = [owe EXCEPT ![Root] = TRUE]
     /\ UNCHANGED <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
-                   vview, behind, sol, win, wh, rj, lost, consec, msgvars, loops, rl, rerr, xv>>
+                   vview, behind, sol, win, wh, rj, lost, consec, msgvars, loops, rl, rerr, xv,
+                   dc, rises, air, inc>>
 
 (***************************************************************************)
 (* Silence (parents.py:164, dodag.py:536-549): a dead neighbour's entry   *)
@@ -671,7 +727,20 @@ Die ==
     /\ alive' = [alive EXCEPT ![Victim] = FALSE]
     /\ UNCHANGED <<rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
                    ver, vview, behind, sol, owe, win, wh, rj, lost, consec, msgvars, loops, rl,
-                   rerr, xv>>
+                   rerr, xv, dc, rises, air, inc>>
+
+(***************************************************************************)
+(* Link cost rise (Rise): k's estimate of its link to c rises by one       *)
+(* hop (failed acknowledgement samples, a falling reception ratio:         *)
+(* neighbours.py:198). No selection in this step: the node reads the new   *)
+(* cost at its next selection, after the next frame it hears              *)
+(* (dodag.py:409, 549-557).                                                *)
+(***************************************************************************)
+CostUp(k, c) ==
+    /\ rises < Rise /\ k # Root /\ alive[k] /\ c \in Nbr(k)
+    /\ dc' = [dc EXCEPT ![k][c] = dc[k][c] + 1]
+    /\ rises' = rises + 1
+    /\ UNCHANGED <<routing0, air, inc, lost, consec, msgvars, loops, rl, rerr, xv>>
 
 (***************************************************************************)
 (* Class 1.                                                                *)
@@ -802,10 +871,13 @@ AckFrame(k, m) ==
            /\ \E lostIt \in BOOLEAN :
                 IF lostIt
                 THEN /\ IF Acks = "atomic"
-                        THEN lost < MaxLoss /\ lost' = lost + 1 /\ UNCHANGED consec
-                        ELSE LossOK(h, {k}, 0) /\ FrameCounters(h, {k}, {}, 0)
+                        THEN lost < MaxLoss /\ lost' = lost + 1 /\ UNCHANGED <<consec, air, inc>>
+                        ELSE /\ LossOK(h, {k}, 0) /\ FrameCounters(h, {k}, {}, 0)
+                             \* a frame of h on air, lost by its destination
+                             /\ air' = IF TrackAir THEN [air EXCEPT ![h] = rank[h]] ELSE air
+                             /\ inc' = [inc EXCEPT ![h] = FALSE]
                      /\ cp' = [cp EXCEPT ![m][k] = [c EXCEPT !.acc = "no"]]
-                     /\ UNCHANGED <<routing, loops, rl>>
+                     /\ UNCHANGED <<routing0, dc, rises, loops, rl>>
                 ELSE IF Acks = "atomic"
                 THEN /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
                      /\ UNCHANGED <<routing, lost, consec, loops, rl>>
@@ -893,6 +965,8 @@ Init ==
     /\ delivered = [m \in Msgs |-> FALSE] /\ err = [m \in Msgs |-> "none"]
     /\ errFrom = [m \in Msgs |-> NONE]
     /\ loops = 0 /\ rl = FALSE /\ rerr = FALSE /\ xv = FALSE
+    /\ dc = [k \in Nodes |-> [c \in Nodes |-> 0]] /\ rises = 0
+    /\ air = InitRank /\ inc = [n \in Nodes |-> FALSE]
 
 Protocol ==
     \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s) \/ WindowClose(s)
@@ -901,7 +975,14 @@ Protocol ==
           SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s, m) \/ HoldExpire(s, m)
     \/ \E m \in Msgs : ErrorArrives(m)
 
-Next == Protocol \/ Die \/ NewVersion \/ \E m \in Msgs : Submit(m)
+\* IncAdv: a node whose rank rose sends its frame before anything else happens.
+Owed == {k \in Nodes : inc[k]}
+
+Next ==
+    IF IncAdv /\ Owed # {}
+    THEN \E k \in Owed : Announce(k)
+    ELSE \/ Protocol \/ Die \/ NewVersion \/ \E m \in Msgs : Submit(m)
+         \/ \E k, c \in Nodes : CostUp(k, c)
 
 \* The class 1 actions of one copy are enabled in disjoint states of that copy
 \* ("q", "p"/"pas", "p"/"no", "h" with or without route): weak fairness of their
@@ -984,7 +1065,7 @@ Live == MP5Live /\ LoopsEnd /\ RanksSettle /\ MP10Live /\ CutOffLive
 (***************************************************************************)
 Detaches(n) == n # Root /\ rank[n] # INF /\ rank'[n] = INF /\ ver'[n] = ver[n]
 PLost(n) == pref[n] = NONE \/ view'[n][pref[n]] \in {NONE, INF} \/ dropped'[n][pref[n]]
-OverBound(n) == view'[n][pref[n]] + Cost(n, pref[n]) > Bound(n)
+OverBound(n) == view'[n][pref[n]] + LCost(n, pref[n]) > Bound(n)
 
 KeepParent ==
     [][\A n \in Nodes : (Detaches(n) /\ ~PLost(n) /\ vview'[n][pref[n]] = ver[n]) => OverBound(n)]_vars
@@ -1000,10 +1081,10 @@ NoLagDetach ==
 (* Losses: a neighbour whose answers were all lost is not among them.      *)
 (***************************************************************************)
 WinBest(k) ==
-    Min({INF} \cup {view[k][c] + Cost(k, c) :
+    Min({INF} \cup {view[k][c] + LCost(k, c) :
                       c \in {c \in Nbr(k) : /\ wh[k][c] /\ view[k][c] \notin {NONE, INF}
                                             /\ vview[k][c] = ver[k] /\ ~dropped[k][c]
-                                            /\ view[k][c] + Cost(k, c) <= MaxRank}})
+                                            /\ view[k][c] + LCost(k, c) <= MaxRank}})
 
 RejoinBest ==
     [][\A k \in Nodes : (win[k] /\ ~win'[k] /\ rj'[k] # NONE) => rj'[k] <= WinBest(k)]_vars
