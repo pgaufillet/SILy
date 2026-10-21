@@ -18,7 +18,8 @@ quoted by number below and in the models, each fixed since:
 5. a single lost poison let a detached node rejoin through its own
    descendants: solicitation before the rejoin, §9 *Loop freedom*;
 6. one lost root acknowledgement made a relay's rank jump: one sample per
-   frame, `p_ack` from 4 samples, §9 *Link estimation*.
+   frame, one failed sample per batching delay towards the root, `p_ack`
+   from 4 samples, §9 *Link estimation*.
 
 The link and time models cover issues 1, 2 and 6, the choices made to fix
 them, and the options for a root beacon tolerating two consecutive losses.
@@ -95,7 +96,13 @@ they mirror (file:line, `src/mesh`).
    duty cycle).
 2. **One acknowledgement sample per frame** (one port 3 entry acknowledges
    every class 1/2 message of the frame): one lost acknowledgement is one
-   failed sample, whatever the aggregation (`M = 1`).
+   failed sample, whatever the aggregation (`M = 1`). Towards the root,
+   **one failed sample per batching delay**: a frame that ended within one
+   batching delay of the frame of the last failed sample towards the root
+   gives no failed sample, so that one lost batch acknowledging several
+   frames of the relay is one failure (`M = 1` again); the attempts of one
+   message are a root timeout apart, longer than the batching delay, so
+   each still fails once.
 3. **Presence reports are passively acknowledged** (§9): the node overhears
    its preferred parent forward its presence, one sample per presence
    (`LinkCut`, `Presence = TRUE`); not when the parent is the root.
@@ -123,7 +130,8 @@ they mirror (file:line, `src/mesh`).
 | Tr, 3 lost presences detected | Tr ≤ 72 ticks = 3.6T | `Silence_root_P2_Tr72`, `_Tr73` |
 | Tr band | **empty** (74 > 72), at D = 0 | `KMiss_Tr72` |
 | `K_MISS` = 4 (chosen, the band for 3 being empty): Tr = 90 ticks = 4.5T | no false alarm; 3 lost tolerated up to D = 1 (T/20), 4 detected at D = 0 | `KMiss_Tr90`, `Silence_root4_P1_Tr90`, `_D1`, `_D2`, `Silence_root4_P2_Tr90`, `_D1` |
-| Per-message samples (code) | one lost acknowledgement of an 8-message frame detaches the children even on a full window | `AckWindow_permessage_P4_full` |
+| Per-message samples (before choice 2) | one lost acknowledgement of an 8-message frame detaches the children even on a full window | `AckWindow_permessage_P4_full` |
+| Per-frame failures in a lost root batch (without the one-per-batching-delay rule of choice 2) | a lost batch acknowledging 2 frames of the relay (`M = 2`) on a fresh window takes the rank from 8 to 16 (P4 violated, NMin = 4 with latch) | `AckWindow_rootbatch_P4` |
 | Root beacon every half period (T = 10 ticks, presence period 20), Th unchanged (50) | 3 consecutive lost beacons tolerated up to D = 5 ticks (4 × 11 + D < 50), 6 fails; 2 tolerated up to the model's largest D, 8 ticks; 4 lost may go undetected until the next beacon (5 × 9 < 50); 5 detected up to D = 4, 5 fails | `Silence_half_*` |
 | Root beacon every 2/3 period (T = 20 ticks, presence period 30, Th = 75) | 2 consecutive lost beacons tolerated up to D = 8 ticks = 0.27 presence period (3 × 22 + D < 75), 9 fails; 3 lost drop the root | `Silence_twothirds_*` |
 | Root parent with its own threshold, beacon every period | 2 lost beacons tolerated from Th = 67 ticks = 3.35T (D = 0; 66 fails); at Th = 70 (3.5T) up to D = 3 (4 fails), 3 lost detected up to D = 2 (3 fails) | `Silence_rootth*` |
@@ -194,6 +202,16 @@ they mirror (file:line, `src/mesh`).
 - **Latch**: the mitigation of the d_in / p_ack switch, in the design
   (MESH_DESIGN §9, link estimation); without it, anomaly 6 remains (bounded
   to a loss at the NMin-th sample of a link whose d_in and p_ack disagree).
+- **One failed sample per batching delay towards the root** (MESH_DESIGN
+  §9, link estimation; §12, class 1): one lost root batch frame
+  acknowledges several frames of a relay; counted per frame, it gives as
+  many failed samples (`M` > 1: `AckWindow_rootbatch_P4` violates P4 with
+  2), so that congestion at the root would read as a bad link. Counted
+  once, it is the case P4 checks (`AckWindow_nmin4_P4`,
+  `AckWindow_latch_P4`: P4 and P4Strong hold). Cost: separate frame losses
+  within one batching delay count once (a lossy link towards the root
+  reads slightly better); detection is unchanged, the attempts of one
+  message being a root timeout apart.
 
 ## Open points
 
@@ -209,12 +227,6 @@ The same points appear in MESH_DESIGN §18.
   is ineligible (4 = the fresh-window bound, `AckWindow_nmin4_detect`);
   one success or the ageing of the failures lifts it. Whether idle bad
   links matter is for the bench measurements (loss patterns).
-- **Root acknowledgement batching**: one lost batch frame acknowledges
-  several frames of the same relay, hence several failed samples even with
-  one sample per frame. Candidate fix: towards the root, timeouts of frames
-  sent within one batching delay of each other give one failed sample
-  (one sample per acknowledgement frame), which is `M = 1`, the case P4
-  already checks (`AckWindow_nmin4_P4`: P4 and P4Strong hold).
 
 # DODAG: routing, repair and class 1 custody
 

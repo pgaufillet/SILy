@@ -278,6 +278,69 @@ class LinkSamples(unittest.TestCase):
         self.assertEqual(entry.etx(), 128)
 
 
+class RootSamples(unittest.TestCase):
+    """§9, §12: towards the root, one failed sample per batching delay."""
+
+    def _relay(self):
+        # R, with the root in its table, and the root.
+        r = _engine(R, ROOT, seed=2)
+        root = _engine(ROOT, None, seed=3)
+        root.reliable.acknowledge(X, 0, 0)  # any frame of the root
+        (hello,), now = _run(root, 0, root.reliable.batch_ms)
+        _rx(r, now, hello)
+        self.assertIsNotNone(r.neighbours.get(ROOT))
+        return r, root, now
+
+    def _send(self, r, now, i):
+        # R sends one class 1 message to the root in a frame of its own.
+        r.submit(20 + i, 1, ROOT, b"m%d" % i)
+        (f,), end = _run(r, now)
+        return f, end
+
+    def _failures(self, r):
+        entry = r.neighbours.get(ROOT)
+        return entry.ack_count - entry.acknowledged()
+
+    def test_one_lost_batch_of_three_frames_one_failure(self):
+        r, root, now = self._relay()
+        ends = []
+        for i in range(3):
+            f, now = self._send(r, now, i)
+            ends.append(now)
+            _rx(root, now, f)
+        # One batch frame acknowledges the 3 frames; R does not receive it.
+        (batch,), _ = _run(root, now, ends[0] + root.reliable.batch_ms)
+        entries = decode_acks(_messages(_KEY, batch)[1][0].payload)
+        self.assertEqual([s for s, _ in entries], [R, R, R])
+        timeout = r.reliable.timeout_ms(ROOT)
+        self.assertTrue(timeout > r.reliable.batch_ms > ends[2] - ends[0])
+        # Up to the last of the 3 timeouts, before any retry times out.
+        _run(r, now, ends[2] + timeout)
+        self.assertEqual(r.counters.retries, 3)
+        entry = r.neighbours.get(ROOT)
+        self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 0))
+
+    def test_failures_a_batching_delay_apart_counted_apart(self):
+        r, root, now = self._relay()
+        _, end1 = self._send(r, now, 0)
+        _run(r, end1, end1 + r.reliable.batch_ms)
+        _, end2 = self._send(r, end1 + r.reliable.batch_ms, 1)
+        self.assertTrue(end2 - end1 >= r.reliable.batch_ms)
+        _run(r, end2, end2 + r.reliable.timeout_ms(ROOT))
+        self.assertEqual((r.counters.retries, self._failures(r)), (2, 2))
+
+    def test_every_attempt_towards_the_root_one_failure(self):
+        # The attempts are a root timeout apart, longer than the batching
+        # delay: 3 failed samples, then the message fails.
+        r, root, now = self._relay()
+        failures = []
+        r.on_failure(lambda dest, port, seq, reason: failures.append(reason))
+        _, end = self._send(r, now, 0)
+        _run(r, end, end + ATTEMPTS * (r.reliable.timeout_ms(ROOT) + 1000))
+        self.assertEqual((r.counters.retries, self._failures(r)), (2, 3))
+        self.assertEqual(failures, [1])
+
+
 def _copies(engine):
     """Class 1/2 entries of the engine's queue (queued, waiting or held)."""
     return len(engine.queue.select(lambda m: m.cls, True))

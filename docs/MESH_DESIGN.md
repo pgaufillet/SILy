@@ -509,7 +509,18 @@ acknowledgement window and the time of its newest failure.
   (an explicit entry acknowledges them all, §12; a **passive
   acknowledgement**, the node overhearing the parent forward one of them
   within its forwarding delay, §7, proves the frame was received), a
-  failure when they all time out (§12). **Presence reports** are included,
+  failure when they all time out (§12). Towards the root, **one failed
+  sample per batching delay**: a timeout gives no failed sample if its
+  frame ended within one batching delay (§16) of the frame of the last
+  failed sample towards the root. The root acknowledges in batches, so one
+  lost batch frame leaves several frames of a relay unacknowledged at once:
+  it is one loss event, and one failed sample per frame would make
+  congestion at the root read as a bad link (rank jump of the relay, TLA+
+  `AckWindow_rootbatch_P4`). Successes are still sampled per frame; the
+  attempts of one message are a root timeout apart, longer than the
+  batching delay, so each failed attempt is still one sample. Cost:
+  separate frame losses within one batching delay count once, so a lossy
+  link to the root reads slightly better. **Presence reports** are included,
   matched by origin: a presence sent to a preferred parent other than the
   root, in a frame without class 1/2 message, is one sample, a success when
   the node overhears the parent forward a presence of its origin, a failure
@@ -1198,7 +1209,9 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   - a node that receives a duplicate (the sender missed the acknowledgement).
   One entry (link source, low 16 bits of the frame counter) acknowledges
   every class 1 and 2 message of the frame. Each frame is one sample of the
-  next hop's acknowledgement window, whatever its messages (§9).
+  next hop's acknowledgement window, whatever its messages; towards the
+  root, at most one failed sample per batching delay, one lost batch being
+  one loss (§9).
 - **Duplicate cache** on every node: (origin, destination, port, sequence),
   128 entries, each kept for at least 2 presence periods. A duplicate is
   always acknowledged. **Custody**: the final destination drops it; any
@@ -1874,11 +1887,6 @@ in the DODAG information message (§9), so every node applies them:
   children no longer answer it in the window of its parent's advertisement
   (a collision in about 15 % of the hops whose node has children). To
   decide; then check it with the TLA+ `DODAG` model and the seed runs.
-- Root acknowledgement batching (§16): one lost batch frame acknowledges
-  several frames of the same relay, hence several failed samples even with
-  one sample per frame (§9 link estimation). Candidate fix: towards the
-  root, timeouts of frames sent within one batching delay of each other
-  give one failed sample (`spec/README.md`).
 - Option A6 (§11, §14): LoRa payload CRC off, relying on the AEAD tag;
   measure the corruption rate on the bench and check that diagnostics
   still separate sporadic failures (noise) from systematic ones (wrong key).

@@ -26,7 +26,12 @@ counter low 16 bits), whatever the number of class 1/2 messages the frame
 carries: a success at the first acknowledgement of one of them (one
 explicit entry acknowledges them all; a passive one proves the frame was
 received), a failure when the last of them still pending times out without
-any acknowledged. After `ATTEMPTS` (3) transmissions to one next hop, the injected
+any acknowledged. Towards the root, a failure of a frame that ended within
+one batching delay of the frame of the last failed sample towards the root
+gives no sample: one lost batch acknowledges several frames of a relay and
+is one loss, not one per frame (the attempts of one message are a root
+timeout apart, longer than the batching delay, so each still fails once).
+After `ATTEMPTS` (3) transmissions to one next hop, the injected
 ``engine.reroute(msg, hop)`` ("next hop after failure"; routing's parent
 set later) returns another next hop (fresh attempts), `HOLD` (no route for
 now: held) or None (no alternative: the message fails, reason 1).
@@ -291,6 +296,7 @@ class Reliable:
         self._keys = {}  # identity -> slot, pending messages (passive acknowledgement)
         self._batch = []  # root: (link source, counter) waiting for the batch
         self._batch_due = None
+        self._root_fail = None  # end of the frame of the last failed sample towards the root
         self._poll = None
         self._next = None
 
@@ -471,7 +477,8 @@ class Reliable:
         hop = self._hop[slot]
         if not self._sampled[slot] and not self._same_frame(slot):
             # A failure once the frame's last pending message times out.
-            self.engine.neighbours.acked(hop, False, now)
+            if hop != ROOT or self._root_failure(self._due[slot] - self.root_timeout_ms):
+                self.engine.neighbours.acked(hop, False, now)
         self._due[slot] = None
         self._state[slot] = _IDLE
         if queue.attempts(slot, msg) < ATTEMPTS:
@@ -489,6 +496,15 @@ class Reliable:
             self.counters.reroutes += 1
             queue.retry(slot, msg, alt)
             self.engine.access_at(now)
+
+    def _root_failure(self, end):
+        # True if the failure of the frame ended at end gives a sample: one
+        # per batching delay towards the root (one lost batch, one loss).
+        last = self._root_fail
+        if last is not None and end - last < self.batch_ms:
+            return False
+        self._root_fail = end
+        return True
 
     # --- Holding -----------------------------------------------------------------
 
