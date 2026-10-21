@@ -256,14 +256,20 @@ class Forming(unittest.TestCase):
         # window: C or D, whose window closed before, takes the first one
         # heard (A by its larger margin only if both were candidates then);
         # a frame lost to a collision while the windows fill may also make
-        # one cheaper, by less than the switch threshold.
+        # one cheaper, by less than the switch threshold. Such a loss may also
+        # raise both A's and B's ranks after C or D attached: C or D follows
+        # its preferred parent, and the other, no longer below its L, is no
+        # candidate (§9 loop freedom, local repair below L).
         for n in (C, D):
             p = m.b(n).routing.parents
-            cost = dict(
-                (x, p.candidate_cost(m.b(n).engine.neighbours.get(x), m.net.now)) for x in (A, B)
-            )
+            views = dict((x, m.b(n).engine.neighbours.get(x)) for x in (A, B))
+            cost = dict((x, p.candidate_cost(views[x], m.net.now)) for x in (A, B))
             self.assertTrue(p.preferred in (A, B), cost)
-            self.assertTrue(cost[p.preferred] - min(cost.values()) < SWITCH_THRESHOLD, cost)
+            for x in (A, B):
+                if cost[x] is None:
+                    self.assertTrue(x != p.preferred and views[x].rank >= p.lowest, cost)
+            best = min(c for c in cost.values() if c is not None)
+            self.assertTrue(cost[p.preferred] - best < SWITCH_THRESHOLD, cost)
         self.assertTrue(m.preferred(E) in (C, D))
         # One hop of ETX close to 1 each (a frame lost to a collision while
         # the windows fill raises an ETX a little).

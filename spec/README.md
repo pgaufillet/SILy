@@ -380,8 +380,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 - **Rank following** (`Follow = TRUE`, the RPL rule, the code): the preferred parent
   stays a candidate whatever its rank — of the node's version, finite, not
   dropped, path cost within L + MaxInc — and the node's rank becomes the
-  path cost through it; the other candidates must still be strictly below
-  the node's advertised rank. `FALSE` (the code before the fix): every candidate, the
+  path cost through it; the other candidates must still pass the rank
+  test (`Thr` below). `FALSE` (the code before the fix): every candidate, the
   preferred parent included.
 - **No detach behind a version** (`Behind = "keep"`, the code): a node behind a newer
   version keeps selecting in its own version and keeps its preferred
@@ -413,10 +413,11 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   rank taken at a rejoin in it), with `"first"` too, for `RejoinBest`.
 - **Rank test of the other candidates** (`Thr`): a candidate other
   than the preferred parent must have a rank strictly below `"rank"` (the
-  code: the node's current rank, set by its last selection, on air or not),
-  `"air"` (the rank of the node's last frame), `"minair"` (the lowest of
-  both) or `"low"` (**retained**: L, the lowest rank the node has had since
-  it attached or adopted its version, never above its current rank).
+  code before the fix: the node's current rank, set by its last selection,
+  on air or not), `"air"` (the rank of the node's last frame), `"minair"`
+  (the lowest of both) or `"low"` (**retained**, the code: L, the lowest
+  rank the node has had since it attached or adopted its version, never
+  above its current rank).
   `IncAdv = TRUE` (rejected) is the idealised limit of "a rank increase is
   advertised at once": the node's frame with the new rank is the very next
   step; `FALSE`, the code, leaves it to any later moment (a Trickle
@@ -612,13 +613,13 @@ How each fix is implemented, what it costs, and the limits accepted.
   only by the switch threshold), hence the 8 slots of margin, which the
   detach + rejoin time of MESH_DESIGN §9 includes (detach; Trickle,
   solicitation).
-- **Code changes for the loop after a link cost rise**: `Parents.candidate_cost` (parents.py:207):
-  the rank test of a candidate other than the preferred parent compares
-  with L, `n.rank >= (self.rank if self.lowest is None else self.lowest)`
-  (``lowest`` never exceeds ``rank``; detached, ``lowest`` is None and the
-  rank 255); `_select` (parents.py:381-383): the secondary members kept
-  are those below the new ``lowest`` (set at parents.py:377-378), not
-  below ``rank``, so that the set never holds a member the next selection
+- **Code changes for the loop after a link cost rise**: `Parents.candidate_cost`
+  (parents.py:204, 211): the rank test of a candidate other than the
+  preferred parent compares with L, ``lowest`` (never above ``rank``;
+  detached, ``lowest`` is None and any finite rank passes, as before);
+  `_select` (parents.py:385-388): the secondary members kept are those
+  below the new ``lowest`` (set at parents.py:381-383), not below
+  ``rank``, so that the set never holds a member the next selection
   would refuse. No new state, nothing on air, no change to Trickle: the
   rule holds whatever is suppressed or lost. MESH_DESIGN §9 (bounded rank
   increase, candidates) states it with L instead of the current rank.
@@ -632,9 +633,16 @@ How each fix is implemented, what it costs, and the limits accepted.
   a node that still saw the rejoining node at its rank from before its
   detach (residual below). Class 1 delivery fell on these runs
   (`lossy geometric 1`: 289 → 282 delivered; the star runs, failing already
-  under the hidden-terminal collapse, also lost messages silently and broke MP10 once): the cost of
-  the restriction (fewer local repairs, more detaches) is to be measured on
-  the whole suite before the rule is adopted.
+  under the hidden-terminal collapse, also lost messages silently and broke
+  MP10 once): the restriction costs fewer local repairs and more
+  detaches, a cost accepted for loop freedom; the rule is now in the
+  code. Host tests:
+  `BelowLowest` (tests/test_parents.py) and `LinkCostRise`
+  (tests/test_dodag_scenario.py: on the scripted line, B's frames lost at
+  A only, B's class 1 retries raise its ETX in bursts; with the test
+  against the current rank, B took C, heard at its rank from before it
+  followed B's increase, and the cycle B → C → B formed on 41 of 56 seeds
+  tried, none with the test against L).
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG

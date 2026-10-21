@@ -93,8 +93,9 @@ root redundancy).
 several neighbours. Routing overlays a **DODAG** on it, not a tree: each node
 keeps a **parent set**, forwards upward through its **preferred parent**, and
 switches at once to the next parent when delivery to the preferred one fails
-(class 1 retries exhausted). The rank rule makes any lower-rank parent
-loop-free, so this **local repair** needs no exchange. The root knows the
+(class 1 retries exhausted). The rank rule makes any parent ranked below
+the node's lowest rank since it attached loop-free, so this **local
+repair** needs no exchange. The root knows the
 **whole graph** (topology reports give every link with its quality; presence
 reports give each node's parent set) and computes downward and P2P routes on
 it (§10). Full link-state routing at every node (OLSR-like) is rejected: every
@@ -479,7 +480,9 @@ global repair by DODAG version. The metric follows MRHOF (RFC 6719), loop
 detection on the data path follows CTP, control timers follow Trickle
 (RFC 6206). Choices: RPL rank rule rather than Babel's feasibility
 condition (one destination, the root, which is what RPL is designed for;
-Babel needs per-destination sequence requests); ETX metric with the margin
+Babel needs per-destination sequence requests), with the other candidates
+tested against the node's lowest rank (DUAL's feasibility condition, no
+sequence number); ETX metric with the margin
 as an eligibility filter (link quality rather than hop count, MP12); global
 repair on demand only (each one resets Trickle in every neighbourhood,
 finding 4 below); parent declared lost when silent (2.5 presence periods:
@@ -561,9 +564,10 @@ acknowledgement window and the time of its newest failure.
   cost(m); above 254, m is not usable. The depth limit (8, MP13) is enforced
   by the root (§10); with ETX ≤ 3.9 per hop, 8 hops fit in the rank byte.
 - **Candidates**: neighbours with the same DODAG version, a rank **strictly
-  lower** than the node's rank (any finite rank for a node without route),
-  heard within the silence limit (2.5 presence periods, strict), through an
-  eligible link. The **preferred parent** stays a candidate at any finite
+  lower than L**, the lowest rank the node has advertised since it attached
+  or adopted its DODAG version (never above its current rank; any finite
+  rank for a node without route), heard within the silence limit (2.5
+  presence periods, strict), through an eligible link. The **preferred parent** stays a candidate at any finite
   rank (**rank following**, the RPL rule): when its rank rises to the
   node's or above (it fell back on a worse parent), the node keeps it and
   follows the increase, within the L + 56 bound (below), instead of
@@ -577,16 +581,18 @@ acknowledgement window and the time of its newest failure.
   updated when it differs from the advertised value by 4 or more (half a hop)
   or when the preferred parent changes, so that ETX noise does not ripple
   down the DODAG. A followed increase is at least one link cost (8): it is
-  always advertised, resets Trickle, and the members not below the new rank
-  leave the set.
+  always advertised, resets Trickle, and leaves L unchanged.
 - After a change of preferred parent, the node sends its presence report at
   once: the root learns the new path (§10) and the path is tested.
 - Precise rules: candidates other than the preferred parent
-  (followed at any rank) are compared with the **advertised** rank;
+  (followed at any rank) are compared with **L**, not with the current
+  rank (loop freedom below);
   "heard within the silence limit" is strict (age < 2.5 periods); a preferred
   parent outside the 3 lowest costs has left the set; the L + 56 bound
-  excludes candidates (the node detaches only when none is left); after a
-  rank decrease, members not below the new rank leave the set; a parent
+  excludes candidates (the node detaches only when none is left); L
+  follows the advertised rank's decreases, and the members other than the
+  preferred parent not below L leave the set, so that it never holds a
+  member the next selection would refuse; a parent
   dropped after failed attempts stays out until a new frame of it is heard;
   equal cost and margin go to the lower address.
 
@@ -596,13 +602,35 @@ acknowledgement window and the time of its newest failure.
   strictly decrease along any upward path and no loop exists while the views
   are consistent.
 - **Bounded rank increase**: within one DODAG version a node never advertises
-  a rank above `L + 56`, L being the lowest rank it advertised in that version
-  (56 = 7 hops, the MaxRankIncrease of Contiki-NG's RPL). The node follows
-  its preferred parent's rank increase within `L + 56`; beyond, the
-  preferred parent is no longer usable and the node switches or detaches. A
-  move to another, worse parent only uses neighbours whose advertised rank
-  is strictly lower than the node's current rank: they cannot be its
-  descendants, so this **local repair** needs no exchange.
+  a rank above `L + 56`, L being the lowest rank it advertised since it
+  attached or adopted that version (56 = 7 hops, the MaxRankIncrease of
+  Contiki-NG's RPL). The node follows its preferred parent's rank increase
+  within `L + 56`; beyond, the preferred parent is no longer usable and the
+  node switches or detaches.
+- **Local repair below L**: a move to another parent only uses neighbours
+  whose advertised rank is strictly lower than L, not than the node's
+  current rank. Every rank the node has advertised since it attached is at
+  least L, and a descendant's rank is above every rank of its parent it
+  used (one link cost, at least 8, more than the rank hysteresis), so a
+  neighbour below L cannot be a descendant, whatever the descendants have
+  heard or not yet sent: this **local repair** needs no exchange. A rank
+  increase not yet advertised, or not yet heard by the descendants, cannot
+  close a cycle. Tested against the current rank instead, a neighbour
+  between L and the new rank may be a child still heard at its rank from
+  before the increase: taking it closes a cycle with no frame lost (two
+  siblings whose link costs rise, each still hearing the other at its old
+  rank, take each other; TLA+ `DODAG_chain_current_loop`). The rank last on
+  air fails the same way: the children's ranks reach the node later than
+  its rank reaches them. This is the feasibility condition of DUAL (EIGRP),
+  L playing the feasible distance and the detach, hold and rejoin its
+  active state. Cost: fewer local repairs and more detaches, since a node
+  whose rank has risen above L moves only to a neighbour below L, otherwise
+  it follows its preferred parent up to the bound or detaches and rejoins
+  (L restarting); the first local repair after a parent loss is unchanged
+  when the node was at its lowest rank (L is then its current rank). The
+  argument assumes no node holds a view of an ancestor older than that
+  ancestor's last attach, which the detach below ensures with at most one
+  consecutive loss per link.
 - **Detach (poisoning)**: when no candidate remains, the node advertises rank
   255 at once (Trickle reset, after a random delay of at most 4 slots, as its
   solicitations: siblings detaching together otherwise collide and may

@@ -368,3 +368,42 @@ class DetachRejoin(unittest.TestCase):
         self.assertEqual(line.attached(), [True] * 4)
         self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
         line.check_ranks(self)
+
+
+class LinkCostRise(unittest.TestCase):
+    """B's link to A degrades one way: A hears none of B's frames, B still
+    hears A. B's class 1 messages (one per second) to A fail, their retries
+    raise B's ETX to A in bursts, B's rank follows and goes on air, C follows
+    it; when A drops out (attempts exhausted, ETX above 4), C may still be
+    heard at the rank it had before following, below B's new rank but not
+    below L: taking it would close the cycle B -> C -> B with no frame lost
+    on the link between them (§9 loop freedom, candidates below L; TLA+
+    `DODAG_chain_current_loop`)."""
+
+    APP = 20
+
+    def test_no_cycle_while_the_link_cost_rises(self):
+        for seed in (2, 3, 4):
+            line = Line(seed)
+            line.run(12 * line.imin)
+            line.steady()
+            b, c = line.nodes[1], line.nodes[2]
+            start = line.net.now
+            line.net.medium.cut(B, A)
+            highest = 0  # highest finite rank of B
+            t = start
+            while t < start + 12 * PERIOD:
+                t += 50
+                if (t - start) % 1000 == 0:
+                    b.submit(self.APP, 1, ROOT, b"x")
+                line.run(t)
+                pb, pc = b.routing.parents, c.routing.parents
+                self.assertFalse(
+                    pb.preferred == C and pc.preferred == B, (seed, t - start, line.ranks())
+                )
+                if pb.rank != RANK_INFINITE and pb.rank > highest:
+                    highest = pb.rank
+            # The rise did happen, beyond one hop above B's rank of 16, and
+            # B, without a candidate below L, detached.
+            self.assertTrue(highest > 24, (seed, highest))
+            self.assertTrue(b.routing.dodag.counters.poisons >= 1, seed)

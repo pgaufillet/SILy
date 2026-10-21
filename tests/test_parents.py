@@ -316,15 +316,13 @@ class BoundedIncrease(unittest.TestCase):
         self.assertEqual(self.p.bound(), 16 + MAX_RANK_INCREASE)
 
     def test_path_cost_l_plus_56_accepted(self):
-        self.net.hear(D, 40, 4400)
-        self.net.etx(D, 1, 4, 4400)  # path cost 72 = L + 56
-        self.p.recompute(4900)
-        self.assertEqual((self.p.rank, self.p.members()), (72, (D,)))
+        self.net.hear(B, 40, 3000)  # ETX 4: path cost 72 = L + 56, followed
+        self.p.recompute(3000)
+        self.assertEqual((self.p.rank, self.p.members()), (72, (B,)))
 
     def test_path_cost_above_l_plus_56_detaches(self):
-        self.net.hear(C, 46, 4400)
-        self.net.etx(C, 1, 4, 4400)  # path cost 78 > L + 56
-        events = self.p.recompute(4900)  # B silent
+        self.net.hear(B, 46, 3000)  # ETX 4: path cost 78 > L + 56
+        events = self.p.recompute(3000)
         self.assertEqual(self.p.rank, RANK_INFINITE)
         self.assertEqual(self.p.members(), ())
         self.assertIsNone(self.p.lowest)
@@ -332,18 +330,22 @@ class BoundedIncrease(unittest.TestCase):
         self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
         self.assertEqual(self.net.flagged(), [])
         # Rejoin through a neighbour heard after the poison, at any rank: L restarts.
-        self.net.hear(C, 46, 5000)
-        events = self.p.recompute(5000)
+        self.net.hear(C, 46, 3100)
+        self.net.etx(C, 1, 4, 3100)
+        events = self.p.recompute(3100)
         self.assertEqual((self.p.rank, self.p.lowest, self.p.members()), (78, 78, (C,)))
         self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | ATTACHED)
 
     def test_bound_prefers_a_usable_candidate(self):
-        self.net.hear(C, 46, 4400)
-        self.net.etx(C, 1, 4, 4400)  # 78: beyond the bound
-        self.net.hear(D, 40, 4400)
-        self.net.etx(D, 1, 4, 4400)  # 72
-        self.p.recompute(4900)
-        self.assertEqual((self.p.rank, self.p.members()), (72, (D,)))
+        # Bound 16 + 30 = 46: B (47) and C (47) beyond it, D (46) usable,
+        # C and D both below L.
+        self.p.max_increase = 30
+        self.net.hear(C, 15, 3000)
+        self.net.etx(C, 1, 4, 3000)
+        self.net.hear(D, 14, 3000)
+        self.net.etx(D, 1, 4, 3000)
+        self.p.recompute(3000)
+        self.assertEqual((self.p.rank, self.p.members()), (46, (D,)))
 
     def test_max_increase_is_a_parameter(self):
         self.p.max_increase = 30
@@ -355,7 +357,7 @@ class BoundedIncrease(unittest.TestCase):
 
 class RankFollowing(unittest.TestCase):
     """The node follows its preferred parent's rank increase within L + 56 (§9,
-    RPL); the other candidates stay strictly below the node's rank."""
+    RPL); the other candidates stay strictly below L."""
 
     def setUp(self):
         # Through A (rank 16, ETX 1): rank 24, L 24, bound 80.
@@ -422,6 +424,61 @@ class RankFollowing(unittest.TestCase):
         self.net.hear(A, 30, 100)
         self.assertEqual(self.p.next_parent(A, 100), HOLD)
         self.assertEqual(self.p.rank, RANK_INFINITE)
+
+
+class BelowLowest(unittest.TestCase):
+    """The candidates other than the preferred parent, and the other members,
+    are strictly below L, not below the current rank (§9): after a rank
+    increase, a neighbour between L and the new rank may be a descendant that
+    has not heard the increase yet, so taking it may close a cycle (TLA+
+    `DODAG_chain_current_loop`, `Thr = "low"`)."""
+
+    def setUp(self):
+        # Through A (rank 16, ETX 1): rank 24, L 24. B at 28 (above L), C at
+        # 23 (below L).
+        self.net = Net()
+        self.net.hear(A, 16, 0)
+        self.p = Parents(self.net.table)
+        self.p.recompute(0)
+        self.net.hear(A, 16, 50)
+        self.net.hear(B, 28, 50)
+        self.net.hear(C, 23, 50)
+        self.p.recompute(50)
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((A, C), 24, 24))
+
+    def cost(self, address, now):
+        return self.p.candidate_cost(self.net.table.get(address), now)
+
+    def test_rank_rise_keeps_neighbours_above_l_out(self):
+        self.net.etx(A, 1, 3, 100)  # ETX 3: path cost 16 + 24 = 40
+        events = self.p.recompute(100)
+        self.assertEqual(events, RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((self.p.preferred, self.p.rank, self.p.lowest), (A, 40, 24))
+        # B, 28 < 40 but not below L: neither candidate nor member; C still both.
+        self.assertIsNone(self.cost(B, 100))
+        self.assertEqual(self.cost(C, 100), 31)
+        self.assertEqual(self.p.members(), (A, C))
+        self.assertEqual(self.net.flagged(), sorted((A, C)))
+
+    def test_preferred_parent_lost_after_a_rise(self):
+        self.net.etx(A, 1, 3, 100)
+        self.p.recompute(100)
+        self.net.etx(A, 0, 1, 200)  # ETX 5: A no longer eligible
+        events = self.p.recompute(200)
+        self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED)
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((C,), 31, 24))
+        self.assertFalse(self.net.table.get(B).parent)
+
+    def test_only_neighbours_above_l_detaches(self):
+        self.net.hear(B, 28, 2550)
+        self.net.hear(A, 16, 2550)
+        self.net.etx(A, 1, 3, 2550)
+        self.p.recompute(2550)  # C silent for 2.5 periods since 50
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((A,), 40, 24))
+        self.net.etx(A, 0, 1, 2600)  # A no longer eligible: B (28 < 40) refused
+        events = self.p.recompute(2600)
+        self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((), RANK_INFINITE, None))
 
 
 class FollowDiamond(unittest.TestCase):
@@ -851,11 +908,12 @@ def _reference(p, now):
     table = p.table
     table.expire(now)
     bound = 254 if p.lowest is None else min(254, p.lowest + p.max_increase)
+    low = RANK_INFINITE if p.lowest is None else p.lowest
     cands = []
     for n in table.entries():
         if n.version != p.version or not n.eligible():
             continue
-        if n.rank >= p.rank and n.address != p.preferred:
+        if n.rank >= low and n.address != p.preferred:
             continue
         if now - n.heard >= 5 * _PERIOD // 2:
             continue
@@ -875,7 +933,8 @@ def _reference(p, now):
     rank = p.rank
     if chosen[2] != p.preferred or abs(chosen[0] - rank) >= 4:
         rank = chosen[0]
-    members = [chosen[2]] + [k[2] for k in top if k is not chosen and k[3] < rank]
+    low = min(low, rank)
+    members = [chosen[2]] + [k[2] for k in top if k is not chosen and k[3] < low]
     return rank, tuple(members)
 
 
@@ -956,6 +1015,8 @@ class Properties(unittest.TestCase):
             self.assertTrue(n.rank < p.rank, "parent rank %d >= rank %d" % (n.rank, p.rank))
             self.assertEqual(n.version, p.version)
             self.assertTrue(n.parent)
+            if m != p.preferred:
+                self.assertTrue(n.rank < p.lowest, "member rank %d >= L %d" % (n.rank, p.lowest))
         flagged = sorted(n.address for n in table.entries() if n.parent)
         self.assertEqual(flagged, sorted(members))
         if members:

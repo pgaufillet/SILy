@@ -8,18 +8,21 @@ infinite: no route or poisoned).
   MinHopRankIncrease), 8 to 32 on an eligible link; **path cost** through a
   neighbour = its rank + link cost; above 254 the neighbour is not usable.
 - **Candidates**: neighbours of the node's DODAG version, of rank strictly
-  lower than the node's advertised rank (any finite rank without route),
-  the preferred parent at any rank (**rank following**, RPL: the node
-  follows its preferred parent's rank increase within the bound below),
-  heard within the silence limit (`mesh.neighbours.silence_ms`: 2.5
-  presence periods, strict), through an eligible link
-  (`Neighbour.eligible`), whose path cost is at most the **bound**
-  min(254, L + max_increase): L is the lowest rank advertised in this DODAG
-  version, max_increase 56 by default (MaxRankIncrease, carried
-  by the DODAG information, §9). A neighbour dropped after failed attempts
-  (`next_parent`) is no candidate until a new frame of it is heard; after a
-  detach, only neighbours heard after the solicitation that ends its hold
-  are.
+  lower than **L**, the lowest rank the node has advertised since it
+  attached or adopted its version (never above its advertised rank; any
+  finite rank without route), the preferred parent at any rank (**rank
+  following**, RPL: the node follows its preferred parent's rank increase
+  within the bound below), heard within the silence limit
+  (`mesh.neighbours.silence_ms`: 2.5 presence periods, strict), through an
+  eligible link (`Neighbour.eligible`), whose path cost is at most the
+  **bound** min(254, L + max_increase), max_increase 56 by default
+  (MaxRankIncrease, carried by the DODAG information, §9). Testing against
+  L rather than the advertised rank keeps out a neighbour between L and a
+  rank increase not yet heard by the node's descendants: it may be one of
+  them, and taking it would close a cycle (DUAL's feasibility condition).
+  A neighbour dropped after failed attempts (`next_parent`) is no
+  candidate until a new frame of it is heard; after a detach, only
+  neighbours heard after the solicitation that ends its hold are.
 - **Behind a newer version** (``behind``, set by the Trickle step when a
   frame of a newer version is heard; cleared by `on_new_version` and the
   detach): the preferred parent stays a candidate once it has moved to a
@@ -37,8 +40,9 @@ infinite: no route or poisoned).
 - **Advertised rank** (``rank``) = path cost through the preferred parent,
   updated when it differs by `RANK_HYSTERESIS` (4) or more, or when the
   preferred parent changes (a followed increase is at least one link cost,
-  8). Members whose rank is not strictly lower than the new advertised rank
-  leave the set (rank rule).
+  8); L follows its decreases. Members other than the preferred parent whose
+  rank is not strictly lower than L, so updated, leave the set (rank rule),
+  so that the set holds no member the next selection would refuse.
 - **Detach**: when no candidate remains (bound exceeded included), the node
   advertises 255 at once, clears L and the set, and selects nothing for
   ``hold_ms`` (2 Imin, set by the Trickle step; 0 by default), then until
@@ -71,8 +75,7 @@ exhausted on a parent, §12), `detach`, `solicited` and `on_new_version`
 ``dodag_version``), resets Trickle, sends its presence at once after a
 parent change and calls ``Reliable.route_changed``.
 
-Readings where §9 is silent: the node's rank compared with the other
-candidates is the advertised one; a preferred parent outside the 3 lowest
+Readings where §9 is silent: a preferred parent outside the 3 lowest
 path costs has left the set even when no candidate beats it by 12; the
 bound L + 56 makes a candidate unusable (as a path cost above 254 does),
 the node detaching when none remains; a dropped parent stays excluded
@@ -194,17 +197,18 @@ class Parents:
         """Return the path cost through neighbour entry n if it is a candidate, else None.
 
         The preferred parent is one at any rank (its increase is followed,
-        within the bound), the others below the advertised rank. While the
-        node is behind, the preferred parent moved to a newer version is one
-        at the node's own rank.
+        within the bound), the others below L (any finite rank without
+        route). While the node is behind, the preferred parent moved to a
+        newer version is one at the node's own rank.
         """
+        lowest = RANK_INFINITE if self.lowest is None else self.lowest
         across = n.version != self.version
         if across:
             if not (self.behind and n.address == self.preferred and n.rank != RANK_INFINITE):
                 return None
             if not 0 < (n.version - self.version) & VERSION_MASK < _HALF:
                 return None  # not newer
-        elif n.rank >= self.rank and n.address != self.preferred:
+        elif n.rank >= lowest and n.address != self.preferred:
             return None
         if now - n.heard >= silence_ms(self.table.period_ms):
             return None
@@ -374,12 +378,13 @@ class Parents:
         if old_rank == RANK_INFINITE:
             events |= ATTACHED
             self.poisoned_at = None
-        if self.lowest is None or rank < self.lowest:
-            self.lowest = rank
+        lowest = self.lowest
+        if lowest is None or rank < lowest:
+            lowest = self.lowest = rank
         self.cost = cost
         members = [chosen[2]]
         for key in best:
-            if key is not chosen and key[3] < rank:
+            if key is not chosen and key[3] < lowest:
                 members.append(key[2])
         self._set_members(members)
         return events
