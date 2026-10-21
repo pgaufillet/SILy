@@ -110,6 +110,23 @@
 (* error travels as class 1 to the root, then downward, reliable.py:       *)
 (* 494-558; its own custody is not modelled).                             *)
 (*                                                                         *)
+(* Late root acknowledgements (LateAck, Acks = "frame"): the root batches *)
+(* its acknowledgements, and under load its medium access can delay one   *)
+(* beyond the root timeout. LateAck = "none" (the earlier model): an      *)
+(* acknowledgement on its way always comes before the timeout (Timeout    *)
+(* requires acc = "no"). "ignore" (the code before late acknowledgements  *)
+(* were accepted): the timeout towards the root may also fire while the   *)
+(* root's acknowledgement is on its way, which is then ignored (retry, or *)
+(* the drop after the last attempt). "accept" (the code): the same        *)
+(* timeout and retry, but the acknowledgement of the earlier transmission *)
+(* stays expected (late) and, when it comes, removes the copy wherever it *)
+(* is (queued, waiting, held); after the last attempt the drop waits one  *)
+(* more root timeout, for the acknowledgement of that attempt. The timing *)
+(* kept: an acknowledgement is late by less than one root timeout, so it  *)
+(* comes (or is lost) before the next timeout of the copy, and before the *)
+(* drop. The code accepts an acknowledgement of any earlier transmission  *)
+(* while the message is queued, even later; the model leaves that out.    *)
+(*                                                                         *)
 (* The relay Victim may die once, at a moment it holds no message (a      *)
 (* relay dying with a message it acknowledged is MP5's accepted exception, *)
 (* §12, left out of the model). Victim = 0 (the root): no node dies.       *)
@@ -191,7 +208,8 @@ CONSTANTS
     Best,       \* BOOLEAN: track the answer window (ghosts wh, rj) for RejoinBest
     Rise,       \* link cost rises, in hops overall (0: fixed costs)
     Thr,        \* rank test of the other candidates: "rank" (the code before the fix), "air", "minair" or "low" (the code)
-    IncAdv      \* BOOLEAN: a rank increase goes on air in the very next step (idealised)
+    IncAdv,     \* BOOLEAN: a rank increase goes on air in the very next step (idealised)
+    LateAck     \* root acknowledgement later than the timeout: "none", "ignore" or "accept" (the code)
 
 NONE == -1
 Root == 0
@@ -252,6 +270,7 @@ ASSUME Adopt \in {"any", "fresh"}
 ASSUME Rejoin \in {"first", "window", "window_rejoin"} /\ Best \in BOOLEAN
 ASSUME (Rejoin # "first" \/ Best) => Fix5 = "solicit"
 ASSUME Rise \in Nat /\ Thr \in {"rank", "air", "minair", "low"} /\ IncAdv \in BOOLEAN
+ASSUME LateAck \in {"none", "ignore", "accept"} /\ (LateAck # "none" => Acks = "frame")
 
 \* The rank of the last frame is tracked (otherwise constant).
 TrackAir == Thr \in {"air", "minair"}
@@ -321,10 +340,10 @@ vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv>>
 LCost(k, c) == Cost(k, c) + dc[k][c]
 
 Copies == [st : {"no", "q", "p", "h"}, hop : Nodes \cup {NONE}, att : 0..ATTEMPTS,
-           acc : {"no", "pas", "exp"}]
-NoCopy == [st |-> "no", hop |-> NONE, att |-> 0, acc |-> "no"]
-Held   == [st |-> "h", hop |-> NONE, att |-> 0, acc |-> "no"]
-Queued(h) == [st |-> "q", hop |-> h, att |-> 0, acc |-> "no"]
+           acc : {"no", "pas", "exp"}, late : BOOLEAN]
+NoCopy == [st |-> "no", hop |-> NONE, att |-> 0, acc |-> "no", late |-> FALSE]
+Held   == [st |-> "h", hop |-> NONE, att |-> 0, acc |-> "no", late |-> FALSE]
+Queued(h) == [st |-> "q", hop |-> h, att |-> 0, acc |-> "no", late |-> FALSE]
 AllF == [c \in Nodes |-> FALSE]
 
 TypeOK ==
@@ -460,6 +479,14 @@ Sel(k, V, VV, Dr, Fr, R) ==
 SelDrop(k, V, VV, Dr, Fr, R) ==
     IF k = Root \/ R.hold \/ InWindow(R) THEN KeepR(R) ELSE SelCore(k, V, VV, Dr, Fr, R)
 
+\* LateAck = "accept": a copy keeps its late acknowledgement whatever happens to
+\* it (Reliable keeps the counters of the transmissions while the message is
+\* queued); a waiting copy held with the root's acknowledgement on its way now
+\* expects it late. Identity otherwise (late is always FALSE).
+WithLate(c2, c) ==
+    [c2 EXCEPT !.late = c.late \/ (LateAck = "accept" /\ c.st = "p" /\ c.hop = Root
+                                   /\ c.acc = "exp" /\ c2.st # "p")]
+
 (***************************************************************************)
 (* Effect of a selection on the queued copies of the node (Routing._changed,*)
 (* routing.py:180-195): after a parent change the copies not waiting      *)
@@ -467,13 +494,15 @@ SelDrop(k, V, VV, Dr, Fr, R) ==
 (* txqueue.py:503-518); after a detach they are held (Reliable.hold,       *)
 (* reliable.py:434-455). Waiting copies keep their next hop.               *)
 (***************************************************************************)
-Reshape(c, S) ==
+ReshapeCore(c, S) ==
     IF c.st = "q" /\ S.det THEN Held
     \* "frame" (the code since fix 3): waiting copies are held too, not retried
     \* towards the former parent (routing.py _changed, select(_upward, True))
     ELSE IF c.st = "p" /\ S.det /\ Acks = "frame" THEN Held
     ELSE IF c.st = "q" /\ S.chg /\ S.pref # NONE /\ c.hop # S.pref THEN Queued(S.pref)
     ELSE c
+
+Reshape(c, S) == WithLate(ReshapeCore(c, S), c)
 
 (***************************************************************************)
 (* Committing the new routing state S (one record per node) with views V, *)
@@ -831,7 +860,8 @@ SendData(s, m) ==
              passive == out = "new" /\ ~seen /\ pref[d] # NONE
              mine == [st |-> "p", hop |-> d, att |-> cp[m][s].att + 1,
                       acc |-> IF ~got THEN "no" ELSE IF passive THEN "pas"
-                              ELSE IF Acks = "frame" THEN "exp" ELSE "no"]
+                              ELSE IF Acks = "frame" THEN "exp" ELSE "no",
+                      late |-> cp[m][s].late]
              released == Acks = "atomic" /\ got /\ ~passive /\ ~ackLost
          IN  /\ ackLost => (got /\ ~passive)
              /\ LossOK(s, L, extra)
@@ -849,6 +879,22 @@ SendData(s, m) ==
              /\ rerr' = (rerr \/ (Ghosts /\ incons))
              /\ xv' = (xv \/ (Ghosts /\ got /\ ver[s] # ver[d]))
              /\ UNCHANGED <<alive, sub, err, errFrom>>
+
+\* An acknowledgement frame of h to k about m (Acks = "frame"): lost by k (k's
+\* copy becomes NC), or heard (the copy goes; k selects again).
+AckOnAir(h, k, m, lostIt, NC) ==
+    IF lostIt
+    THEN /\ LossOK(h, {k}, 0) /\ FrameCounters(h, {k}, {}, 0)
+         \* a frame of h on air, lost by its destination
+         /\ air' = IF TrackAir THEN [air EXCEPT ![h] = rank[h]] ELSE air
+         /\ inc' = [inc EXCEPT ![h] = FALSE]
+         /\ cp' = [cp EXCEPT ![m][k] = NC]
+         /\ UNCHANGED <<routing0, dc, rises, loops, rl>>
+    ELSE LET E == Effect(h, {k}, FALSE, Keep(h), fresh[h], FALSE)
+         IN  /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, h, {k})
+             /\ FrameCounters(h, {}, {k}, 0)
+             /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![k] =
+                          IF mm = m THEN NoCopy ELSE Reshape(cp[mm][k], E.S[k])]]
 
 (***************************************************************************)
 (* Explicit acknowledgement of k's waiting copy by its hop h: "exp" (the  *)
@@ -869,23 +915,25 @@ AckFrame(k, m) ==
            /\ \/ c.acc = "exp"
               \/ c.acc = "pas" /\ cp[m][h].st \in {"q", "h"}
            /\ \E lostIt \in BOOLEAN :
-                IF lostIt
-                THEN /\ IF Acks = "atomic"
-                        THEN lost < MaxLoss /\ lost' = lost + 1 /\ UNCHANGED <<consec, air, inc>>
-                        ELSE /\ LossOK(h, {k}, 0) /\ FrameCounters(h, {k}, {}, 0)
-                             \* a frame of h on air, lost by its destination
-                             /\ air' = IF TrackAir THEN [air EXCEPT ![h] = rank[h]] ELSE air
-                             /\ inc' = [inc EXCEPT ![h] = FALSE]
-                     /\ cp' = [cp EXCEPT ![m][k] = [c EXCEPT !.acc = "no"]]
-                     /\ UNCHANGED <<routing0, dc, rises, loops, rl>>
-                ELSE IF Acks = "atomic"
-                THEN /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
-                     /\ UNCHANGED <<routing, lost, consec, loops, rl>>
-                ELSE LET E == Effect(h, {k}, FALSE, Keep(h), fresh[h], FALSE)
-                     IN  /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, h, {k})
-                         /\ FrameCounters(h, {}, {k}, 0)
-                         /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![k] =
-                                      IF mm = m THEN NoCopy ELSE Reshape(cp[mm][k], E.S[k])]]
+                IF Acks = "atomic"
+                THEN IF lostIt
+                     THEN /\ lost < MaxLoss /\ lost' = lost + 1 /\ UNCHANGED <<consec, air, inc>>
+                          /\ cp' = [cp EXCEPT ![m][k] = [c EXCEPT !.acc = "no"]]
+                          /\ UNCHANGED <<routing0, dc, rises, loops, rl>>
+                     ELSE /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
+                          /\ UNCHANGED <<routing, lost, consec, loops, rl>>
+                ELSE AckOnAir(h, k, m, lostIt, [c EXCEPT !.acc = "no"])
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv>>
+
+(***************************************************************************)
+(* Late root acknowledgement (LateAck = "accept", Reliable.on_ack): the    *)
+(* root's acknowledgement of an earlier transmission of k's copy comes,    *)
+(* whatever the copy's state (queued for its retry, waiting for the        *)
+(* retry's acknowledgement, held), and removes it; or it is lost.          *)
+(***************************************************************************)
+LateAckFrame(k, m) ==
+    /\ LateAck = "accept" /\ alive[k] /\ cp[m][k].late
+    /\ \E lostIt \in BOOLEAN : AckOnAir(Root, k, m, lostIt, [cp[m][k] EXCEPT !.late = FALSE])
     /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv>>
 
 (***************************************************************************)
@@ -894,28 +942,39 @@ AckFrame(k, m) ==
 (* hop is dropped (Parents.next_parent, parents.py:242-260), the node      *)
 (* selects again, and the copy goes to the new preferred parent with fresh *)
 (* attempts, or is held (HOLD) when there is none or it is the same.       *)
+(* Towards the root (LateAck): "ignore", also while the root's             *)
+(* acknowledgement is on its way, which is lost to the copy; "accept",     *)
+(* also while it is on its way before the last attempt (it becomes late),  *)
+(* never while a late one is expected (it comes within one root timeout),  *)
+(* and the drop only once the last attempt's acknowledgement is out.       *)
 (***************************************************************************)
 Timeout(s, m) ==
-    /\ alive[s] /\ cp[m][s].st = "p" /\ cp[m][s].acc = "no"
+    /\ alive[s] /\ cp[m][s].st = "p"
     /\ LET c == cp[m][s]
            h == c.hop
-       IN  IF c.att < ATTEMPTS
-           THEN /\ cp' = [cp EXCEPT ![m][s] = [c EXCEPT !.st = "q"]]
-                /\ UNCHANGED <<routing, loops, rl>>
-           ELSE LET Dr == [dropped EXCEPT ![s][h] = TRUE]
-                    S  == [x \in Nodes |-> IF x = s THEN SelDrop(s, view, vview, Dr, fresh, Rec(s))
-                                           ELSE Keep(x)]
-                    p  == S[s].pref
-                IN  /\ Commit(S, view, vview, Dr, fresh, OwKeep(S), SoKeep(S))
-                    /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![s] =
-                                IF mm = m THEN (IF p = NONE \/ p = h THEN Held ELSE Queued(p))
-                                ELSE Reshape(cp[mm][s], S[s])]]
+           inflight == c.acc = "exp" /\ h = Root
+       IN  /\ \/ c.acc = "no"
+              \/ LateAck = "ignore" /\ inflight
+              \/ LateAck = "accept" /\ inflight /\ c.att < ATTEMPTS
+           /\ ~c.late
+           /\ IF c.att < ATTEMPTS
+              THEN /\ cp' = [cp EXCEPT ![m][s] = [c EXCEPT !.st = "q", !.acc = "no",
+                                                          !.late = (LateAck = "accept" /\ inflight)]]
+                   /\ UNCHANGED <<routing, loops, rl>>
+              ELSE LET Dr == [dropped EXCEPT ![s][h] = TRUE]
+                       S  == [x \in Nodes |-> IF x = s THEN SelDrop(s, view, vview, Dr, fresh, Rec(s))
+                                              ELSE Keep(x)]
+                       p  == S[s].pref
+                   IN  /\ Commit(S, view, vview, Dr, fresh, OwKeep(S), SoKeep(S))
+                       /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![s] =
+                                   IF mm = m THEN (IF p = NONE \/ p = h THEN Held ELSE Queued(p))
+                                   ELSE Reshape(cp[mm][s], S[s])]]
     /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
 
 \* A held copy resumes once there is a route (Reliable._resume_held, reliable.py:467-490).
 Resume(s, m) ==
     /\ alive[s] /\ cp[m][s].st = "h" /\ pref[s] # NONE
-    /\ cp' = [cp EXCEPT ![m][s] = Queued(pref[s])]
+    /\ cp' = [cp EXCEPT ![m][s] = WithLate(Queued(pref[s]), cp[m][s])]
     /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, err, errFrom, loops, rl, rerr, xv>>
 
 \* Holding expired without route (reliable.py:480-483): failure (reliable.py:494-515):
@@ -973,6 +1032,7 @@ Protocol ==
     \/ \E k, c \in Nodes : Expire(k, c)
     \/ \E s \in Nodes, m \in Msgs :
           SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s, m) \/ HoldExpire(s, m)
+          \/ LateAckFrame(s, m)
     \/ \E m \in Msgs : ErrorArrives(m)
 
 \* IncAdv: a node whose rank rose sends its frame before anything else happens.
@@ -986,7 +1046,9 @@ Next ==
 
 \* The class 1 actions of one copy are enabled in disjoint states of that copy
 \* ("q", "p"/"pas", "p"/"no", "h" with or without route): weak fairness of their
-\* disjunction is weak fairness of each.
+\* disjunction is weak fairness of each. With LateAck, a copy waiting for the
+\* root's acknowledgement ("p"/"exp") enables both AckFrame and Timeout: either
+\* step moves the copy on. A late acknowledgement has its own fairness.
 CopyStep(s, m) == SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s, m) \/ HoldExpire(s, m)
 
 \* With versions: an owed DODAG information is eventually sent (Trickle after its
@@ -995,6 +1057,8 @@ VNodes == IF Versions > 1 THEN Nodes ELSE {}
 BNodes == IF Versions > 1 /\ Behind = "detach" THEN Nodes ELSE {}
 \* The answer window closes.
 WNodes == IF Track THEN Nodes ELSE {}
+\* A late root acknowledgement comes or is lost.
+LNodes == IF LateAck = "accept" THEN Nodes \ {Root} ELSE {}
 
 Fairness ==
     /\ \A s \in Nodes : WF_vars(Announce(s)) /\ WF_vars(HoldEnd(s))
@@ -1004,6 +1068,7 @@ Fairness ==
     /\ \A s \in VNodes : WF_vars(owe[s] /\ Announce1(s, TRUE))
     /\ \A k \in BNodes : WF_vars(BehindEnd(k))
     /\ \A k \in WNodes : WF_vars(WindowClose(k))
+    /\ \A k \in LNodes, m \in Msgs : WF_vars(LateAckFrame(k, m))
 
 Spec == Init /\ [][Next]_vars
 FairSpec == Spec /\ Fairness
@@ -1021,6 +1086,12 @@ NoSilentLoss ==
 
 \* MP5, liveness: delivered, or the origin learns the failure.
 MP5Live == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] = "recv")
+
+\* Late root acknowledgements: no node drops the root after failed attempts.
+\* Every such drop takes three timeouts of one copy towards the root, each after a
+\* lost frame or acknowledgement, unless an acknowledgement on its way is ignored
+\* (LateAck = "ignore"): with MaxLoss < ATTEMPTS it holds otherwise.
+RootKept == \A n \in Nodes : ~dropped[n][Root]
 
 \* MP11.
 NoCycle == ~Cycle(LiveP(pref))
@@ -1093,6 +1164,9 @@ RejoinBest ==
 NeverDelivered == \A m \in Msgs : ~delivered[m]
 NeverError == \A m \in Msgs : err[m] # "recv"
 NoRankError == ~rerr
+\* A copy sent again while the root's acknowledgement of an earlier transmission
+\* is still expected (LateAck = "accept").
+NoLateRetry == \A m \in Msgs, n \in Nodes : ~(cp[m][n].late /\ cp[m][n].st = "p")
 AtMostOneLoop == loops <= 1
 \* Rank following: no node keeps its preferred parent once it hears it, in its version,
 \* at a rank not below its own.
