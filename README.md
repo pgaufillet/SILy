@@ -45,7 +45,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 - `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
   a grid network (`make simbench`); figures in `docs/measurements.md`.
 - `tools/trace.py` — traces of the networks of a test class or of one
-  large-network run (`make trace`).
+  large-network run (`make trace`); `tools/traceview.html` — their offline
+  viewer (one HTML file, opened in a browser).
 - `tools/mesh_budget.py` — airtime budget and repair times of the mesh
   design (CPython 3), the source of the figures of `docs/MESH_DESIGN.md`.
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
@@ -133,6 +134,38 @@ docstring of `sim/trace.py`. The recorder only observes: a run computes
 the same with or without it. `make trace RUN="relay-death star 1"` writes
 about 3.5 MB (36 000 records) and takes 5 to 10 % longer than the run; the
 small networks of the scenario tests take about 1.6 times as long.
+
+`tools/traceview.html` shows them: open it in a browser from the file
+system (one file, no network, no server), then load one or several traces
+with *Open traces…* or by dropping them on the page. One cursor on the
+records and the simulated time drives every view, the state shown being
+the state after the cursor's record and later events dimmed: step with
+← → (journal events), Shift+← → (transmissions), ↑ ↓ (any record), [ ]
+(selected node), , . (selected message), play with Space (0.01× to
+1000×), jump to a time with T, or click the overview strip under the
+toolbar (airtime and collisions of the whole run); `?` lists the
+shortcuts.
+
+- *Chronogram*: one lane per node (by address, DODAG tree or rank): its
+  transmissions coloured by content (DODAG information, solicitation,
+  presence, topology, acknowledgement, error, application data), carrier
+  senses and backoffs, its receptions coloured by fate (ok, loss,
+  collision, half duplex, cut), routing state changes, submissions,
+  deliveries, failures, down periods; violations and scenario events on
+  top. Wheel zooms, drag pans; a click selects a frame and its message.
+- *Journal*: each record as a sentence, following the cursor; filters by
+  kind, node and message; a click moves the cursor.
+- *Messages*: the class 1/2 messages with their outcome; the lifecycle of
+  the selected one lists every frame carrying it (hop, attempt), its
+  reception at the next hop, the explicit (port 3 entry naming the frame)
+  and passive (next hop's forward overheard) acknowledgements with their
+  fate at the sender, late ones, errors, delivery or failure.
+- *Graph*: the nodes (topology positions when the trace has them,
+  otherwise the DODAG tree at the cursor), links, preferred parents, ranks,
+  frames on air and the selected message's path.
+- *Details*: every field of the selected frame, record or node, with
+  names; the *Legend & concepts* tab explains the colours and the mesh
+  mechanisms (MESH_DESIGN §8, §9, §11, §12).
 
 ## Bench
 

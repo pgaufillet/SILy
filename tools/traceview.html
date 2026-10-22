@@ -1,0 +1,2679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SILy trace viewer</title>
+<!--
+  Offline viewer of the JSON Lines traces written by sim/trace.py
+  (make trace). One self-contained file, no dependency: open it in a
+  browser from the file system and load one or several .jsonl files.
+  The trace format is the docstring of sim/trace.py.
+-->
+<style>
+:root {
+  --bg: #eef1f4; --panel: #ffffff; --ink: #1d2733; --muted: #66727f; --line: #d5dbe2;
+  --accent: #2457a6; --sel: #fff1b8; --cur: #dce8fb; --head: #f6f8fa;
+  --right: 450px; --bottom: 37%; --graph: 330px; --msgs: 44%;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; overflow: hidden; background: var(--bg); color: var(--ink);
+  font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+button, select, input { font: inherit; color: inherit; }
+.mono, .jr, .lc-item, .kv td, #curinfo { font-family: ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+/* Top bar and summary */
+#top { display: flex; align-items: center; gap: 10px; padding: 5px 10px; background: #1e2935; color: #e6ebf1; }
+#top .brand { font-weight: 650; letter-spacing: .2px; margin-right: 4px; }
+#top .tbtn { background: #2f3d4c; border: 1px solid #44566a; color: #e6ebf1; border-radius: 4px; padding: 3px 9px; cursor: pointer; }
+#top .tbtn:hover { background: #3a4b5e; }
+#top select { background: #2f3d4c; border: 1px solid #44566a; color: #e6ebf1; border-radius: 4px; padding: 2px 4px; max-width: 230px; }
+#summary { display: flex; gap: 10px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 12px; color: #b9c5d2; }
+#summary b { color: #fff; font-weight: 600; }
+#summary .lbl { max-width: 260px; overflow: hidden; text-overflow: ellipsis; flex: none; }
+#summary .warn b { color: #ffb4a8; }
+#summary .link { cursor: pointer; text-decoration: underline dotted; }
+#top .spacer { flex: 1; }
+
+/* Toolbar */
+#toolbar { display: flex; align-items: center; gap: 4px; padding: 5px 10px 3px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.btn { border: 1px solid var(--line); background: #fff; border-radius: 4px; padding: 2px 8px; cursor: pointer; min-width: 30px; height: 26px; }
+.btn:hover { background: #edf2f8; }
+.btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.small { height: 22px; padding: 0 6px; min-width: 0; font-size: 12px; }
+.sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
+#toolbar label { color: var(--muted); font-size: 12px; margin-left: 4px; }
+#toolbar select, #toolbar input { height: 26px; border: 1px solid var(--line); border-radius: 4px; background: #fff; padding: 0 4px; }
+#timeInput { width: 90px; }
+#curinfo { margin-left: 8px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 200px; }
+#curinfo .k { display: inline-block; padding: 0 5px; border-radius: 3px; background: #e9eef5; }
+#ovwrap { height: 34px; padding: 3px 6px 3px; }
+#overview { width: 100%; height: 100%; display: block; cursor: pointer; border-radius: 4px; }
+
+/* Layout */
+#layout { flex: 1; min-height: 0; display: grid; padding: 0 6px 6px;
+  grid-template-columns: minmax(320px, 1fr) 6px var(--right); grid-template-rows: minmax(120px, 1fr) 6px var(--bottom); }
+#p-chrono { grid-column: 1; grid-row: 1; }
+#g-bottom { grid-column: 1; grid-row: 2; cursor: row-resize; }
+#bottom { grid-column: 1; grid-row: 3; display: flex; min-height: 0; min-width: 0; }
+#g-right { grid-column: 2; grid-row: 1 / 4; cursor: col-resize; }
+#right { grid-column: 3; grid-row: 1 / 4; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+#p-graph { flex: 0 0 var(--graph); }
+#g-graph { flex: 0 0 6px; cursor: row-resize; }
+#p-side { flex: 1; }
+#p-journal { flex: 1; }
+#g-msgs { flex: 0 0 6px; cursor: col-resize; }
+#p-msgs { flex: 0 0 var(--msgs); }
+.gutter:hover { background: #c9d6e6; border-radius: 3px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+.ph { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: var(--head); border-bottom: 1px solid var(--line); min-height: 30px; flex-wrap: wrap; }
+.ph h2 { font-size: 12px; font-weight: 650; margin: 0 6px 0 0; text-transform: uppercase; letter-spacing: .5px; color: #3c4855; }
+.ph select, .ph input[type=search] { height: 22px; border: 1px solid var(--line); border-radius: 4px; background: #fff; font-size: 12px; }
+.ph .opt { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; }
+.pb { flex: 1; min-height: 0; position: relative; }
+canvas.fill { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.chip { font-size: 10.5px; border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 0 5px; height: 19px; cursor: pointer; color: var(--muted); }
+.chip.on { background: #e2ecfa; border-color: #9db8e0; color: #1d3f75; }
+.hint { color: var(--muted); font-size: 12px; }
+
+/* Virtual lists */
+.vl { position: absolute; inset: 0; overflow: auto; }
+.vl-inner { position: relative; }
+.jr { position: absolute; left: 0; right: 0; height: 18px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 6px 0 4px; cursor: pointer; }
+.jr:hover { background: #f1f5fa; }
+.jr .tm { display: inline-block; width: 82px; text-align: right; color: var(--muted); margin-right: 8px; }
+.jr.cur { background: var(--cur); box-shadow: inset 3px 0 0 var(--accent); }
+.jr.sel { background: var(--sel); }
+.jr.fut { opacity: .38; }
+.jr.ind .tx { padding-left: 18px; color: #4a5562; }
+.jr.k-viol { color: #b3001b; font-weight: 650; }
+.jr.k-fail { color: #b3261e; }
+.jr.k-dlv { color: #17663a; }
+.jr.k-st { color: #1e4f91; }
+.jr.k-cs, .jr.k-q, .jr.k-cnt, .jr.k-bo { color: #5d6875; }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
+.sw.big { width: 14px; height: 10px; }
+.mr { position: absolute; left: 0; right: 0; height: 20px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; cursor: pointer; font-size: 12px; }
+.mr:hover { background: #f1f5fa; }
+.mr.sel { background: var(--sel); }
+.pill { display: inline-block; font-size: 10.5px; line-height: 15px; padding: 0 6px; border-radius: 8px; background: #e7ebf0; color: #36414d; font-family: system-ui, sans-serif; vertical-align: 1px; }
+.pill.delivered, .pill.f-ok { background: #d5f1dd; color: #165c33; }
+.pill.failed, .pill.f-collision { background: #fbd7d5; color: #9b1c15; }
+.pill.error { background: #fde3c8; color: #8a4207; }
+.pill.pending, .pill.f-pending, .pill.f-unknown { background: #e6e9ee; color: #4e5965; }
+.pill.refused { background: #ece2f8; color: #5a2d91; }
+.pill.f-loss { background: #fbefb8; color: #6b5300; }
+.pill.f-half-duplex { background: #f7d8ee; color: #8a1d68; }
+.pill.f-cut, .pill.f-nolink { background: #dfe3e8; color: #222; }
+.pill.late { background: #ffe0b3; color: #7a3d00; }
+
+/* Messages panel */
+#msgs-split { display: flex; flex-direction: column; position: absolute; inset: 0; }
+#msgs-split.nolist #msg-list-wrap { display: none; }
+#msg-list-wrap { flex: 0 0 min(34%, 144px); position: relative; border-bottom: 1px solid var(--line); }
+#lifecycle { flex: 1; overflow: auto; padding: 4px 0 10px; }
+#lifecycle .lc-head { padding: 3px 8px 4px; border-bottom: 1px dashed var(--line); margin-bottom: 4px; }
+#lifecycle .lc-title { font-weight: 650; }
+#lifecycle .lc-path { margin-top: 3px; font-size: 12px; }
+.hop { display: inline-block; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin: 1px 1px 0 0; background: #fafbfc; font-size: 11.5px; }
+.lc-item { padding: 2px 8px 2px 8px; border-left: 3px solid transparent; cursor: pointer; white-space: normal; }
+.lc-item:hover { background: #f1f5fa; }
+.lc-item.l1 { padding-left: 26px; }
+.lc-item.l2 { padding-left: 44px; color: #4a5562; }
+.lc-item .tm { color: var(--muted); margin-right: 6px; }
+.lc-item.cur { background: var(--cur); border-left-color: var(--accent); }
+.lc-item.fut { opacity: .45; }
+.lc-item.t-dlv { color: #17663a; } .lc-item.t-fail { color: #b3261e; } .lc-item.t-err { color: #8a4207; }
+.lc-item a, .dt a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.empty { padding: 14px; color: var(--muted); }
+
+/* Details */
+.tabs { display: flex; gap: 2px; }
+.tab { border: 1px solid transparent; background: none; padding: 2px 9px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.tab.on { background: #fff; border-color: var(--line); color: var(--ink); }
+#side-body { position: absolute; inset: 0; overflow: auto; padding: 6px 10px 14px; }
+.dt h3 { font-size: 13px; margin: 6px 0 4px; }
+.dt h4 { font-size: 12px; margin: 10px 0 3px; color: #3c4855; text-transform: uppercase; letter-spacing: .4px; }
+.kv { border-collapse: collapse; width: 100%; }
+.kv td { padding: 1px 6px 1px 0; vertical-align: top; border-bottom: 1px solid #f0f2f5; }
+.kv td:first-child { color: var(--muted); white-space: nowrap; width: 1%; font-family: system-ui, sans-serif; font-size: 12px; }
+.card { border: 1px solid var(--line); border-radius: 5px; padding: 4px 7px; margin: 4px 0; }
+.dt .note { color: var(--muted); font-size: 12px; margin: 3px 0; }
+.dt details { margin-top: 10px; }
+.dt pre { white-space: pre-wrap; word-break: break-all; background: #f6f8fa; padding: 6px; border-radius: 4px; font-size: 11px; max-height: 260px; overflow: auto; }
+.lg-row { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0; }
+.lg-row .sw { margin-top: 3px; flex: none; }
+.lg-row .gl { width: 22px; text-align: center; flex: none; font-size: 13px; }
+.lg-row b { font-weight: 600; }
+.concept { margin: 5px 0; }
+.concept b { color: #1d3f75; }
+[data-tip] { cursor: help; }
+[data-tip].clickable, .chip[data-tip], .btn[data-tip] { cursor: pointer; }
+.tipmark { color: var(--accent); font-size: 11px; border: 1px solid #9db8e0; border-radius: 50%; padding: 0 4px; margin-left: 3px; }
+
+/* Overlays */
+#tooltip { position: fixed; z-index: 50; pointer-events: none; background: #1e2935; color: #eef2f6; padding: 6px 9px; border-radius: 5px; max-width: 460px; font-size: 12px; line-height: 1.4; box-shadow: 0 4px 14px rgba(0,0,0,.25); display: none; }
+#tooltip .t2 { color: #b9c5d2; }
+#tooltip b { color: #fff; }
+.overlay { position: fixed; inset: 0; z-index: 40; display: none; align-items: center; justify-content: center; background: rgba(20,30,40,.45); }
+.overlay.show { display: flex; }
+.dialog { background: #fff; border-radius: 8px; padding: 16px 20px; max-width: 860px; max-height: 86vh; overflow: auto; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+.dialog h2 { margin: 0 0 8px; font-size: 16px; }
+.dialog table { border-collapse: collapse; }
+.dialog td { padding: 2px 12px 2px 0; vertical-align: top; }
+kbd { display: inline-block; border: 1px solid #c3cbd5; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 11.5px ui-monospace, monospace; background: #f7f9fb; }
+#welcome { position: fixed; inset: 120px 0 0 0; display: flex; align-items: flex-start; justify-content: center; pointer-events: none; z-index: 5; }
+#welcome .dialog { pointer-events: auto; max-width: 620px; margin-top: 40px; }
+#dropzone.show { display: flex; }
+#dropzone .dialog { font-size: 16px; border: 3px dashed var(--accent); }
+#loading .dialog { font-size: 14px; }
+</style>
+</head>
+<body>
+<header id="top">
+  <span class="brand">SILy trace viewer</span>
+  <button class="tbtn" id="openBtn" title="Open one or several .jsonl traces (or drop them on the page)">Open traces…</button>
+  <input type="file" id="fileInput" accept=".jsonl,.json,.txt,application/json" multiple hidden>
+  <select id="dsSelect" title="Loaded traces" hidden></select>
+  <div id="summary"></div>
+  <button class="tbtn" id="helpBtn" title="Shortcuts and views (?)">? Help</button>
+</header>
+<div id="toolbar">
+  <button class="btn" id="bHome" title="First record (Home)">⏮</button>
+  <button class="btn" id="bPrevK" title="Previous of the chosen kind (Ctrl+←)">◀◀</button>
+  <button class="btn" id="bPrev" title="Previous journal event (←)">◀</button>
+  <button class="btn" id="bPlay" title="Play / pause (Space)">▶ Play</button>
+  <button class="btn" id="bNext" title="Next journal event (→)">▶</button>
+  <button class="btn" id="bNextK" title="Next of the chosen kind (Ctrl+→)">▶▶</button>
+  <button class="btn" id="bEnd" title="Last record (End)">⏭</button>
+  <label for="stepKind">step by</label>
+  <select id="stepKind" title="Kind used by ◀◀ ▶▶ and Ctrl+←/→">
+    <option value="tx">transmission</option>
+    <option value="event">journal event</option>
+    <option value="record">record (any)</option>
+    <option value="node">selected node</option>
+    <option value="msg">selected message</option>
+    <option value="state">routing state change</option>
+    <option value="class1">submission / delivery / failure</option>
+    <option value="trouble">collision or failure</option>
+    <option value="viol">violation / scenario event</option>
+  </select>
+  <span class="sep"></span>
+  <label for="speed">speed</label>
+  <select id="speed" title="Simulated time per real second (+/−)"></select>
+  <label for="timeInput">time</label>
+  <input id="timeInput" type="text" placeholder="seconds" title="Jump to a simulated time in seconds (T), then Enter">
+  <span id="curinfo"></span>
+</div>
+<div id="ovwrap"><canvas id="overview" title="Whole trace: airtime (grey), collisions (red), violations and scenario events; the blue box is the chronogram's view. Click or drag to move the cursor."></canvas></div>
+<main id="layout">
+  <section class="panel" id="p-chrono">
+    <div class="ph">
+      <h2>Chronogram</h2>
+      <span class="opt">lanes <select id="laneOrder" title="Lane order">
+        <option value="addr">by address</option>
+        <option value="tree">by DODAG tree at the cursor</option>
+        <option value="rank">by rank at the cursor</option>
+      </select></span>
+      <button class="chip on" id="optOk" data-tip="opt-ok">ok receptions</button>
+      <button class="chip on" id="optCs" data-tip="cs">carrier sense</button>
+      <button class="chip on" id="optBo" data-tip="bo">backoff</button>
+      <button class="chip on" id="optFollow" data-tip="opt-follow">follow cursor</button>
+      <button class="btn small" id="zFit" title="Whole trace (F)">fit</button>
+      <button class="btn small" id="zIn" title="Zoom in around the cursor">+</button>
+      <button class="btn small" id="zOut" title="Zoom out">−</button>
+      <span class="tipmark" data-tip="chrono-help">?</span>
+    </div>
+    <div class="pb" id="chronoBox"><canvas class="fill" id="chrono"></canvas></div>
+  </section>
+  <div class="gutter" id="g-bottom" data-var="--bottom" title="Drag to resize"></div>
+  <div id="bottom">
+    <section class="panel" id="p-journal">
+      <div class="ph">
+        <h2>Journal</h2>
+        <span id="jkinds"></span>
+        <span class="opt">node <select id="jNode"><option value="all">all</option><option value="sel">selected</option></select></span>
+        <button class="chip" id="jMsg" data-tip="opt-jmsg">selected message only</button>
+        <span class="opt">after cursor <select id="jFuture"><option value="dim">dimmed</option><option value="hide">hidden</option></select></span>
+        <button class="chip on" id="jFollow" data-tip="opt-jfollow">follow</button>
+        <span class="hint" id="jCount"></span>
+      </div>
+      <div class="pb"><div class="vl" id="journal"><div class="vl-inner"></div></div></div>
+    </section>
+    <div class="gutter" id="g-msgs" data-var="--msgs" title="Drag to resize"></div>
+    <section class="panel" id="p-msgs">
+      <div class="ph">
+        <h2 data-tip="class1">Messages</h2>
+        <input type="search" id="mSearch" placeholder="search: 010d, seq, port…" style="width:150px">
+        <select id="mOutcome">
+          <option value="all">all outcomes</option><option value="delivered">delivered</option><option value="failed">failed</option>
+          <option value="error">error at a relay</option><option value="pending">pending</option><option value="refused">refused</option>
+        </select>
+        <button class="chip on" id="mListBtn" title="Show or hide the list (it folds when a message is selected)">list</button>
+        <span class="hint" id="mCount"></span>
+      </div>
+      <div class="pb"><div id="msgs-split">
+        <div id="msg-list-wrap"><div class="vl" id="msgList"><div class="vl-inner"></div></div></div>
+        <div id="lifecycle"><div class="empty">Select a message: click a data frame in the chronogram, or a row above.</div></div>
+      </div></div>
+    </section>
+  </div>
+  <div class="gutter" id="g-right" data-var="--right" title="Drag to resize"></div>
+  <div id="right">
+    <section class="panel" id="p-graph">
+      <div class="ph">
+        <h2>Graph</h2>
+        <span class="opt">layout <select id="gLayout">
+          <option value="auto">auto</option><option value="pos">positions</option><option value="tree">DODAG tree</option><option value="circle">circle</option>
+        </select></span>
+        <span class="opt">links <select id="gLinks">
+          <option value="all">all</option><option value="sel">selected node</option><option value="none">none</option>
+        </select></span>
+      </div>
+      <div class="pb" id="graphBox"><canvas class="fill" id="graph"></canvas></div>
+    </section>
+    <div class="gutter" id="g-graph" data-var="--graph" title="Drag to resize"></div>
+    <section class="panel" id="p-side">
+      <div class="ph">
+        <div class="tabs"><button class="tab on" data-tab="details">Details</button><button class="tab" data-tab="legend">Legend &amp; concepts</button></div>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn small" id="clearSel" title="Clear the selection (Esc)">clear selection</button>
+      </div>
+      <div class="pb"><div id="side-body"></div></div>
+    </section>
+  </div>
+</main>
+
+<div id="tooltip"></div>
+<div id="welcome"><div class="dialog">
+  <h2>SILy trace viewer</h2>
+  <p>Open one or several traces written by <code>make trace</code> (default directory <code>build/trace</code>) with <b>Open traces…</b>, or drop the <code>.jsonl</code> files on this page.</p>
+  <p class="hint">Examples: <code>make trace TEST=test_reliable_scenario.LateAcknowledgement</code>, <code>make trace RUN="relay-death star 1"</code>. Everything runs in the page, nothing is sent anywhere. Press <kbd>?</kbd> for the shortcuts.</p>
+</div></div>
+<div class="overlay" id="dropzone"><div class="dialog">Drop .jsonl traces to load them</div></div>
+<div class="overlay" id="loading"><div class="dialog" id="loadingText">Loading…</div></div>
+<div class="overlay" id="help"><div class="dialog" id="helpBody"></div></div>
+
+<script>
+'use strict';
+/* ======================================================================
+ * Names and meanings (MESH_DESIGN §8, §9, §11, §12; src/mesh/*.py)
+ * ==================================================================== */
+const PORTS = { 1: 'presence', 2: 'topology', 3: 'acknowledgement', 4: 'error', 5: 'node information', 6: 'echo',
+  7: 'traceroute', 8: 'management', 9: 'DODAG information', 10: 'class 2 control' };
+function portName(p) {
+  if (p in PORTS) return PORTS[p];
+  if (p >= 128 && p <= 255) return 'application, low priority';
+  if (p >= 16 && p < 128) return 'application, high priority';
+  return 'reserved';
+}
+const MODES = ['link-local', 'upward', 'downward', 'P2P', 'broadcast', 'root broadcast', 'upward, first hop', 'reserved'];
+const REASONS = {
+  1: 'next hop unreachable (attempts exhausted)', 2: 'next hop not a neighbour (source route)', 3: 'no route (holding expired)',
+  4: 'queue full', 5: 'duty-cycle budget', 6: 'route beyond 8 hops',
+  '-1': 'bad port', '-2': 'bad class', '-3': 'bad destination', '-4': 'payload too long', '-5': 'class 1 or 2 requested for a broadcast',
+  '-6': 'no route (class 0 without next hop)', '-7': 'transmit queue full', '-8': 'own traffic over its quota',
+  '-9': 'frame counter exhausted', '-10': 'class 2 not supported yet' };
+const reasonName = w => REASONS[w] || 'unknown reason';
+const FATES = ['pending', 'ok', 'loss', 'collision', 'half-duplex', 'cut'];
+const FATE_CODE = { ok: 1, loss: 2, collision: 3, 'half-duplex': 4, cut: 5 };
+const FATE_PRI = [0, 1, 3, 5, 4, 2];
+const STATS = ['frames sent', 'time on air (ms)', 'channel heard busy (ms)', 'receptions ok', 'losses', 'collisions',
+  'half-duplex losses', 'cut', 'carrier senses', 'senses busy'];
+const PRESENCE_FLAGS = ['first report since boot', 'queue overflow', 'duty-cycle use above 80 %', 'class 2 tails follow',
+  'rank errors', 'address conflict', 'authentication failures', 'next key loaded'];
+const COUNTER_TIPS = {
+  retries: 'class 1: transmissions after the first to one next hop',
+  reroutes: 'class 1: attempts exhausted, switched to another next hop',
+  unreachable: 'class 1: attempts exhausted, no alternative: failed (reason 1)',
+  held: 'class 1: messages put on hold (no next hop)',
+  hold_expired: 'class 1: held messages failed after the holding (reason 3)',
+  acks_passive: 'class 1: messages acknowledged by overhearing the next hop forward them',
+  acks_explicit: 'class 1: messages acknowledged by a port 3 entry',
+  ack_entries: 'port 3 entries sent',
+  acks_late: 'entries sent for a forward not on air within half a timeout',
+  acks_dropped: 'port 3 entries refused by the queue',
+  ack_withheld: 'frames not acknowledged: a class 1/2 message of the frame was refused',
+  duplicates: 'class 1/2 messages received again: acknowledged, dropped',
+  retaken: 'duplicates no longer held here: taken again, acknowledged (custody)',
+  errors_sent: 'port 4 errors about forwarded messages',
+  errors_received: 'errors about own messages (failure callback)',
+  errors_forwarded: 'root: errors forwarded to the origin',
+  errors_dropped: 'errors failed (never an error about an error) or refused',
+  give_ups: 'medium access given up after 6 busy senses',
+  access_dropped: 'reports dropped after 6 busy senses',
+  duty_dropped: 'reports dropped: duty-cycle allowance',
+  duty_waits: 'waits for the duty-cycle window to release airtime',
+  refused_full: 'queue refusals: queue full', refused_quota: 'queue refusals: origin over its quota',
+  evicted: 'forwarded class 0 messages evicted from the queue', no_route: 'messages without route',
+  rx_auth: 'frames rejected: authentication', rx_replay: 'frames rejected: replay', rx_malformed: 'frames rejected: malformed',
+  rx_no_handler: 'messages for a port nobody listens to', duplicate_address: 'address conflicts detected',
+  adoptions: 'DODAG versions adopted', poisons: 'poisons sent (detach, rank 255)', solicits: 'solicitations sent',
+  rank_errors: 'rank errors (data-path validation)', older: 'frames of an older DODAG version heard',
+  newer: 'frames of a newer DODAG version heard', incomparable: 'versions too far apart to compare',
+  foreign_profile: 'DODAG information of another regional profile',
+  loops: 'class 1/2 messages that came back (loop) and were dropped', rank_dropped: 'class 0 messages dropped: rank error',
+  redirected: 'messages redirected to another next hop', trickle_resets: 'Trickle timer resets to Imin' };
+
+// Frame content categories (chronogram colours).
+const CAT = { DIO: 0, SOL: 1, PRESENCE: 2, TOPOLOGY: 3, ACK: 4, ERR: 5, APP: 6, MESH: 7, BAD: 8 };
+const CAT_NAME = ['DODAG information', 'solicitation', 'presence', 'topology', 'acknowledgement', 'error',
+  'application data', 'other mesh port', 'undecodable'];
+const CAT_TIP = ['dio', 'sol', 'presence', 'topology', 'ack', 'error', 'app', 'mesh', 'bad'];
+const CAT_COL = ['#2b6cb0', '#7cb5ec', '#8459cf', '#c9961f', '#24a08f', '#b52b2b', '#e27321', '#6b7785', '#1d242c'];
+const FATE_COL = ['#98a4b1', '#86d09a', '#e9bd00', '#e3342f', '#d23fa5', '#2f3843'];
+function mixHex(a, b, f) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const c = s => Math.round(((pa >> s) & 255) * (1 - f) + ((pb >> s) & 255) * f);
+  return '#' + ((1 << 24) | (c(16) << 16) | (c(8) << 8) | c(0)).toString(16).slice(1);
+}
+const CAT_DIM = CAT_COL.map(c => mixHex(c, '#ffffff', 0.75));
+const FATE_DIM = FATE_COL.map(c => mixHex(c, '#ffffff', 0.72));
+
+function msgCat(m) {
+  switch (m.p) {
+    case 9: return m.sol ? CAT.SOL : CAT.DIO;
+    case 1: return CAT.PRESENCE;
+    case 2: return CAT.TOPOLOGY;
+    case 3: return CAT.ACK;
+    case 4: return CAT.ERR;
+    default: return m.p >= 16 ? CAT.APP : CAT.MESH;
+  }
+}
+function frameCats(r) {
+  if (r.err || !r.m) return [CAT.BAD];
+  const s = new Set(r.m.map(msgCat));
+  return s.size ? [...s].sort((a, b) => a - b) : [CAT.BAD];
+}
+
+/* Concept and legend explanations (accurate to MESH_DESIGN; concise). */
+const TIPS = {
+  presence: 'Presence (port 1): each node\'s periodic report to its preferred parent, relayed up to the root (mode 6 on the first hop, mode 1 once relayed). Class 0: sent once per hop, never acknowledged nor retried. The root learns each node\'s parent from it; the sender also uses it to sample the link to its parent.',
+  topology: 'Topology (port 2): periodic report of a node\'s parent set and best other neighbours (margin, delivery ratio), relayed to the root, which builds the network map from them. Class 0.',
+  dio: 'DODAG information (port 9, the DIO of RPL): a frame to every neighbour carrying the network parameters (presence and topology periods, Imin, maximum rank increase, profile); its header carries the sender\'s rank and DODAG version. Sent by Trickle after a reset, and by the root as its beacon every half presence period. In steady state Trickle sends nothing: every frame header already advertises rank and version.',
+  sol: 'Solicitation (port 9, empty payload): sent to every neighbour by a node without route (at boot, at the end of a detach hold, then once per presence period) or by a node behind a newer DODAG version. Neighbours reset their Trickle timer and answer within Imin.',
+  ack: 'Explicit acknowledgement (port 3, link-local): entries (link source, frame counter low 16 bits); one entry acknowledges every class 1/2 message of that frame. Sent by the final destination (the root batches up to 8 entries per frame, other nodes answer at once), by a relay that will not forward within half a timeout or holds the message, and by a node receiving a duplicate.',
+  error: 'Error (port 4, class 1, upward): a relay that cannot deliver a class 1 message (next hop unreachable after its attempts, no route at the end of the holding, …) sends an error to the root, which forwards it to the message\'s origin. An error about an error is never sent.',
+  app: 'Application data (ports 16–255): payload opaque to the mesh; the class (0, 1 or 2) is chosen per message. The large-network suite sends its punches on port 20, class 1.',
+  mesh: 'Other mesh ports: node information (5), echo (6), traceroute (7), management (8), class 2 control (10).',
+  bad: 'Frame that does not decode: malformed, unsupported version, or no known key opens it (authentication).',
+  mixed: 'Striped bar: the frame carries several kinds of messages (a relay repacks every message bound to the same next hop into one frame).',
+  'f-ok': 'ok: received; the frame reaches the node\'s mesh core.',
+  'f-loss': 'Loss: the link\'s loss draw failed: the frame reached the receiver but did not demodulate (the receiver was still busy for its duration).',
+  'f-collision': 'Collision: two receptions overlapped at this receiver; both are lost (unless capture is enabled and one is stronger by capture_db). Typical of hidden terminals.',
+  'f-half-duplex': 'Half-duplex loss: the receiver was itself transmitting during (part of) the frame; a LoRa radio cannot receive while it transmits.',
+  'f-cut': 'Cut: the link was cut before the end of the frame (scripted partition).',
+  'f-pending': 'Reception in progress at the cursor: its fate is known at the end of the frame.',
+  hidden: 'Hidden terminals: two nodes that cannot hear each other both sense a free channel and transmit to a common neighbour, where the frames collide. Carrier sense cannot prevent it; class 1 retries recover the losses.',
+  cs: 'Carrier sense: before each transmission the node checks the channel; it is busy when a frame audible here is on air (preamble detection on the board). Ticks: dark red busy, grey free. The answer comes sense_ms later.',
+  bo: 'Backoff: after a busy sense the node waits a random number of slots in [1, CW] (slot = time on air of a 17-byte presence frame), CW starting at 4 and doubling up to 32, then senses again. After 6 attempts a report is dropped and a class 1/2 message is retried later.',
+  rank: 'Rank: 0 at the root, 255 = no route or poisoned. A hop of ETX 1 costs 8: a node\'s rank is its preferred parent\'s rank + round(8 × ETX of the link), advertised in every frame header.',
+  parent: 'Preferred parent: the first of the parent set (the 3 candidates of lowest path cost). The node switches only when another candidate is cheaper by at least 12 (1.5 hops), or when the parent leaves the set (silent for 2.5 presence periods, or dropped after 3 failed class 1 attempts).',
+  detach: 'Detach: with no candidate left the node advertises rank 255 (poison), waits 2 Imin so that its descendants hear it, then solicits and takes the best candidate heard during the answer window (Imin + 8 slots).',
+  trickle: 'Trickle: advertisement timer, reset to Imin (32 slots) on a new DODAG version, a frame of an older version, a solicitation, a rank increase or a poison; the interval doubles up to the presence period; an advertisement is suppressed after 2 frames of the same version are heard in the interval.',
+  version: 'DODAG version: issued by the root only (global repair at boot, on command, on a parameter change or an inconsistency); nodes adopt a newer version from a DODAG information message.',
+  class1: 'Class 1 (hop by hop): every hop keeps the message until its next hop acknowledges it, with up to 3 attempts per next hop. Timeout from the end of the frame: time on air of a 255-byte frame + 6 slots; towards the root, plus its batching delay. After 3 attempts the preferred parent is dropped and the next parent gets fresh attempts; with none, the message fails (error to the root, or failure reported to the application).',
+  passive: 'Passive acknowledgement: the sender overhears its next hop forwarding the message (same origin, destination, port and sequence). No extra frame. Not possible on the last hop: the root forwards nothing, so it acknowledges explicitly.',
+  explicit: 'Explicit acknowledgement: a port 3 entry (link source, frame counter low 16 bits) sent by the frame\'s link destination; it acknowledges every class 1/2 message of that frame.',
+  batching: 'Root batching: the root forwards nothing, so it acknowledges explicitly, in batches of up to 8 entries per frame, kept under 5 % of the channel: its acknowledgement can come up to a batching delay (20 acknowledgement frames on air) after the frame.',
+  late: 'Late acknowledgement: it reaches the sender after the sender\'s timeout (computed here from the header: 255-byte frame + 6 slots, plus the batching delay towards the root), or after the sender\'s next transmission of the message. The current code then ignores it: a sender only takes an acknowledgement of its last transmission while it waits for it (mesh.reliable: on_ack, overheard); the counters column shows whether it was taken.',
+  relayack: 'Explicit acknowledgement by a relay: it accepted the message but did not forward it within half a timeout (queue, duty cycle, busy channel; counter acks_late), held it without route, or received a duplicate.',
+  duplicate: 'Duplicate: a class 1/2 message received again (its sender missed the acknowledgement). It is acknowledged again; its destination drops it.',
+  holding: 'Holding during repair: a node without route keeps its class 1/2 messages for 2 presence periods, then fails them (error with reason 3 to the root).',
+  down: 'Board down (reset or power loss) until its next boot.',
+  'chrono-help': 'One lane per node. Top: its transmissions (colour = content); middle: carrier senses and backoffs; below: its receptions of other frames (colour = fate); bottom: marks (routing state, submissions, deliveries, failures). Wheel: zoom; drag: pan; Shift+wheel: scroll the lanes; click: select (a frame also selects its message); click on an empty place: move the cursor; double-click an item: move the cursor to it.',
+  'opt-ok': 'Show the successful receptions (light green) on the receivers\' lanes; losses are always shown.',
+  'opt-follow': 'Pan the chronogram to keep the cursor in view.',
+  'opt-jmsg': 'Show only the records of the selected message: submission, frames, receptions, acknowledgements, errors, delivery, failure.',
+  'opt-jfollow': 'Scroll the journal to the cursor.',
+  'j-tx': 'Journal: transmissions (tx records): sender → link destination, frame number (#: frame counter low 16 bits), size, time on air, rank, content.',
+  'j-end': 'Journal: ends of transmissions: the fate of each reception (ok, loss, collision, half-duplex, cut).',
+  'j-st': 'Journal: routing state changes: rank, DODAG version, preferred parent, parent set, attached.',
+  'j-q': 'Journal: transmit queue length changes.',
+  'j-cnt': 'Journal: link, DODAG and routing counters a step changed (retries, acknowledgements, errors, Trickle resets…).',
+  'j-msg': 'Journal: submissions by the application (sequence number, or refusal), deliveries at the destination, failures reported to the application (with the reason).',
+  'j-sys': 'Journal: header, boots, power losses and resets, nodes added, link changes, end of trace.',
+  'j-viol': 'Journal: invariant violations and scenario events (switch-off, global repair…).',
+};
+
+/* ======================================================================
+ * Formatting helpers
+ * ==================================================================== */
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const hex4 = a => '0x' + (a >>> 0).toString(16).toUpperCase().padStart(4, '0');
+function addrLabel(a) {
+  if (a === null || a === undefined) return '–';
+  if (typeof a !== 'number') return String(a);
+  if (a === 0) return 'root';
+  if (a === 0xFFFF) return 'all';
+  return hex4(a);
+}
+function nameLabel(n, X = D) {
+  const node = X && X.nodeByKey.get(String(n));
+  if (node && node.kind === 'board' && typeof node.a === 'number') return addrLabel(node.a);
+  return String(n);
+}
+const fmtT = ms => (ms === null || ms === undefined || !isFinite(ms)) ? '–' : (ms / 1000).toFixed(3) + ' s';
+function fmtDur(ms) {
+  if (!isFinite(ms)) return '–';
+  if (Math.abs(ms) < 1000) return Math.round(ms) + ' ms';
+  if (Math.abs(ms) < 60000) return (ms / 1000).toFixed(Math.abs(ms) < 10000 ? 2 : 1) + ' s';
+  return Math.floor(ms / 60000) + ' min ' + Math.round((ms % 60000) / 1000) + ' s';
+}
+const fc16 = fc => (fc & 0xFFFF);
+const plural = (n, w, ws) => n + ' ' + (n === 1 ? w : (ws || w + 's'));
+const fmtInt = n => n.toLocaleString('en-US');
+function portLabel(p) { return p in PORTS ? PORTS[p] + ' (port ' + p + ')' : 'port ' + p; }
+function fatePill(f) { const c = f === 'no link' ? 'nolink' : f; return `<span class="pill f-${esc(c)}" data-tip="f-${esc(c)}">${esc(f)}</span>`; }
+function sw(col) { return `<span class="sw" style="background:${col}"></span>`; }
+function catSw(cats) {
+  if (cats.length === 1) return sw(CAT_COL[cats[0]]);
+  const st = cats.map((c, i) => `${CAT_COL[c]} ${i * 100 / cats.length}% ${(i + 1) * 100 / cats.length}%`).join(',');
+  return `<span class="sw" style="background:linear-gradient(${st})"></span>`;
+}
+
+// Binary searches. lowerBound: first index i with arr[i] >= v; upperBound: first with arr[i] > v.
+function lowerBound(arr, v) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < v) lo = m + 1; else hi = m; } return lo; }
+function upperBound(arr, v) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] <= v) lo = m + 1; else hi = m; } return lo; }
+// Same on an array of record positions, by their time.
+function lowerBoundT(arr, t) { const T = D.times; let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (T[arr[m]] < t) lo = m + 1; else hi = m; } return lo; }
+
+/* LoRa time on air (src/mesh/airtime.py): for the class 1 timeouts. */
+function toaMs(len, sf, bw, cr, pre) {
+  const ldr = (1 << sf) * 125 >= 2 * bw;
+  let bits = 8 * len - 4 * sf + 8 + 16 + 20;
+  if (bits < 0) bits = 0;
+  const per = 4 * (ldr ? sf - 2 : sf);
+  const blocks = Math.ceil(bits / per);
+  const sx4 = 17 + 4 * (pre + 8 + blocks * cr);
+  return Math.ceil(sx4 * Math.pow(2, sf) * 5 / (bw / 50));
+}
+function timeouts(D) {
+  if (D._T) return D._T;
+  const h = D.hdr, a = h.air || {};
+  const sf = h.sf || 7, bw = a.bw || 125000, cr = a.cr || 5, pre = a.preamble || 8;
+  const slot = a.slot_ms || toaMs(17, sf, bw, cr, pre);
+  const ackF = toaMs(13 + 2 + 8 * 4, sf, bw, cr, pre);
+  const batch = 20 * ackF;
+  D._T = { slot, relay: toaMs(255, sf, bw, cr, pre) + 6 * slot, root: batch + ackF + 6 * slot, batch, ackF,
+    slotCheck: toaMs(17, sf, bw, cr, pre) };
+  return D._T;
+}
+
+/* ======================================================================
+ * Parsing and indexing (once per file)
+ * ==================================================================== */
+let D = null;          // current dataset
+const DS = [];         // loaded datasets
+const SNAP = 512;      // records between state snapshots
+
+// Identity of a class 1/2 message (mesh.reliable.identity): [origin, destination, port, sequence].
+function identity(m, s, d) {
+  if (m.q === undefined || m.q === null) return null;
+  switch (m.m) {
+    case 6: return [s, 0, m.p, m.q];
+    case 1: return [m.o, 0, m.p, m.q];
+    case 2: return [0, m.d, m.p, m.q];
+    case 3: return [m.o, m.d, m.p, m.q];
+    case 0: return [s, d, m.p, m.q];
+    default: return null;
+  }
+}
+const idKey = (o, d, p, q) => o + ':' + d + ':' + p + ':' + q;
+
+function parseTrace(text, fileName) {
+  const recs = [];
+  let bad = 0, start = 0;
+  const n = text.length;
+  while (start < n) {
+    let end = text.indexOf('\n', start);
+    if (end < 0) end = n;
+    if (end > start + 1 || (end > start && text.charCodeAt(start) > 32)) {
+      try { recs.push(JSON.parse(text.slice(start, end))); } catch (e) { bad++; }
+    }
+    start = end + 1;
+  }
+  return buildDataset(recs, fileName, bad);
+}
+
+function buildDataset(recs, fileName, badLines) {
+  const N = recs.length;
+  const X = { fileName, recs, N, badLines, nodes: [], nodeByKey: new Map(), nodeByAddr: new Map(),
+    times: new Float64Array(N), txs: [], global: [], linkChanges: [], stateRecs: [], class1Recs: [], refused: [],
+    msgs: new Map(), msgList: [], kl: {}, nodePos: new Map(), warnings: [], maxTx: 0, maxBo: 0 };
+  const hdr = (N && recs[0].k === 'hdr') ? recs[0] : null;
+  if (!hdr) X.warnings.push('no header record: nodes inferred from the records');
+  X.hdr = hdr || { k: 'hdr', i: 0, t: N ? recs[0].t : 0, nodes: [], links: [] };
+  X.eof = (N && recs[N - 1].k === 'eof') ? recs[N - 1] : null;
+  if (!X.eof) X.warnings.push('no eof record: the trace may be truncated');
+  if (badLines) X.warnings.push(badLines + ' lines not decoded');
+  const addNode = (spec, pos) => {
+    const key = String(spec.n);
+    let node = X.nodeByKey.get(key);
+    if (node) return node;
+    node = { key, n: spec.n, a: spec.a, kind: spec.kind || 'board', root: !!spec.root, pos: spec.pos || null,
+      idx: X.nodes.length, addedPos: pos,
+      lane: { tx: [], cs: [], bo: [], mk: [], cnt: [], q: [], down: [], rxN: 0 } };
+    if (node.kind === 'board' && node.a === undefined && typeof spec.n === 'number') node.a = spec.n;
+    if (node.kind === 'board' && node.a === 0) node.root = true;
+    X.nodes.push(node);
+    X.nodeByKey.set(key, node);
+    if (node.kind === 'board' && typeof node.a === 'number' && !X.nodeByAddr.has(node.a)) X.nodeByAddr.set(node.a, node);
+    return node;
+  };
+  X.addNode = addNode;
+  for (const s of (X.hdr.nodes || [])) addNode(s, 0);
+  const nodeOf = n => X.nodeByKey.get(String(n)) ||
+    addNode({ n, a: typeof n === 'number' ? n : undefined, kind: typeof n === 'number' ? 'board' : 'sniffer' }, 0);
+  const iToPos = new Map();
+  const lastSt = new Map();
+  const openDown = new Map();
+  let tMax = -Infinity;
+  for (let p = 0; p < N; p++) {
+    const r = recs[p];
+    const t = +r.t || 0;
+    X.times[p] = t;
+    if (r.i !== undefined) iToPos.set(r.i, p);
+    switch (r.k) {
+      case 'tx': {
+        nodeOf(r.n).lane.tx.push(p);
+        X.txs.push(p);
+        r._cats = frameCats(r);
+        const d = (r.e || t) - t;
+        if (d > X.maxTx) X.maxTx = d;
+        if (r.e > tMax) tMax = r.e;
+        for (const x of (r.rx || [])) nodeOf(x[0]).lane.rxN++;
+        break;
+      }
+      case 'end': {
+        const tp = iToPos.get(r.x);
+        if (tp !== undefined && recs[tp].k === 'tx') { recs[tp]._end = p; r._tx = tp; }
+        break;
+      }
+      case 'cs': nodeOf(r.n).lane.cs.push(p); break;
+      case 'bo': { nodeOf(r.n).lane.bo.push(p); const d = (r.u || t) - t; if (d > X.maxBo) X.maxBo = d; break; }
+      case 'st': {
+        const node = nodeOf(r.n);
+        r._prev = lastSt.get(node.key) || null;
+        lastSt.set(node.key, r);
+        node.lane.mk.push(p);
+        X.stateRecs.push(p);
+        break;
+      }
+      case 'q': nodeOf(r.n).lane.q.push(p); break;
+      case 'cnt': nodeOf(r.n).lane.cnt.push(p); break;
+      case 'sub': case 'dlv': case 'fail': nodeOf(r.n).lane.mk.push(p); X.class1Recs.push(p); break;
+      case 'boot': {
+        const node = nodeOf(r.n);
+        node.lane.mk.push(p);
+        X.stateRecs.push(p);
+        const dn = openDown.get(node.key);
+        if (dn) { dn.t1 = t; dn.bootPos = p; openDown.delete(node.key); }
+        break;
+      }
+      case 'down': {
+        const node = nodeOf(r.n);
+        node.lane.mk.push(p);
+        X.stateRecs.push(p);
+        const dn = { t0: t, t1: t + (+r.off || 0), pos: p, how: r.how };
+        node.lane.down.push(dn);
+        openDown.set(node.key, dn);
+        break;
+      }
+      case 'node': addNode(r, p); X.stateRecs.push(p); break;
+      case 'link': X.linkChanges.push(p); X.stateRecs.push(p); break;
+      case 'viol': X.global.push(p); break;
+      case 'scn': X.global.push(p); X.stateRecs.push(p); break;
+    }
+  }
+  X.t0 = N ? X.times[0] : 0;
+  X.t1 = Math.max(N ? X.times[N - 1] : 0, isFinite(tMax) ? tMax : 0);
+  if (X.t1 <= X.t0) X.t1 = X.t0 + 1;
+  // Receptions per lane, as typed arrays sorted by start (transmissions are in time order).
+  for (const node of X.nodes) {
+    const L = node.lane, n = L.rxN;
+    L.rxT0 = new Float64Array(n); L.rxT1 = new Float64Array(n); L.rxTx = new Int32Array(n);
+    L.rxEnd = new Int32Array(n); L.rxK = new Uint16Array(n); L.rxF = new Uint8Array(n); L.rxN = 0;
+  }
+  let rxTotal = 0;
+  for (const p of X.txs) {
+    const r = recs[p], e = r._end, er = e !== undefined ? recs[e] : null;
+    const rx = r.rx || [];
+    for (let k = 0; k < rx.length; k++) {
+      const L = nodeOf(rx[k][0]).lane, j = L.rxN++;
+      L.rxT0[j] = r.t; L.rxT1[j] = r.e; L.rxTx[j] = p; L.rxEnd[j] = e === undefined ? -1 : e; L.rxK[j] = k;
+      L.rxF[j] = er && er.f ? (FATE_CODE[er.f[k]] || 0) : 0;
+      rxTotal++;
+    }
+  }
+  X.rxTotal = rxTotal;
+  X.hasPos = X.nodes.length > 0 && X.nodes.every(node => Array.isArray(node.pos));
+  indexMessages(X, nodeOf);
+  buildSnapshots(X);
+  buildOverview(X);
+  return X;
+}
+
+/* Class 1/2 messages: frames carrying each identity, acknowledgements, errors, outcome. */
+function indexMessages(X, nodeOf) {
+  const R = X.recs;
+  const msgOf = (o, d, p, q) => {
+    const key = idKey(o, d, p, q);
+    let M = X.msgs.get(key);
+    if (!M) { M = { key, o, d, p, q, c: null, sub: null, frames: [], errors: [], dlv: [], fail: [], first: null }; X.msgs.set(key, M); }
+    return M;
+  };
+  const lastFrame = new Map(); // link source:counter low 16 bits -> latest tx position
+  for (const p of X.txs) {
+    const r = R[p];
+    if (r.m) {
+      r._ids = [];
+      for (const m of r.m) {
+        const id = identity(m, r.s, r.d);
+        if (id && m.c >= 1) {
+          const M = msgOf(...id);
+          if (M.c === null) M.c = m.c;
+          if (M.first === null) M.first = p;
+          if (M.frames[M.frames.length - 1] !== p) M.frames.push(p);
+          r._ids.push(M.key);
+        } else r._ids.push(null);
+        if (m.p === 3 && Array.isArray(m.a)) {
+          m._acks = [];
+          for (const a of m.a) {
+            const fp = lastFrame.get(a[0] + ':' + a[1]);
+            m._acks.push(fp === undefined ? -1 : fp);
+            if (fp !== undefined) {
+              const F = R[fp];
+              if (!F._ackedBy) F._ackedBy = [];
+              if (F._ackedBy[F._ackedBy.length - 1] !== p) F._ackedBy.push(p);
+            }
+          }
+        }
+        if (m.p === 4 && Array.isArray(m.e) && m.e.length >= 6) {
+          const M = msgOf(m.e[2], m.e[3], m.e[4], m.e[5]);
+          M.errors.push({ pos: p, err: id ? idKey(...id) : null, e: m.e });
+        }
+      }
+    }
+    if (r.s !== undefined && r.fc !== undefined) lastFrame.set(r.s + ':' + fc16(r.fc), p);
+  }
+  for (const p of X.class1Recs) {
+    const r = R[p], node = nodeOf(r.n);
+    const me = node.kind === 'board' && typeof node.a === 'number' ? node.a : r.n;
+    if (r.k === 'sub') {
+      if (r.q >= 0 && r.c >= 1) { const M = msgOf(me, r.d, r.p, r.q); if (M.sub === null) M.sub = p; M.c = r.c; }
+      else if (r.q < 0) X.refused.push(p);
+    } else if (r.k === 'dlv') {
+      const M = X.msgs.get(idKey(r.o, me, r.p, r.q));
+      if (M) M.dlv.push(p);
+    } else {
+      msgOf(me, r.d, r.p, r.q).fail.push(p);
+    }
+  }
+  const list = [];
+  for (const M of X.msgs.values()) {
+    if (!(M.c >= 1)) continue;
+    M.t0 = M.sub !== null ? X.times[M.sub] : (M.first !== null ? X.times[M.first] : 0);
+    M.p0 = M.sub !== null ? M.sub : M.first;
+    M.outcome = M.dlv.length ? 'delivered' : M.fail.length ? 'failed' : M.errors.length ? 'error' : 'pending';
+    M.label = `${addrLabel(M.o)} → ${addrLabel(M.d)} · ${M.p === 4 ? 'error' : 'port ' + M.p} · seq ${M.q}`;
+    M.search = (M.label + ' ' + hex4(M.o) + ' ' + hex4(M.d) + ' ' + M.outcome).toLowerCase();
+    list.push(M);
+  }
+  for (const p of X.refused) {
+    const r = R[p];
+    list.push({ key: 'refused:' + p, refused: true, sub: p, p0: p, t0: r.t, outcome: 'refused', frames: [], errors: [], dlv: [], fail: [],
+      label: `${nameLabel(r.n, X)} → ${addrLabel(r.d)} · port ${r.p} · refused ${r.q}`,
+      search: ('refused ' + r.p + ' ' + reasonName(r.q)).toLowerCase() });
+  }
+  list.sort((a, b) => (a.p0 ?? 0) - (b.p0 ?? 0));
+  X.msgList = list;
+  for (const M of list) X.msgs.set(M.key, M);
+}
+
+/* ======================================================================
+ * Node state at any record: snapshots every SNAP records, replay from the nearest
+ * ==================================================================== */
+function blankState(X) {
+  return { n: X.nodes.map(node => ({ r: null, v: null, p: null, ps: null, at: null, q: 0, up: node.addedPos <= 0,
+    exists: node.addedPos <= 0, boots: 0, how: null, downT: null, stPos: -1 })) };
+}
+const cloneState = S => ({ n: S.n.map(o => Object.assign({}, o)) });
+function applyRec(X, S, r, p) {
+  const node = r.n !== undefined ? X.nodeByKey.get(String(r.n)) : null;
+  if (!node) return;
+  const s = S.n[node.idx];
+  if (!s) return;
+  switch (r.k) {
+    case 'st':
+      s.r = r.r; s.v = r.v; s.stPos = p;
+      if ('p' in r) { s.p = r.p; s.ps = r.ps; s.at = r.at; }
+      break;
+    case 'q': s.q = r.q; break;
+    case 'boot': s.up = true; s.exists = true; s.boots = r.b; s.how = null; s.downT = null; s.q = 0; break;
+    case 'down': s.up = false; s.how = r.how; s.downT = r.t; break;
+    case 'node': s.exists = true; s.up = true; break;
+  }
+}
+function buildSnapshots(X) {
+  // nodes added by 'node' records extend the state arrays: blankState covers every node known after indexing.
+  const S = blankState(X);
+  X.snaps = [cloneState(S)];
+  for (let p = 0; p < X.N; p++) {
+    if (p > 0 && p % SNAP === 0) X.snaps.push(cloneState(S));
+    applyRec(X, S, X.recs[p], p);
+  }
+  X.finalState = S;
+  X.cache = null;
+}
+// State after applying records 0..pos.
+function stateAt(pos) {
+  const X = D;
+  pos = clamp(pos, 0, X.N - 1);
+  const c = X.cache;
+  if (c && c.pos <= pos && pos - c.pos <= SNAP) {
+    for (let p = c.pos + 1; p <= pos; p++) applyRec(X, c.S, X.recs[p], p);
+    c.pos = pos;
+    return c.S;
+  }
+  const k = Math.min(Math.floor((pos + 1) / SNAP), X.snaps.length - 1);
+  const S = cloneState(X.snaps[k]);
+  for (let p = k * SNAP; p <= pos; p++) applyRec(X, S, X.recs[p], p);
+  X.cache = { pos, S };
+  return S;
+}
+// Detached: only nodes with routing state (tests without routing keep rank 255 by design).
+const detached = s => s.at === false || (s.at !== null && s.at !== undefined && s.r === 255);
+
+// Link states at a record: header links, then the 'link' records up to pos.
+function linksAt(pos) {
+  const X = D;
+  if (!X._baseLinks) {
+    X._baseLinks = new Map();
+    for (const l of (X.hdr.links || [])) X._baseLinks.set(l[0] + '>' + l[1], { s: l[0], d: l[1], loss: l[2], rssi: l[3], snr: l[4], up: l[5] });
+  }
+  const n = upperBound(X.linkChanges, pos);
+  if (n === 0) return X._baseLinks;
+  if (X._linkCache && X._linkCache.n === n) return X._linkCache.map;
+  const m = new Map(X._baseLinks);
+  for (let i = 0; i < n; i++) {
+    const r = X.recs[X.linkChanges[i]];
+    m.set(r.s + '>' + r.d, { s: r.s, d: r.d, loss: r.loss, rssi: r.rssi, snr: r.snr, up: r.up });
+  }
+  X._linkCache = { n, map: m };
+  return m;
+}
+
+/* Overview bins: airtime and collisions over the whole trace. */
+function buildOverview(X) {
+  const B = 1200, span = X.t1 - X.t0;
+  const air = new Float64Array(B), col = new Float64Array(B);
+  for (const p of X.txs) {
+    const r = X.recs[p];
+    const b = Math.min(B - 1, Math.floor((r.t - X.t0) / span * B));
+    air[b] += (r.e - r.t);
+    const e = r._end;
+    if (e !== undefined) for (const f of X.recs[e].f || []) if (f === 'collision') col[b]++;
+  }
+  X.ov = { B, air, col };
+}
+/* ======================================================================
+ * Message lifecycle (class 1/2): frames, receptions, acknowledgements
+ * ==================================================================== */
+const nodeKeyOfAddr = a => { const node = D.nodeByAddr.get(a); return node ? node.key : null; };
+// Fate of the reception of the frame at txPos by the node of key ('no link' when it is not a receiver).
+function fateAt(txPos, key) {
+  const F = D.recs[txPos];
+  if (key === null || key === undefined) return 'no link';
+  const rx = F.rx || [];
+  let k = -1;
+  for (let i = 0; i < rx.length; i++) if (String(rx[i][0]) === key) { k = i; break; }
+  if (k < 0) return 'no link';
+  if (F._end === undefined) return 'unknown';
+  const f = D.recs[F._end].f;
+  return f && f[k] ? f[k] : 'unknown';
+}
+// Counter increases of node key recorded in [ta, tb] (the step of an event shares its time).
+function counters(key, ta, tb, names) {
+  const node = D.nodeByKey.get(key);
+  if (!node) return null;
+  const arr = node.lane.cnt;
+  const out = {};
+  let any = false;
+  for (let i = lowerBoundT(arr, ta); i < arr.length && D.times[arr[i]] <= tb; i++) {
+    const c = D.recs[arr[i]].c || {};
+    for (const n of names) if (c[n]) { out[n] = (out[n] || 0) + c[n]; any = true; }
+  }
+  return any ? out : null;
+}
+const RELAY_ACK_WHY = { acks_late: 'forward not on air within half a timeout', duplicates: 'duplicate received',
+  retaken: 'duplicate taken again (custody)', held: 'message held (no route)' };
+
+function lifecycle(key) {
+  const M = D.msgs.get(key);
+  if (!M) return null;
+  if (M._lc) return M._lc;
+  const R = D.recs, T = timeouts(D), items = [];
+  const add = (type, pos, level, html, cls = '', extra = {}) => items.push(Object.assign({ type, pos, level, html, cls, seq: items.length }, extra));
+  if (M.refused) {
+    const r = R[M.sub];
+    add('sub', M.sub, 0, `Submission <b>refused</b> at <b>${nameLabel(r.n)}</b>: ${esc(portLabel(r.p))}, class ${r.c}, ${r.len} B → ${addrLabel(r.d)}; reason ${r.q}: ${esc(reasonName(r.q))}`, 't-fail');
+    return (M._lc = { M, items, hops: [] });
+  }
+  const dlvPos = M.dlv.length ? M.dlv[0] : null;
+  if (M.sub !== null) {
+    const r = R[M.sub];
+    add('sub', M.sub, 0, `Submitted at <b>${nameLabel(r.n)}</b>: ${esc(portLabel(r.p))}, class ${r.c}, ${r.len} B → ${addrLabel(r.d)}, sequence ${r.q}`);
+  } else if (M.frames.length) {
+    add('note', M.frames[0], 0, M.p === 4 ? 'Error message generated by the mesh (no submission).' : 'No submission recorded (before the recorder, or generated by the mesh).');
+  }
+  // Hops: frames grouped by (sender, link destination), in order of first attempt.
+  const hops = new Map(), order = [];
+  for (const fp of M.frames) {
+    const F = R[fp], hk = String(F.n) + '>' + F.d;
+    let H = hops.get(hk);
+    if (!H) { H = { sender: String(F.n), d: F.d, nh: nodeKeyOfAddr(F.d), attempts: [], rx: [], ack: null }; hops.set(hk, H); order.push(H); }
+    H.attempts.push(fp);
+  }
+  const bySender = new Map();
+  for (const fp of M.frames) { const k = String(R[fp].n); if (!bySender.has(k)) bySender.set(k, []); bySender.get(k).push(fp); }
+  // Late: received after the sender's timeout for that attempt, or after its next transmission of the message.
+  const lateNote = (H, fp, ta, endPos) => {
+    const F = R[fp], to = F.d === 0 ? T.root : T.relay, parts = [];
+    if (ta > F.e + to) parts.push(`${fmtDur(ta - F.e)} after the frame, timeout ${fmtDur(to)}`);
+    const next = (bySender.get(H.sender) || []).find(x => x > fp && x < endPos);
+    if (next !== undefined) parts.push(`after the next transmission (${fmtT(R[next].t)})`);
+    return parts.length ? ` <span class="pill late" data-tip="late">late</span> ${parts.join(', ')}` : '';
+  };
+  for (const fp of M.frames) {
+    const F = R[fp], H = hops.get(String(F.n) + '>' + F.d);
+    const n = H.attempts.indexOf(fp) + 1, others = (F.m || []).length - 1;
+    const earlier = (bySender.get(H.sender) || []).filter(x => x < fp && R[x].d !== F.d);
+    const reroute = n === 1 && earlier.length ? ` <i>(new next hop after ${addrLabel(R[earlier[earlier.length - 1]].d)})</i>` : '';
+    add('frame', fp, 0, `<b>${nameLabel(F.n)} → ${addrLabel(F.d)}</b>, attempt ${n}: frame #${fc16(F.fc)}, ${F.len} B, ${F.e - F.t} ms${others > 0 ? ', with ' + plural(others, 'other message') : ''}${F.sn ? ' (sniffer replay)' : ''}${reroute}`, 'frame', { frame: fp });
+    if (F.d === 0xFFFF) continue;
+    const fate = fateAt(fp, H.nh);
+    H.rx.push(fate);
+    let note = '';
+    if (fate === 'ok' && dlvPos !== null && dlvPos < (F._end ?? fp) && F.d === M.d) note = ' — <span data-tip="duplicate">duplicate</span>: already delivered';
+    add('rx', F._end ?? fp, 1, `#${fc16(F.fc)} at ${addrLabel(F.d)}: ${fatePill(fate)}${note}`, '', { fate });
+    for (const ap of (F._ackedBy || [])) {
+      const A = R[ap];
+      let ent = 0;
+      for (const m of (A.m || [])) if (m.p === 3 && m.a) ent += m.a.length;
+      const acker = D.nodeByKey.get(String(A.n));
+      let why;
+      if (acker && acker.a === M.d) {
+        why = M.d === 0 ? ` — <span data-tip="batching">root batch</span>, ${fmtDur(A.t - F.e)} after the frame` : ' — final destination';
+      } else {
+        const c = counters(String(A.n), F.e, A.t, Object.keys(RELAY_ACK_WHY));
+        why = ' — <span data-tip="relayack">relay acknowledgement</span>' + (c ? ': ' + Object.keys(c).map(k => RELAY_ACK_WHY[k]).join(', ') : '');
+      }
+      add('eack', ap, 1, `<span data-tip="explicit">explicit acknowledgement</span> of #${fc16(F.fc)} by <b>${nameLabel(A.n)}</b> in frame #${fc16(A.fc)}${ent > 1 ? ` (${ent} entries)` : ''}${why}`, '', { frame: ap, acks: fp });
+      const f2 = fateAt(ap, H.sender), endPos = A._end ?? ap;
+      const late = lateNote(H, fp, A.e, endPos);
+      let cnt = '';
+      if (f2 === 'ok') {
+        const c = counters(H.sender, A.e, A.e, ['acks_explicit']);
+        cnt = c ? ` · counted at the sender (acks_explicit +${c.acks_explicit})` : ' · <i>no acks_explicit increase at the sender</i>';
+      }
+      add('eack-rx', endPos, 2, `acknowledgement of #${fc16(F.fc)} at ${nameLabel(H.sender)}: ${fatePill(f2)}${late}${cnt}`, '', { fate: f2, late: !!late });
+      if (f2 === 'ok' && (!H.ack || ap < H.ack.pos)) H.ack = { kind: 'explicit', pos: ap, late: !!late };
+    }
+  }
+  // Passive acknowledgements: the next hop's later frames carrying the message, overheard by the sender.
+  for (const H of order) {
+    if (H.nh === null) continue;
+    const first = H.attempts[0];
+    for (const fp of M.frames) {
+      if (fp <= first) continue;
+      const P = R[fp];
+      if (String(P.n) !== H.nh) continue;
+      if (H.ack && H.ack.pos < fp) break;
+      const att = H.attempts.filter(x => x < fp);
+      const a = att[att.length - 1];
+      add('pack', fp, 1, `<span data-tip="passive">passive acknowledgement</span> for ${nameLabel(H.sender)} (attempt ${att.length}, #${fc16(R[a].fc)}): <b>${nameLabel(P.n)}</b> forwards it to ${addrLabel(P.d)} in frame #${fc16(P.fc)}`, '', { frame: fp, acks: a });
+      const f2 = fateAt(fp, H.sender), endPos = P._end ?? fp;
+      const late = lateNote(H, a, P.e, endPos);
+      let cnt = '';
+      if (f2 === 'ok') {
+        const c = counters(H.sender, P.e, P.e, ['acks_passive']);
+        cnt = c ? ` · counted at the sender (acks_passive +${c.acks_passive})` : ' · <i>no acks_passive increase at the sender</i>';
+      }
+      add('pack-rx', endPos, 2, `forward #${fc16(P.fc)} overheard by ${nameLabel(H.sender)}: ${fatePill(f2)}${late}${cnt}`, '', { fate: f2, late: !!late });
+      if (f2 === 'ok') { if (!H.ack || fp < H.ack.pos) H.ack = { kind: 'passive', pos: fp, late: !!late }; break; }
+    }
+  }
+  const seenErr = new Set();
+  for (const E of M.errors) {
+    if (seenErr.has(E.err)) continue;
+    seenErr.add(E.err);
+    const em = E.err ? D.msgs.get(E.err) : null;
+    add('err', E.pos, 0, `<span data-tip="error">Error</span> (port 4)${em ? ' from ' + addrLabel(em.o) : ''}: reason ${E.e[0]} — ${esc(reasonName(E.e[0]))}, next hop ${addrLabel(E.e[1])}${em ? ` · <a data-track="${esc(E.err)}">track the error</a>` : ''}`, 't-err');
+  }
+  for (const dp of M.dlv) {
+    const r = R[dp];
+    add('dlv', dp, 0, `<b>Delivered</b> at ${nameLabel(r.n)} by frame #${fc16(r.fc)} of ${addrLabel(r.s)}${M.sub !== null ? ', ' + fmtDur(r.t - M.t0) + ' after submission' : ''}`, 't-dlv');
+  }
+  for (const fp of M.fail) {
+    const r = R[fp];
+    add('fail', fp, 0, `<b>Failure</b> reported at ${nameLabel(r.n)}: reason ${r.why} — ${esc(reasonName(r.why))}`, 't-fail');
+  }
+  if (!M.dlv.length && !M.fail.length) add('note', D.N - 1, 0, M.errors.length ? 'No failure reported at the origin by the end of the trace.' : 'Neither delivered nor reported failed by the end of the trace.');
+  items.sort((a, b) => a.pos - b.pos || a.seq - b.seq);
+  const hopInfo = order.map(H => {
+    const lost = H.rx.filter(f => f !== 'ok');
+    const lostTxt = lost.length ? ', ' + Object.entries(lost.reduce((o, f) => (o[f] = (o[f] || 0) + 1, o), {})).map(([f, c]) => c + ' ' + f).join(', ') : '';
+    const ack = H.ack ? `${H.ack.kind} ack${H.ack.late ? ' (late)' : ''}` : (H.d === 0xFFFF ? '' : 'no ack received');
+    return { sender: H.sender, d: H.d, attempts: H.attempts.length, ack: H.ack,
+      html: `${nameLabel(H.sender)} → ${addrLabel(H.d)}: ${plural(H.attempts.length, 'attempt')}${lostTxt}${ack ? '; ' + ack : ''}` };
+  });
+  return (M._lc = { M, items, hops: hopInfo });
+}
+// Records of a message: lifecycle items, frames and their ends.
+function msgPositions(key) {
+  const M = D.msgs.get(key);
+  if (!M) return [];
+  if (M._pos) return M._pos;
+  const s = new Set();
+  for (const it of lifecycle(key).items) if (it.type !== 'note') s.add(it.pos);
+  for (const fp of M.frames) { s.add(fp); if (D.recs[fp]._end !== undefined) s.add(D.recs[fp]._end); }
+  return (M._pos = Int32Array.from([...s].sort((a, b) => a - b)));
+}
+// Records involving a node: its own records, frames sent to it and their ends, violations naming it.
+function nodePositions(key) {
+  if (D.nodePos.has(key)) return D.nodePos.get(key);
+  const node = D.nodeByKey.get(key), a = node ? node.a : undefined, out = [];
+  for (let p = 0; p < D.N; p++) {
+    const r = D.recs[p];
+    if (r.n !== undefined && String(r.n) === key) out.push(p);
+    else if (r.k === 'tx' && a !== undefined && r.d === a) out.push(p);
+    else if (r.k === 'end' && a !== undefined && r._tx !== undefined && D.recs[r._tx].d === a) out.push(p);
+    else if (r.k === 'viol' && Array.isArray(r.ns) && r.ns.some(x => String(x) === key || x === a)) out.push(p);
+    else if (r.k === 'link' && (String(r.s) === key || String(r.d) === key)) out.push(p);
+  }
+  const arr = Int32Array.from(out);
+  D.nodePos.set(key, arr);
+  return arr;
+}
+function troubleList() {
+  if (D.kl.trouble) return D.kl.trouble;
+  const out = [];
+  for (let p = 0; p < D.N; p++) {
+    const r = D.recs[p];
+    if ((r.k === 'end' && r.f && r.f.some(f => f !== 'ok')) || r.k === 'fail' || r.k === 'viol') out.push(p);
+  }
+  return (D.kl.trouble = Int32Array.from(out));
+}
+
+/* ======================================================================
+ * Cursor, stepping, playback
+ * ==================================================================== */
+const V = { pos: 0, t: 0, playing: false, speed: 1, lastTs: null, selNode: null, selMsg: null, selRec: null, selRx: null,
+  detail: null, state: null };
+const SPEEDS = [0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000];
+function posAtTime(t) {
+  const T = D.times;
+  let lo = 0, hi = D.N;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (T[m] <= t) lo = m + 1; else hi = m; }
+  return Math.max(0, lo - 1);
+}
+function setCursor(pos, t) {
+  if (!D) return;
+  pos = clamp(pos, 0, D.N - 1);
+  V.pos = pos;
+  V.t = (t === undefined || t === null) ? D.times[pos] : t;
+  V.state = stateAt(pos);
+  if (CHR.follow) chronoEnsureVisible(V.t);
+  invalidate('cursor');
+}
+function jumpTime(ms) { if (!D) return; ms = clamp(ms, D.t0, D.t1); setCursor(posAtTime(ms), ms); }
+function kindList(kind) {
+  switch (kind) {
+    case 'event': return J.rows;
+    case 'tx': return D.txs;
+    case 'state': return D.stateRecs;
+    case 'class1': return D.class1Recs;
+    case 'viol': return D.global;
+    case 'trouble': return troubleList();
+    case 'node': return V.selNode !== null ? nodePositions(V.selNode) : null;
+    case 'msg': return V.selMsg !== null ? msgPositions(V.selMsg) : null;
+  }
+  return null;
+}
+const KIND_TEXT = { event: 'journal event', tx: 'transmission', state: 'routing state change', class1: 'submission, delivery or failure',
+  viol: 'violation or scenario event', trouble: 'collision or failure', node: 'event of the selected node', msg: 'event of the selected message', record: 'record' };
+function step(kind, dir) {
+  if (!D) return;
+  if (kind === 'record') { setCursor(V.pos + dir); return; }
+  const list = kindList(kind);
+  if (!list) { flash(kind === 'node' ? 'select a node first (click its lane label or the graph)' : 'select a message first'); return; }
+  const i = dir > 0 ? upperBound(list, V.pos) : lowerBound(list, V.pos) - 1;
+  if (i < 0 || i >= list.length) { flash(`no ${dir > 0 ? 'next' : 'previous'} ${KIND_TEXT[kind] || kind}`); return; }
+  setCursor(list[i]);
+}
+function togglePlay(on) {
+  if (!D) return;
+  V.playing = on === undefined ? !V.playing : on;
+  if (V.playing && V.pos >= D.N - 1) setCursor(0);
+  V.lastTs = null;
+  $('#bPlay').textContent = V.playing ? '❚❚ Pause' : '▶ Play';
+  $('#bPlay').classList.toggle('on', V.playing);
+  invalidate('toolbar');
+}
+function advancePlay(ts) {
+  if (V.lastTs !== null) {
+    const dt = Math.min(0.25, (ts - V.lastTs) / 1000);
+    let t = V.t + dt * V.speed * 1000;
+    if (t >= D.t1) { t = D.t1; togglePlay(false); }
+    const p = posAtTime(t);
+    if (p !== V.pos) { V.pos = p; V.state = stateAt(p); }
+    V.t = t;
+    if (CHR.follow) chronoEnsureVisible(t);
+    markDirty('cursor');
+  }
+  V.lastTs = ts;
+}
+
+/* Render scheduling: parts redrawn at the next animation frame. */
+const dirty = new Set();
+let rafId = 0;
+const CURSOR_PARTS = ['chrono', 'graph', 'jcursor', 'details', 'lccursor', 'overview', 'toolbar'];
+function markDirty(...parts) {
+  for (const p of parts) {
+    if (p === 'all') ['chrono', 'graph', 'journal', 'details', 'lifecycle', 'overview', 'toolbar', 'msglist', 'summary'].forEach(x => dirty.add(x));
+    else if (p === 'cursor') CURSOR_PARTS.forEach(x => dirty.add(x));
+    else dirty.add(p);
+  }
+}
+function invalidate(...parts) { markDirty(...parts); if (!rafId) rafId = requestAnimationFrame(frame); }
+function frame(ts) {
+  rafId = 0;
+  if (D && V.playing) advancePlay(ts);
+  renderDirty();
+  if (V.playing) rafId = requestAnimationFrame(frame);
+}
+function renderDirty() {
+  const has = p => dirty.has(p);
+  if (has('summary')) renderSummary();
+  if (has('toolbar')) renderToolbar();
+  if (has('chrono')) renderChrono();
+  if (has('overview')) renderOverview();
+  if (has('graph')) renderGraph();
+  if (has('journal')) renderJournal(true); else if (has('jcursor')) renderJournal(false);
+  if (has('msglist')) renderMsgList();
+  if (has('lifecycle')) renderLifecycle(); else if (has('lccursor')) lifecycleCursor();
+  if (has('details')) renderDetails();
+  dirty.clear();
+}
+let flashTimer = 0;
+function flash(msg) {
+  const el = $('#curinfo');
+  el.dataset.flash = msg;
+  renderToolbar();
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { delete el.dataset.flash; renderToolbar(); }, 1600);
+}
+function renderToolbar() {
+  const el = $('#curinfo');
+  if (!D) { el.textContent = ''; return; }
+  if (el.dataset.flash) { el.innerHTML = `<span style="color:#b3261e">${esc(el.dataset.flash)}</span>`; return; }
+  const r = D.recs[V.pos];
+  el.innerHTML = `t = <b>${fmtT(V.t)}</b> · record ${fmtInt(V.pos)} / ${fmtInt(D.N - 1)} <span class="k">${esc(r.k)}</span> ${esc(shortRec(V.pos))}`;
+}
+
+/* ======================================================================
+ * Chronogram (canvas): one lane per node
+ * ==================================================================== */
+const CHR = { cv: null, ctx: null, W: 0, H: 0, dpr: 1, labelW: 96, axisH: 20, evH: 14, laneH: 18, lanes: [], laneOf: null,
+  scrollY: 0, t0: 0, t1: 1, follow: true, order: 'addr', showOk: true, showCs: true, showBo: true, drag: null, hover: null };
+function canvasResize(o, box) {
+  const r = box.getBoundingClientRect();
+  o.dpr = window.devicePixelRatio || 1;
+  o.W = Math.max(50, Math.floor(r.width));
+  o.H = Math.max(40, Math.floor(r.height));
+  o.cv.width = Math.round(o.W * o.dpr);
+  o.cv.height = Math.round(o.H * o.dpr);
+}
+const addrSort = node => node.root ? -1 : (node.kind === 'board' && typeof node.a === 'number' ? node.a : 1e6 + node.idx);
+// DODAG tree at state S: depth-first order from the root by preferred parents; the others apart.
+function treeOf(S) {
+  const kids = new Map(), roots = [], orphans = [];
+  for (const node of D.nodes) {
+    const s = S.n[node.idx];
+    if (!s || !s.exists) continue;
+    if (node.root) { roots.push(node); continue; }
+    if (node.kind !== 'board' || !s.up || s.p === null || s.p === undefined || detached(s)) { orphans.push(node); continue; }
+    const par = D.nodeByAddr.get(s.p);
+    if (!par || par === node) { orphans.push(node); continue; }
+    if (!kids.has(par.idx)) kids.set(par.idx, []);
+    kids.get(par.idx).push(node);
+  }
+  for (const v of kids.values()) v.sort((a, b) => addrSort(a) - addrSort(b));
+  const order = [], seen = new Set();
+  const walk = (node, depth) => {
+    if (seen.has(node.idx)) return;
+    seen.add(node.idx);
+    order.push({ node, depth });
+    for (const c of (kids.get(node.idx) || [])) walk(c, depth + 1);
+  };
+  roots.sort((a, b) => addrSort(a) - addrSort(b)).forEach(r => walk(r, 0));
+  const loose = D.nodes.filter(node => !seen.has(node.idx) && S.n[node.idx] && S.n[node.idx].exists).sort((a, b) => addrSort(a) - addrSort(b));
+  return { order, loose, kids };
+}
+function computeLanes() {
+  const S = V.state || D.finalState;
+  let nodes;
+  if (CHR.order === 'tree') {
+    const tr = treeOf(S);
+    nodes = tr.order.map(o => o.node).concat(tr.loose);
+    const inSet = new Set(nodes.map(n => n.idx));
+    nodes = nodes.concat(D.nodes.filter(n => !inSet.has(n.idx)).sort((a, b) => addrSort(a) - addrSort(b)));
+  } else if (CHR.order === 'rank') {
+    const rk = node => { const s = S.n[node.idx]; if (node.root) return -1; if (!s || !s.up || s.r === null) return 999; return s.r; };
+    nodes = D.nodes.slice().sort((a, b) => rk(a) - rk(b) || addrSort(a) - addrSort(b));
+  } else nodes = D.nodes.slice().sort((a, b) => addrSort(a) - addrSort(b));
+  CHR.lanes = nodes.map(n => n.idx);
+  CHR.laneOf = new Int32Array(D.nodes.length);
+  CHR.lanes.forEach((idx, li) => { CHR.laneOf[idx] = li; });
+}
+function chronoGeom() {
+  const n = CHR.lanes.length, avail = CHR.H - CHR.axisH - CHR.evH;
+  CHR.laneH = clamp(Math.floor(avail / Math.max(1, n)), 14, 40);
+  CHR.maxScroll = Math.max(0, n * CHR.laneH - avail);
+  CHR.scrollY = clamp(CHR.scrollY, 0, CHR.maxScroll);
+}
+const chX = t => CHR.labelW + (t - CHR.t0) * (CHR.W - CHR.labelW) / (CHR.t1 - CHR.t0);
+const chT = x => CHR.t0 + (x - CHR.labelW) * (CHR.t1 - CHR.t0) / (CHR.W - CHR.labelW);
+function setView(t0, t1) {
+  const full = D.t1 - D.t0;
+  const span = clamp(t1 - t0, 2, full * 1.5 + 1000);
+  t0 = clamp(t0, D.t0 - span * 0.5, D.t1 - span * 0.5);
+  CHR.t0 = t0; CHR.t1 = t0 + span;
+  invalidate('chrono', 'overview');
+}
+function chronoEnsureVisible(t) {
+  const span = CHR.t1 - CHR.t0;
+  if (t < CHR.t0 + span * 0.02 || t > CHR.t1 - span * 0.06) { CHR.t0 = t - span * 0.4; CHR.t1 = CHR.t0 + span; }
+}
+function zoomAround(tm, f) { setView(tm - (tm - CHR.t0) * f, tm + (CHR.t1 - tm) * f); }
+function niceStep(ms) { const p = Math.pow(10, Math.floor(Math.log10(ms))); for (const m of [1, 2, 5, 10]) if (m * p >= ms) return m * p; return 10 * p; }
+function stKind(r) {
+  const prev = r._prev;
+  if (!prev) return r.r === 255 ? 'detach' : (r.p !== null && r.p !== undefined ? 'parent' : 'rank');
+  if ((prev.r !== 255 && r.r === 255) || (prev.at === true && r.at === false)) return 'detach';
+  if (r.v !== prev.v) return 'version';
+  if ('p' in r && r.p !== prev.p) return 'parent';
+  if (r.r !== prev.r) return 'rank';
+  return 'set';
+}
+const ST_COL = { detach: '#d62828', parent: '#1f5fbf', version: '#0f8b8d', rank: '#4f5b66', set: '#9aa6b2' };
+function glyph(ctx, shape, x, y, s, fill) {
+  ctx.beginPath();
+  switch (shape) {
+    case 'diamond': ctx.moveTo(x, y - s); ctx.lineTo(x + s, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s, y); ctx.closePath(); break;
+    case 'down': ctx.moveTo(x - s, y - s * 0.8); ctx.lineTo(x + s, y - s * 0.8); ctx.lineTo(x, y + s); ctx.closePath(); break;
+    case 'up': ctx.moveTo(x - s, y + s * 0.8); ctx.lineTo(x + s, y + s * 0.8); ctx.lineTo(x, y - s); ctx.closePath(); break;
+    case 'square': ctx.rect(x - s * 0.75, y - s * 0.75, s * 1.5, s * 1.5); break;
+    case 'dot': ctx.arc(x, y, s * 0.55, 0, 2 * Math.PI); break;
+    case 'circle': ctx.arc(x, y, s * 0.85, 0, 2 * Math.PI); break;
+    case 'cross':
+      ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s); ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3.5; ctx.stroke(); ctx.strokeStyle = fill; ctx.lineWidth = 2; ctx.stroke();
+      return;
+  }
+  ctx.fillStyle = fill; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2; ctx.fill(); ctx.stroke();
+}
+function markerStyle(r) {
+  switch (r.k) {
+    case 'st': { const k = stKind(r); return { shape: k === 'detach' ? 'down' : k === 'version' ? 'square' : k === 'parent' ? 'diamond' : 'dot', col: ST_COL[k] }; }
+    case 'sub': return { shape: 'up', col: r.q < 0 ? '#8e44ad' : '#1d3557' };
+    case 'dlv': return { shape: 'circle', col: '#1f9d55' };
+    case 'fail': return { shape: 'cross', col: '#c0392b' };
+    case 'boot': return { shape: 'bar', col: '#2f9e44' };
+    case 'down': return { shape: 'bar', col: '#111' };
+  }
+  return { shape: 'dot', col: '#888' };
+}
+function renderChrono() {
+  const ctx = CHR.ctx, W = CHR.W, H = CHR.H;
+  ctx.setTransform(CHR.dpr, 0, 0, CHR.dpr, 0, 0);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, W, H);
+  if (!D) return;
+  if (CHR.order !== 'addr' || !CHR.laneOf) computeLanes();
+  chronoGeom();
+  const R = D.recs, T = D.times, pos = V.pos, curT = V.t, lh = CHR.laneH, top0 = CHR.axisH + CHR.evH, LW = CHR.labelW;
+  const t0 = CHR.t0, t1 = CHR.t1, kx = (W - LW) / (t1 - t0);
+  const X = t => LW + (t - t0) * kx;
+  const selM = V.selMsg !== null ? D.msgs.get(V.selMsg) : null;
+  const selFrames = selM && selM.frames.length ? new Set(selM.frames) : null;
+  let selAcks = null;
+  if (selM) { selAcks = new Set(); for (const fp of selM.frames) for (const ap of (R[fp]._ackedBy || [])) selAcks.add(ap); }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(LW, top0, W - LW, H - top0); ctx.clip();
+  const first = Math.max(0, Math.floor(CHR.scrollY / lh)), last = Math.min(CHR.lanes.length - 1, Math.ceil((CHR.scrollY + H - top0) / lh));
+  for (let li = first; li <= last; li++) {
+    const node = D.nodes[CHR.lanes[li]], L = node.lane, y = top0 + li * lh - CHR.scrollY;
+    if (node.key === V.selNode) { ctx.fillStyle = '#fff4c7'; ctx.fillRect(LW, y, W - LW, lh); }
+    else if (li & 1) { ctx.fillStyle = '#f5f7f9'; ctx.fillRect(LW, y, W - LW, lh); }
+    for (const dn of L.down) {
+      if (dn.t1 < t0 || dn.t0 > t1) continue;
+      const a = Math.max(LW, X(dn.t0)), b = Math.min(W, X(Math.min(dn.t1, D.t1)));
+      ctx.fillStyle = dn.pos <= pos ? '#cfd5dc' : '#e9ecef';
+      ctx.fillRect(a, y, b - a, lh);
+      ctx.fillStyle = dn.pos <= pos ? '#b5bec8' : '#dde1e5';
+      for (let xx = Math.floor(a / 8) * 8; xx < b; xx += 8) ctx.fillRect(xx, y + lh / 2, 4, 1);
+    }
+    const yTx = y + 2, hTx = Math.max(4, Math.round(lh * 0.36)), yMid = yTx + hTx + 1;
+    const yRx = y + Math.round(lh * 0.6), hRx = Math.max(3, Math.round(lh * 0.24));
+    if (CHR.showBo) {
+      const arr = L.bo;
+      for (let i = lowerBoundT(arr, t0 - D.maxBo); i < arr.length; i++) {
+        const p = arr[i], r = R[p];
+        if (r.t > t1) break;
+        const u = r.u || r.t;
+        if (u < t0) continue;
+        const a = X(r.t), b = Math.max(a + 1, X(u));
+        ctx.fillStyle = p <= pos ? (r.a === 0 ? '#c53030' : '#a5672b') : '#ead9c6';
+        ctx.fillRect(a, yMid + 1, b - a, 2);
+        ctx.fillRect(b - 1, yMid - 1, 1.2, 5);
+      }
+    }
+    if (CHR.showCs) {
+      const arr = L.cs;
+      let lastX = -9;
+      for (let i = lowerBoundT(arr, t0); i < arr.length; i++) {
+        const p = arr[i], r = R[p];
+        if (r.t > t1) break;
+        const x = Math.floor(X(r.t));
+        if (x === lastX && !r.b) continue;
+        lastX = x;
+        ctx.fillStyle = r.b ? (p <= pos ? '#b01e1e' : '#ebc0c0') : (p <= pos ? '#76869a' : '#dde2e7');
+        ctx.fillRect(x, yMid - 2, 1.2, r.b ? 6 : 4);
+      }
+    }
+    {
+      const arr = L.tx;
+      for (let i = lowerBoundT(arr, t0 - D.maxTx); i < arr.length; i++) {
+        const p = arr[i], r = R[p];
+        if (r.t > t1) break;
+        if (r.e < t0) continue;
+        const a = X(r.t);
+        let b = X(r.e);
+        if (b - a < 1.5) b = a + 1.5;
+        const fut = p > pos, cats = r._cats, sh = hTx / cats.length;
+        for (let j = 0; j < cats.length; j++) {
+          ctx.fillStyle = fut ? CAT_DIM[cats[j]] : CAT_COL[cats[j]];
+          ctx.fillRect(a, yTx + j * sh, b - a, Math.ceil(sh));
+        }
+        if (!fut && r.e > curT && r.t <= curT) {
+          const c = X(curT);
+          ctx.fillStyle = 'rgba(255,255,255,0.62)';
+          ctx.fillRect(c, yTx, b - c, hTx);
+          ctx.strokeStyle = '#111'; ctx.lineWidth = 1;
+          ctx.strokeRect(a + 0.5, yTx - 0.5, b - a - 1, hTx + 1);
+        }
+        if (V.selRec === p) { ctx.strokeStyle = '#e0119d'; ctx.lineWidth = 2; ctx.strokeRect(a - 1.5, yTx - 1.5, b - a + 3, hTx + 3); }
+        else if (selFrames && selFrames.has(p)) { ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.strokeRect(a - 1, yTx - 1, b - a + 2, hTx + 2); }
+        else if (selAcks && selAcks.has(p)) { ctx.strokeStyle = '#0b6b60'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 2]); ctx.strokeRect(a - 1, yTx - 1, b - a + 2, hTx + 2); ctx.setLineDash([]); }
+      }
+    }
+    {
+      let lastX = -9, lastPri = -1;
+      for (let j = lowerBound(L.rxT0, t0 - D.maxTx); j < L.rxN; j++) {
+        const s = L.rxT0[j];
+        if (s > t1) break;
+        const e = L.rxT1[j];
+        if (e < t0) continue;
+        const txp = L.rxTx[j], fut = txp > pos, endp = L.rxEnd[j];
+        let code = L.rxF[j];
+        if (!fut && (endp < 0 || endp > pos)) code = 0;
+        const hl = V.selRec === txp || (selFrames && selFrames.has(txp) && R[txp].d === node.a) || (selAcks && selAcks.has(txp));
+        if (code === 1 && !CHR.showOk && !hl) continue;
+        const a = X(s);
+        let w = X(e) - a;
+        const xi = a | 0, pri = FATE_PRI[code] + (fut ? 0 : 10);
+        if (w < 1.5) { if (xi === lastX && pri <= lastPri && !hl) continue; w = 1.5; }
+        lastX = xi; lastPri = pri;
+        ctx.fillStyle = fut ? FATE_DIM[code] : FATE_COL[code];
+        ctx.fillRect(a, yRx, w, hRx);
+        if (hl) { ctx.strokeStyle = V.selRec === txp ? '#e0119d' : '#000'; ctx.lineWidth = 1.5; ctx.strokeRect(a - 1, yRx - 1, w + 2, hRx + 2); }
+      }
+    }
+    {
+      const arr = L.mk, s = clamp(lh * 0.28, 3.5, 6), yG = y + lh - s - 1.5;
+      for (let i = lowerBoundT(arr, t0 - 1); i < arr.length; i++) {
+        const p = arr[i], r = R[p];
+        if (r.t > t1) break;
+        const x = X(r.t), st = markerStyle(r);
+        ctx.globalAlpha = p > pos ? 0.3 : 1;
+        if (st.shape === 'bar') { ctx.fillStyle = st.col; ctx.fillRect(x - 1, y, 2, lh); }
+        else glyph(ctx, st.shape, x, yG, s, st.col);
+        if (V.selRec === p) { ctx.strokeStyle = '#e0119d'; ctx.lineWidth = 2; ctx.strokeRect(x - s - 2, yG - s - 2, 2 * s + 4, 2 * s + 4); }
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+  // Selected message: arrows from each frame to its link destination, acknowledgements back (dashed).
+  if (selM) {
+    const laneY = idx => top0 + CHR.laneOf[idx] * lh - CHR.scrollY;
+    const arrow = (x, ya, yb, col, dash) => {
+      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.4; ctx.setLineDash(dash ? [4, 3] : []);
+      ctx.beginPath(); ctx.moveTo(x, ya); ctx.lineTo(x, yb); ctx.stroke(); ctx.setLineDash([]);
+      const d = yb > ya ? -1 : 1;
+      ctx.beginPath(); ctx.moveTo(x, yb); ctx.lineTo(x - 3.5, yb + d * 6); ctx.lineTo(x + 3.5, yb + d * 6); ctx.closePath(); ctx.fill();
+    };
+    for (const fp of selM.frames) {
+      const F = R[fp], snd = D.nodeByKey.get(String(F.n)), dst = D.nodeByAddr.get(F.d);
+      if (!snd || !dst || F.e < t0 || F.t > t1) continue;
+      const ya = laneY(snd.idx) + lh * 0.3, yb = laneY(dst.idx) + lh * 0.6;
+      arrow(X(F.e), ya, yb, fp <= pos ? '#000' : '#b7bec6', false);
+      for (const ap of (F._ackedBy || [])) {
+        const A = R[ap], ak = D.nodeByKey.get(String(A.n));
+        if (!ak || A.e < t0 || A.t > t1) continue;
+        arrow(X(A.e), laneY(ak.idx) + lh * 0.3, laneY(snd.idx) + lh * 0.6, ap <= pos ? '#0b6b60' : '#a9cfc9', true);
+      }
+    }
+  }
+  ctx.restore();
+  // Lane labels.
+  ctx.fillStyle = '#fbfcfd'; ctx.fillRect(0, top0, LW, H - top0);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, top0, LW, H - top0); ctx.clip();
+  ctx.textBaseline = 'middle';
+  const S = V.state;
+  for (let li = first; li <= last; li++) {
+    const node = D.nodes[CHR.lanes[li]], y = top0 + li * lh - CHR.scrollY, s = S ? S.n[node.idx] : null;
+    if (node.key === V.selNode) { ctx.fillStyle = '#ffe9a3'; ctx.fillRect(0, y, LW, lh); }
+    const down = s && (!s.up || !s.exists), det = s && !node.root && s.r !== null && detached(s);
+    ctx.font = (node.key === V.selNode ? '600 ' : '') + '12px ui-monospace, "DejaVu Sans Mono", monospace';
+    ctx.fillStyle = down ? '#9aa5b1' : det ? '#c0392b' : '#1d2733';
+    ctx.fillText(nameLabel(node.n), 6, y + lh / 2);
+    ctx.font = '10.5px system-ui, sans-serif';
+    ctx.fillStyle = '#6c7884';
+    const rk = !s ? '' : down ? 'down' : s.r === null ? '' : s.r === 255 ? 'r 255' : 'r ' + s.r;
+    ctx.textAlign = 'right'; ctx.fillText(rk, LW - 5, y + lh / 2); ctx.textAlign = 'left';
+    ctx.fillStyle = '#e7eaee'; ctx.fillRect(0, y + lh - 0.5, W, 0.5);
+  }
+  ctx.restore();
+  ctx.fillStyle = '#d5dbe2'; ctx.fillRect(LW, top0, 1, H - top0);
+  // Axis and events row.
+  ctx.fillStyle = '#f6f8fa'; ctx.fillRect(0, 0, W, top0);
+  ctx.fillStyle = '#d5dbe2'; ctx.fillRect(0, top0 - 0.5, W, 0.5); ctx.fillRect(0, CHR.axisH - 0.5, W, 0.5);
+  const stepMs = niceStep((t1 - t0) / Math.max(1, (W - LW) / 90));
+  ctx.font = '10.5px system-ui, sans-serif'; ctx.fillStyle = '#5b6672'; ctx.textBaseline = 'middle';
+  const dec = stepMs >= 1000 ? 0 : stepMs >= 100 ? 1 : stepMs >= 10 ? 2 : 3;
+  for (let t = Math.ceil(t0 / stepMs) * stepMs; t <= t1; t += stepMs) {
+    const x = X(t);
+    if (x < LW) continue;
+    ctx.fillStyle = '#c3cbd4'; ctx.fillRect(x, CHR.axisH - 5, 1, 5);
+    ctx.fillStyle = 'rgba(0,0,0,0.045)'; ctx.fillRect(x, top0, 1, H - top0);
+    ctx.fillStyle = '#5b6672'; ctx.fillText((t / 1000).toFixed(dec) + ' s', x + 3, CHR.axisH / 2);
+  }
+  ctx.fillStyle = '#5b6672'; ctx.fillText(`${fmtDur(t1 - t0)} shown`, 6, CHR.axisH / 2);
+  ctx.fillText('events', 6, CHR.axisH + CHR.evH / 2);
+  for (const p of D.global) {
+    const r = R[p];
+    if (r.t < t0 || r.t > t1) continue;
+    ctx.globalAlpha = p > pos ? 0.35 : 1;
+    glyph(ctx, 'down', X(r.t), CHR.axisH + CHR.evH / 2, 5, r.k === 'viol' ? '#d0021b' : '#2457a6');
+    if (V.selRec === p) { ctx.strokeStyle = '#e0119d'; ctx.lineWidth = 2; ctx.strokeRect(X(r.t) - 7, CHR.axisH, 14, CHR.evH); }
+  }
+  ctx.globalAlpha = 1;
+  // Cursor.
+  const xc = X(curT);
+  if (xc >= LW && xc <= W) {
+    ctx.fillStyle = '#2457a6'; ctx.fillRect(xc - 0.75, CHR.axisH, 1.5, H - CHR.axisH);
+    const lbl = fmtT(curT);
+    ctx.font = '600 10.5px system-ui, sans-serif';
+    const tw = ctx.measureText(lbl).width + 8;
+    const bx = Math.min(W - tw, xc - tw / 2);
+    ctx.fillStyle = '#2457a6'; ctx.fillRect(bx, 1, tw, CHR.axisH - 3);
+    ctx.fillStyle = '#fff'; ctx.fillText(lbl, bx + 4, CHR.axisH / 2);
+  }
+  // Lane scroll indicator.
+  if (CHR.maxScroll > 0) {
+    const vh = H - top0, total = CHR.lanes.length * lh, bh = Math.max(20, vh * vh / total), by = top0 + (vh - bh) * CHR.scrollY / CHR.maxScroll;
+    ctx.fillStyle = 'rgba(60,80,100,0.35)'; ctx.fillRect(W - 5, by, 4, bh);
+  }
+}
+// Item of the chronogram under the mouse.
+function chronoHit(mx, my) {
+  if (!D) return null;
+  const top0 = CHR.axisH + CHR.evH, tolPx = 4, k = (CHR.t1 - CHR.t0) / (CHR.W - CHR.labelW), tol = tolPx * k, t = chT(mx), R = D.recs;
+  if (my < CHR.axisH) return null;
+  if (my < top0) {
+    let best = null, bd = 7 * k;
+    for (const p of D.global) { const d = Math.abs(D.times[p] - t); if (d <= bd) { bd = d; best = p; } }
+    return best !== null ? { type: 'rec', pos: best } : null;
+  }
+  const li = Math.floor((my - top0 + CHR.scrollY) / CHR.laneH);
+  if (li < 0 || li >= CHR.lanes.length) return null;
+  const node = D.nodes[CHR.lanes[li]], L = node.lane, lh = CHR.laneH, yIn = (my - top0 + CHR.scrollY) - li * lh;
+  if (mx < CHR.labelW) return { type: 'node', key: node.key };
+  if (yIn > lh * 0.55) {
+    let best = null, bd = 7 * k;
+    for (let i = lowerBoundT(L.mk, t - bd); i < L.mk.length && D.times[L.mk[i]] <= t + bd; i++) {
+      const d = Math.abs(D.times[L.mk[i]] - t);
+      if (d <= bd) { bd = d; best = L.mk[i]; }
+    }
+    if (best !== null) return { type: 'rec', pos: best };
+  }
+  if (yIn < lh * 0.5) {
+    let best = null;
+    for (let i = lowerBoundT(L.tx, t - D.maxTx - tol); i < L.tx.length; i++) {
+      const r = R[L.tx[i]];
+      if (r.t > t + tol) break;
+      if (r.e >= t - tol) best = L.tx[i];
+    }
+    if (best !== null) return { type: 'rec', pos: best };
+    let cs = null, bd = tol;
+    for (let i = lowerBoundT(L.cs, t - tol); i < L.cs.length && D.times[L.cs[i]] <= t + tol; i++) {
+      const d = Math.abs(D.times[L.cs[i]] - t); if (d <= bd) { bd = d; cs = L.cs[i]; }
+    }
+    if (cs !== null && CHR.showCs) return { type: 'rec', pos: cs };
+    if (CHR.showBo) for (let i = lowerBoundT(L.bo, t - D.maxBo); i < L.bo.length; i++) {
+      const r = R[L.bo[i]];
+      if (r.t > t + tol) break;
+      if ((r.u || r.t) >= t - tol) best = L.bo[i];
+    }
+    if (best !== null) return { type: 'rec', pos: best };
+  } else {
+    let best = -1;
+    for (let j = lowerBound(L.rxT0, t - D.maxTx - tol); j < L.rxN; j++) {
+      if (L.rxT0[j] > t + tol) break;
+      if (L.rxT1[j] >= t - tol) best = j;
+    }
+    if (best >= 0) return { type: 'rx', pos: L.rxTx[best], k: L.rxK[best], node: node.key };
+  }
+  return { type: 'empty', t, node: node.key };
+}
+function hitTip(h) {
+  if (!h) return null;
+  if (h.type === 'node') return nodeTip(h.key);
+  if (h.type === 'empty') return null;
+  const r = D.recs[h.pos];
+  if (h.type === 'rx') {
+    const F = r, rx = F.rx[h.k], e = F._end !== undefined ? D.recs[F._end] : null;
+    const fate = e && e.f ? e.f[h.k] : 'unknown';
+    const known = e && F._end <= V.pos;
+    return `<b>Reception at ${esc(nameLabel(rx[0]))}</b> of frame #${fc16(F.fc)} from ${esc(nameLabel(F.n))}<br>` +
+      `fate: <b>${esc(fate)}</b>${known ? '' : ' <span class="t2">(after the cursor)</span>'} · ${rx[1]} dBm, SNR ${rx[2]} dB<br>` +
+      `<span class="t2">${esc(TIPS['f-' + fate] || '')}</span><br>${frameTipBody(F)}`;
+  }
+  if (r.k === 'tx') return frameTipBody(r, true);
+  return `<b>${esc(fmtT(r.t))}</b> ${esc(jText(h.pos))}`;
+}
+function frameTipBody(F, full) {
+  const e = F._end !== undefined ? D.recs[F._end] : null;
+  let fates = '';
+  if (e && e.f) {
+    const c = {};
+    for (const f of e.f) c[f] = (c[f] || 0) + 1;
+    fates = Object.entries(c).map(([f, n]) => n + ' ' + f).join(', ');
+  }
+  return `${full ? '<b>' : ''}${esc(nameLabel(F.n))} → ${esc(addrLabel(F.d))}${full ? '</b>' : ''} · frame #${F.fc !== undefined ? fc16(F.fc) : '?'} · ${F.len} B · ${F.e - F.t} ms · rank ${F.r ?? '?'}<br>` +
+    `${fmtT(F.t)} → ${fmtT(F.e)}<br>${esc(frameSummary(F, 4))}` + (fates ? `<br><span class="t2">receptions: ${esc(fates)}</span>` : '');
+}
+
+/* ======================================================================
+ * Overview strip: the whole trace
+ * ==================================================================== */
+const OV = { cv: null, ctx: null, W: 0, H: 0, dpr: 1 };
+function renderOverview() {
+  const ctx = OV.ctx, W = OV.W, H = OV.H;
+  ctx.setTransform(OV.dpr, 0, 0, OV.dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  if (!D) return;
+  const { B, air, col } = D.ov, span = D.t1 - D.t0, binMs = span / B;
+  let maxCol = 1;
+  for (let i = 0; i < B; i++) if (col[i] > maxCol) maxCol = col[i];
+  const X = t => (t - D.t0) / span * W;
+  for (let i = 0; i < B; i++) {
+    const x = i / B * W, w = Math.max(1, W / B + 0.5);
+    const u = Math.min(1, air[i] / binMs / 2);
+    if (u > 0) { ctx.fillStyle = '#9fadbd'; const h = Math.max(1, u * (H - 8)); ctx.fillRect(x, H - h, w, h); }
+    if (col[i] > 0) { ctx.fillStyle = '#e3342f'; const h = Math.max(1.5, Math.sqrt(col[i] / maxCol) * (H - 10) * 0.6); ctx.fillRect(x, 0, w, h); }
+  }
+  for (const node of D.nodes) for (const dn of node.lane.down) { ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fillRect(X(dn.t0), H - 4, Math.max(2, X(Math.min(dn.t1, D.t1)) - X(dn.t0)), 4); }
+  for (const p of D.global) { const r = D.recs[p]; glyph(ctx, 'down', X(r.t), 5, 4, r.k === 'viol' ? '#d0021b' : '#2457a6'); }
+  ctx.fillStyle = 'rgba(36,87,166,0.12)'; ctx.strokeStyle = 'rgba(36,87,166,0.7)'; ctx.lineWidth = 1;
+  const a = X(CHR.t0), b = X(CHR.t1);
+  ctx.fillRect(a, 0, Math.max(2, b - a), H); ctx.strokeRect(a + 0.5, 0.5, Math.max(2, b - a) - 1, H - 1);
+  ctx.fillStyle = '#2457a6'; ctx.fillRect(X(V.t) - 1, 0, 2, H);
+  ctx.strokeStyle = '#d5dbe2'; ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+}
+
+/* ======================================================================
+ * Context graph (canvas)
+ * ==================================================================== */
+const GR = { cv: null, ctx: null, W: 0, H: 0, dpr: 1, layout: 'auto', links: 'all', xy: [], hover: null };
+function graphMode() {
+  if (GR.layout !== 'auto') return GR.layout === 'pos' && !D.hasPos ? 'tree' : GR.layout;
+  if (D.hasPos) return 'pos';
+  return D.recs.some(r => r.k === 'st' && r.p !== undefined && r.p !== null) ? 'tree' : 'circle';
+}
+function graphLayout(S) {
+  const W = GR.W, H = GR.H, m = 26, xy = new Array(D.nodes.length);
+  const mode = graphMode();
+  if (mode === 'pos') {
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const node of D.nodes) { const [x, y] = node.pos; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    // Stretched to the panel: the positions are abstract (scripted links), spreading them keeps labels apart.
+    const sx = (x1 - x0) || 1, sy = (y1 - y0) || 1, kx = (W - 2 * m) / sx, ky = (H - 2 * m - 12) / sy;
+    for (const node of D.nodes) xy[node.idx] = [m + (node.pos[0] - x0) * kx, m + (node.pos[1] - y0) * ky];
+  } else if (mode === 'circle') {
+    const others = D.nodes.filter(n => !n.root).sort((a, b) => addrSort(a) - addrSort(b));
+    const cx = W / 2, cy = H / 2, rad = Math.max(10, Math.min(W, H) / 2 - m);
+    D.nodes.filter(n => n.root).forEach((node, i) => { xy[node.idx] = [cx + i * 24, cy]; });
+    others.forEach((node, i) => { const a = -Math.PI / 2 + 2 * Math.PI * i / others.length; xy[node.idx] = [cx + rad * Math.cos(a), cy + rad * Math.sin(a)]; });
+  } else {
+    const tr = treeOf(S), rows = [];
+    const perRow = Math.max(3, Math.floor((W - 2 * m) / 34));
+    const levels = [];
+    for (const o of tr.order) { (levels[o.depth] || (levels[o.depth] = [])).push(o.node); }
+    if (tr.loose.length) levels.push(tr.loose.map(node => node));
+    const looseRow = tr.loose.length ? levels.length - 1 : -1;
+    levels.forEach((lv, li) => {
+      if (!lv) return;
+      for (let i = 0; i < lv.length; i += perRow) rows.push({ nodes: lv.slice(i, i + perRow), loose: li === looseRow, stagger: i > 0 });
+    });
+    const n = rows.length, gap = n > 1 ? (H - 2 * m - 12) / (n - 1) : 0;
+    rows.forEach((row, ri) => {
+      const y = n > 1 ? m + ri * gap : H / 2;
+      const c = row.nodes.length;
+      row.nodes.forEach((node, i) => { xy[node.idx] = [m + (W - 2 * m) * (c === 1 ? 0.5 : (i + 0.5) / c), y]; });
+    });
+    GR.looseY = looseRow >= 0 ? rows.findIndex(r => r.loose) : -1;
+    if (GR.looseY >= 0) GR.looseY = n > 1 ? m + GR.looseY * gap : H / 2;
+  }
+  for (const node of D.nodes) if (!xy[node.idx]) xy[node.idx] = [W - m, H - m];
+  GR.mode = mode;
+  return xy;
+}
+function arrowLine(ctx, x1, y1, x2, y2, shorten, head, col, w, dash) {
+  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+  const ax = x1 + ux * shorten, ay = y1 + uy * shorten, bx = x2 - ux * shorten, by = y2 - uy * shorten;
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash || []);
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); ctx.setLineDash([]);
+  if (head) {
+    ctx.beginPath(); ctx.moveTo(bx, by);
+    ctx.lineTo(bx - ux * head - uy * head * 0.55, by - uy * head + ux * head * 0.55);
+    ctx.lineTo(bx - ux * head + uy * head * 0.55, by - uy * head - ux * head * 0.55);
+    ctx.closePath(); ctx.fill();
+  }
+}
+// Transmissions on air at the cursor (started at or before it, ending at or after it).
+function onAir() {
+  const out = [], R = D.recs, t = V.t;
+  for (let i = upperBound(D.txs, V.pos) - 1; i >= 0; i--) {
+    const p = D.txs[i], r = R[p];
+    if (r.t < t - D.maxTx - 1) break;
+    if (r.e >= t) out.push(p);
+  }
+  return out;
+}
+function renderGraph() {
+  const ctx = GR.ctx, W = GR.W, H = GR.H;
+  ctx.setTransform(GR.dpr, 0, 0, GR.dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  if (!D) return;
+  const S = V.state, R = D.recs, xy = GR.xy = graphLayout(S), rN = 8;
+  const P = node => xy[node.idx];
+  if (GR.mode === 'tree' && GR.looseY >= 0) {
+    ctx.font = '10.5px system-ui, sans-serif'; ctx.fillStyle = '#8a96a3'; ctx.textBaseline = 'middle';
+    ctx.fillText('not connected to the root', 4, GR.looseY - 16);
+  }
+  // Links.
+  if (GR.links !== 'none') {
+    const links = linksAt(V.pos), done = new Set();
+    for (const l of links.values()) {
+      const a = D.nodeByKey.get(String(l.s)), b = D.nodeByKey.get(String(l.d));
+      if (!a || !b) continue;
+      const k = a.idx < b.idx ? a.idx + '-' + b.idx : b.idx + '-' + a.idx;
+      if (done.has(k)) continue;
+      done.add(k);
+      if (GR.links === 'sel' && a.key !== V.selNode && b.key !== V.selNode) continue;
+      const back = links.get(l.d + '>' + l.s);
+      const cut = !l.up || (back && !back.up);
+      const [x1, y1] = P(a), [x2, y2] = P(b);
+      ctx.strokeStyle = cut ? '#e58e8e' : (GR.links === 'sel' ? '#9fb0c2' : 'rgba(150,165,180,0.35)');
+      ctx.lineWidth = cut ? 1.2 : 1;
+      ctx.setLineDash(cut ? [4, 3] : (back ? [] : [1, 3]));
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  // Parent sets (dashed) and preferred parents (arrows).
+  for (const node of D.nodes) {
+    const s = S.n[node.idx];
+    if (!s || !s.exists || !s.up || node.root) continue;
+    for (const a of (s.ps || []).slice(1)) { const q = D.nodeByAddr.get(a); if (q) arrowLine(ctx, ...P(node), ...P(q), rN + 1, 0, 'rgba(43,108,176,0.45)', 1, [3, 3]); }
+    if (s.p !== null && s.p !== undefined && !detached(s)) { const q = D.nodeByAddr.get(s.p); if (q) arrowLine(ctx, ...P(node), ...P(q), rN + 2, 7, '#2b6cb0', 1.8); }
+  }
+  // Selected message: its frames up to the cursor (black) and after (grey).
+  if (V.selMsg !== null) {
+    const M = D.msgs.get(V.selMsg);
+    if (M) for (const fp of M.frames) {
+      const F = R[fp], a = D.nodeByKey.get(String(F.n)), b = D.nodeByAddr.get(F.d);
+      if (!a || !b) continue;
+      arrowLine(ctx, ...P(a), ...P(b), rN + 3, 9, fp <= V.pos ? 'rgba(226,115,33,0.95)' : 'rgba(226,115,33,0.3)', fp <= V.pos ? 3.2 : 2, fp <= V.pos ? [] : [5, 4]);
+    }
+  }
+  // Frames on air at the cursor: sender to receivers, coloured by fate once known.
+  const air = onAir();
+  for (const p of air) {
+    const F = R[p], snd = D.nodeByKey.get(String(F.n));
+    if (!snd) continue;
+    const known = F._end !== undefined && F._end <= V.pos, e = known ? R[F._end] : null;
+    (F.rx || []).forEach((x, k) => {
+      const rcv = D.nodeByKey.get(String(x[0]));
+      if (!rcv) return;
+      const code = e ? (FATE_CODE[e.f[k]] || 0) : 0, nh = rcv.a === F.d;
+      arrowLine(ctx, ...P(snd), ...P(rcv), rN + 1, nh ? 8 : 5, FATE_COL[code], nh ? 3 : 1.6, known ? [] : [5, 3]);
+    });
+    const [x, y] = P(snd);
+    ctx.strokeStyle = CAT_COL[F._cats[0]]; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(x, y, rN + 5, 0, 2 * Math.PI); ctx.stroke();
+  }
+  // Nodes.
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  for (const node of D.nodes) {
+    const s = S.n[node.idx];
+    if (!s || !s.exists) continue;
+    const [x, y] = P(node), down = !s.up, det = !node.root && s.r !== null && detached(s);
+    ctx.lineWidth = node.key === V.selNode ? 3 : 1.5;
+    ctx.strokeStyle = node.key === V.selNode ? '#d39e00' : down ? '#8a96a3' : det ? '#c0392b' : '#33414f';
+    ctx.fillStyle = down ? '#d5dbe2' : det ? '#fde0de' : node.root ? '#1e2935' : '#ffffff';
+    ctx.setLineDash(node.kind === 'sniffer' ? [2, 2] : []);
+    ctx.beginPath();
+    if (node.root) ctx.rect(x - rN - 1, y - rN - 1, 2 * rN + 2, 2 * rN + 2); else ctx.arc(x, y, rN, 0, 2 * Math.PI);
+    ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+    if (down) { ctx.strokeStyle = '#5b6672'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5); ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke(); }
+    ctx.font = '600 9px system-ui, sans-serif';
+    ctx.fillStyle = node.root ? '#fff' : '#1d2733';
+    if (s.r !== null && !down) ctx.fillText(s.r === 255 ? '∞' : String(s.r), x, y + 0.5);
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillStyle = down ? '#8a96a3' : det ? '#c0392b' : '#3c4855';
+    const lbl = node.root ? 'root' : (node.kind === 'board' ? hex4(node.a).slice(2) : String(node.n));
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.strokeText(lbl, x, y + rN + 8);
+    ctx.fillText(lbl, x, y + rN + 8);
+  }
+  ctx.textAlign = 'left';
+  ctx.font = '10.5px system-ui, sans-serif'; ctx.fillStyle = '#8a96a3';
+  ctx.fillText(`${GR.mode === 'pos' ? 'positions from the header' : GR.mode === 'tree' ? 'DODAG tree at the cursor' : 'circle'} · numbers: rank`, 6, H - 8);
+}
+function graphHit(mx, my) {
+  if (!D || !GR.xy.length) return null;
+  let best = null, bd = 13;
+  for (const node of D.nodes) {
+    const p = GR.xy[node.idx];
+    if (!p) continue;
+    const d = Math.hypot(p[0] - mx, p[1] - my);
+    if (d < bd) { bd = d; best = node.key; }
+  }
+  return best;
+}
+function nodeTip(key) {
+  const node = D.nodeByKey.get(key);
+  if (!node) return '';
+  const s = V.state ? V.state.n[node.idx] : null;
+  let h = `<b>${esc(nameLabel(node.n))}</b>${node.kind === 'sniffer' ? ' (sniffer)' : ''}${String(node.a) !== key && node.kind === 'board' ? ` <span class="t2">medium name ${esc(key)}</span>` : ''}<br>`;
+  if (s) {
+    if (!s.exists) h += 'not yet added';
+    else if (!s.up) h += `down (${esc(s.how || '')}) since ${fmtT(s.downT)}`;
+    else {
+      h += `rank ${s.r ?? '?'}${s.r === 255 ? ' (no route)' : ''} · version ${s.v ?? '?'}`;
+      if (s.p !== null && s.p !== undefined) h += ` · preferred parent ${addrLabel(s.p)}`;
+      if (s.ps && s.ps.length) h += `<br>parent set ${s.ps.map(addrLabel).join(', ')}`;
+      if (s.at !== null) h += `<br>${s.at ? 'attached' : 'detached'} · queue ${s.q}`;
+    }
+  }
+  return h;
+}
+/* ======================================================================
+ * Text of the records (journal, tooltips, details)
+ * ==================================================================== */
+const rk = r => r === null || r === undefined ? '?' : r === 255 ? '255 (no route)' : String(r);
+function ackPhrase(m) {
+  const by = new Map();
+  for (const a of (m.a || [])) { if (!by.has(a[0])) by.set(a[0], []); by.get(a[0]).push('#' + a[1]); }
+  return [...by].map(([s, l]) => `${l.join(', ')} of ${addrLabel(s)}`).join('; ') || 'nothing';
+}
+function pfShort(f) { const l = []; for (let b = 0; b < 8; b++) if (f & (1 << b)) l.push(PRESENCE_FLAGS[b]); return l.join(', '); }
+function msgPhrase(m, F) {
+  switch (m.p) {
+    case 9: return m.sol ? 'solicitation' : (m.di ? `DODAG information (presence ${m.di[1]} s, Imin ${m.di[3]} slots)` : 'DODAG information');
+    case 1: return `presence of ${addrLabel(m.o)}${m.pp !== undefined ? ' (parent ' + addrLabel(m.pp) + ')' : ''}${m.pf ? ', flags: ' + pfShort(m.pf) : ''}`;
+    case 2: return `topology of ${addrLabel(m.o)}`;
+    case 3: return 'explicit ack of ' + ackPhrase(m);
+    case 4: return m.e ? `error about ${addrLabel(m.e[2])} → ${addrLabel(m.e[3])} port ${m.e[4]} seq ${m.e[5]}: ${reasonName(m.e[0])}` : 'error (not decoded)';
+  }
+  const id = identity(m, F.s, F.d);
+  const head = m.p >= 16 ? `class ${m.c} data port ${m.p}` : `${portName(m.p)} (port ${m.p}), class ${m.c}`;
+  return head + (id ? `, ${addrLabel(id[0])} → ${addrLabel(id[1])}, seq ${m.q}` : '') + (m.r && m.r.length ? ', route ' + m.r.map(addrLabel).join(' ') : '') + (m.bad ? ' (payload not decoded)' : '');
+}
+function frameSummary(F, max) {
+  if (F.err) return `undecodable frame (${F.err})`;
+  const ms = F.m || [];
+  if (!ms.length) return 'no message';
+  if (ms.length <= max) return ms.map(m => msgPhrase(m, F)).join('; ');
+  const g = new Map();
+  for (const m of ms) {
+    const k = m.p + ':' + m.c;
+    if (!g.has(k)) g.set(k, { m, n: 0, ids: [] });
+    const e = g.get(k);
+    e.n++;
+    const id = identity(m, F.s, F.d);
+    e.ids.push(m.q !== undefined && id ? `${addrLabel(id[0])} seq ${m.q}` : addrLabel(m.o));
+  }
+  return [...g.values()].map(e => {
+    const what = e.m.p >= 16 ? `class ${e.m.c} data port ${e.m.p}` : portName(e.m.p);
+    return `${e.n} × ${what} (${e.ids.slice(0, 3).join(', ')}${e.n > 3 ? ', …' : ''})`;
+  }).join('; ');
+}
+function fateSummary(F, e) {
+  const rx = F.rx || [], f = e.f || [], N = nameLabel;
+  if (!rx.length) return 'no receiver';
+  if (rx.length <= 6) return rx.map((x, k) => `${N(x[0])} ${f[k] || '?'}${f[k] === 'ok' ? ' ' + x[1] + ' dBm' : ''}`).join(' / ');
+  const c = {}, bad = [];
+  let nh = '';
+  rx.forEach((x, k) => {
+    c[f[k]] = (c[f[k]] || 0) + 1;
+    const node = D.nodeByKey.get(String(x[0]));
+    if (node && node.a === F.d) nh = `next hop ${N(x[0])} ${f[k]}; `;
+    if (f[k] !== 'ok') bad.push(`${N(x[0])} ${f[k]}`);
+  });
+  return nh + Object.entries(c).map(([k, n]) => n + ' ' + k).join(', ') + (bad.length ? ' (' + bad.slice(0, 5).join(', ') + (bad.length > 5 ? ', …' : '') + ')' : '');
+}
+function stText(r) {
+  const prev = r._prev, who = nameLabel(r.n);
+  const ps = l => '[' + (l || []).map(addrLabel).join(', ') + ']';
+  if (!prev) {
+    return `${who} state: rank ${rk(r.r)}, version ${r.v}` + ('p' in r ? (r.p !== null && r.p !== undefined ? `, preferred parent ${addrLabel(r.p)}` : ', no parent') +
+      (r.ps && r.ps.length ? ', parent set ' + ps(r.ps) : '') : '');
+  }
+  const bits = [];
+  if (r.v !== prev.v) bits.push(`adopts DODAG version ${r.v}`);
+  const pc = 'p' in r && r.p !== prev.p;
+  if (pc) {
+    if (r.p === null || r.p === undefined) bits.push(`loses its preferred parent ${addrLabel(prev.p)}`);
+    else if (prev.p === null || prev.p === undefined) bits.push(`chooses ${addrLabel(r.p)} as preferred parent`);
+    else bits.push(`switches preferred parent ${addrLabel(prev.p)} → ${addrLabel(r.p)}`);
+  }
+  if ('at' in r && r.at !== prev.at) bits.push(r.at ? 'attaches' : 'detaches');
+  if (r.r !== prev.r) bits.push(`rank ${rk(prev.r)} → ${rk(r.r)}`);
+  if ('ps' in r && JSON.stringify(r.ps) !== JSON.stringify(prev.ps)) bits.push('parent set ' + ps(r.ps));
+  if (!bits.length) bits.push('state recorded again');
+  return who + ' ' + bits.join(', ');
+}
+function scnArg(a) {
+  if (Array.isArray(a)) return a.map(scnArg).join(', ');
+  if (typeof a === 'number' && D.nodeByKey.has(String(a))) return nameLabel(a);
+  return typeof a === 'string' ? a : JSON.stringify(a);
+}
+function jText(p) {
+  const r = D.recs[p], N = nameLabel;
+  switch (r.k) {
+    case 'hdr': return `trace start: ${r.label || D.fileName}, ${plural(D.nodes.length, 'node')}, SF${r.sf ?? '?'}, ${r.profile ? r.profile.name : ''}, seed ${r.seed ?? '?'}`;
+    case 'tx': return `${N(r.n)} → ${addrLabel(r.d)}  #${r.fc !== undefined ? fc16(r.fc) : '?'}, ${r.len} B, ${r.e - r.t} ms, rank ${r.r ?? '?'}: ${frameSummary(r, 3)}${r.sn ? ' (sniffer replay)' : ''}${r.fk ? ' (opened by a foreign key)' : ''}`;
+    case 'end': {
+      const F = r._tx !== undefined ? D.recs[r._tx] : null;
+      if (!F) return `↳ end of a frame of ${N(r.n)} begun before the recorder: ${(r.f || []).join(', ')}`;
+      return `↳ #${fc16(F.fc)} of ${N(F.n)} ends: ${fateSummary(F, r)}`;
+    }
+    case 'cs': return `${N(r.n)} senses the channel: ${r.b ? 'busy' : 'free'}`;
+    case 'bo': return r.a === 0 ? `${N(r.n)} gives up the access after 6 busy senses; new procedure after a backoff until ${fmtT(r.u)}`
+      : `${N(r.n)} backs off ${fmtDur(r.u - r.t)}, until ${fmtT(r.u)} (busy sense ${r.a} of 6)`;
+    case 'st': return stText(r);
+    case 'q': return `${N(r.n)} transmit queue: ${plural(r.q, 'message')}`;
+    case 'cnt': return `${N(r.n)} counters: ` + Object.entries(r.c || {}).map(([k, v]) => `${k} +${v}`).join(', ');
+    case 'sub': return r.q >= 0 ? `${N(r.n)} submits ${portLabel(r.p)}, class ${r.c}, ${r.len} B → ${addrLabel(r.d)}: sequence ${r.q}`
+      : `${N(r.n)}: submission refused, ${portLabel(r.p)} class ${r.c} → ${addrLabel(r.d)}: ${r.q} ${reasonName(r.q)}`;
+    case 'dlv': return `${N(r.n)} delivers ${portLabel(r.p)} seq ${r.q} from ${addrLabel(r.o)}, ${r.len} B (frame #${fc16(r.fc)} of ${addrLabel(r.s)})`;
+    case 'fail': return `${N(r.n)}: failure of ${portLabel(r.p)} seq ${r.q} → ${addrLabel(r.d)}: reason ${r.why}, ${reasonName(r.why)}`;
+    case 'boot': return `${N(r.n)} boots (boot ${r.b})`;
+    case 'down': return `${N(r.n)} goes down: ${r.how === 'power' ? 'power loss' : r.how}, off ${fmtDur(r.off)}`;
+    case 'node': return `node ${N(r.n)} added (${r.kind})`;
+    case 'link': return `link ${N(r.s)} → ${N(r.d)} ${r.up ? 'up' : 'cut'} (loss ${Math.round((r.loss || 0) * 100)} %, ${r.rssi} dBm, SNR ${r.snr} dB)`;
+    case 'viol': return `VIOLATION ${r.chk} (${(r.ns || []).map(N).join(', ')}): ${r.why}`;
+    case 'scn': return `scenario: ${r.what}${r.arg !== undefined && r.arg !== null ? ' ' + scnArg(r.arg) : ''}`;
+    case 'eof': return 'end of trace (medium statistics)';
+  }
+  return JSON.stringify(r);
+}
+function shortRec(p) { const s = jText(p); return s.length > 140 ? s.slice(0, 139) + '…' : s; }
+
+/* ======================================================================
+ * Journal: virtualised list of readable records
+ * ==================================================================== */
+class VList {
+  constructor(el, rowH, render) {
+    this.el = el; this.inner = el.firstElementChild; this.rowH = rowH; this.render = render; this.count = -1;
+    el.addEventListener('scroll', () => this.draw());
+  }
+  setCount(n) { if (n !== this.count) { this.count = n; this.inner.style.height = (n * this.rowH) + 'px'; } }
+  draw() {
+    const top = this.el.scrollTop, h = this.el.clientHeight || 300;
+    const i0 = Math.max(0, Math.floor(top / this.rowH) - 4), i1 = Math.min(this.count, Math.ceil((top + h) / this.rowH) + 4);
+    let html = '';
+    for (let i = i0; i < i1; i++) html += this.render(i);
+    this.inner.innerHTML = html;
+  }
+  show(i) {
+    if (i < 0) return;
+    const y = i * this.rowH, top = this.el.scrollTop, h = this.el.clientHeight;
+    if (y < top || y + this.rowH > top + h) this.el.scrollTop = Math.max(0, y - h / 2);
+  }
+}
+const J = { rows: new Int32Array(0), kinds: { tx: 1, end: 1, cs: 0, bo: 1, st: 1, q: 0, cnt: 0, msg: 1, sys: 1, viol: 1 },
+  node: 'all', msg: false, future: 'dim', follow: true, vl: null, curRow: -1 };
+const JKINDS = [['tx', 'frames', 'j-tx'], ['end', 'receptions', 'j-end'], ['cs', 'sense', 'cs'], ['bo', 'backoff', 'bo'],
+  ['st', 'routing', 'j-st'], ['q', 'queue', 'j-q'], ['cnt', 'counters', 'j-cnt'], ['msg', 'messages', 'j-msg'],
+  ['sys', 'system', 'j-sys'], ['viol', 'violations', 'j-viol']];
+const kindKey = k => (k === 'boot' || k === 'down' || k === 'node' || k === 'link' || k === 'hdr' || k === 'eof') ? 'sys'
+  : k === 'scn' ? 'viol' : (k === 'sub' || k === 'dlv' || k === 'fail') ? 'msg' : k;
+function rebuildJournal() {
+  if (!D) { J.rows = new Int32Array(0); return; }
+  let src = null;
+  if (J.msg && V.selMsg !== null) src = msgPositions(V.selMsg);
+  if (J.node === 'sel' && V.selNode !== null) {
+    const np = nodePositions(V.selNode);
+    if (src) { const s = new Set(np); src = src.filter(p => s.has(p)); } else src = np;
+  }
+  const out = [];
+  if (src) { for (const p of src) if (J.kinds[kindKey(D.recs[p].k)]) out.push(p); }
+  else for (let p = 0; p < D.N; p++) if (J.kinds[kindKey(D.recs[p].k)]) out.push(p);
+  J.rows = Int32Array.from(out);
+}
+function jRow(i) {
+  const p = J.rows[i], r = D.recs[p], text = jText(p);
+  let cls = 'jr k-' + r.k;
+  if (r.k === 'end') cls += ' ind';
+  if (i === J.curRow) cls += ' cur';
+  if (p > V.pos) cls += ' fut';
+  if (p === V.selRec) cls += ' sel';
+  const mark = r.k === 'tx' ? catSw(r._cats) : '';
+  return `<div class="${cls}" style="top:${i * 18}px" data-p="${p}" title="${esc(text)}"><span class="tm">${fmtT(r.t)}</span>${mark}<span class="tx">${esc(text)}</span></div>`;
+}
+function renderJournal(full) {
+  if (!J.vl) return;
+  if (!D) { J.vl.setCount(0); J.vl.draw(); $('#jCount').textContent = ''; return; }
+  if (full) rebuildJournal();
+  J.curRow = upperBound(J.rows, V.pos) - 1;
+  const n = J.future === 'hide' ? J.curRow + 1 : J.rows.length;
+  J.vl.setCount(n);
+  if (J.follow) J.vl.show(J.curRow);
+  J.vl.draw();
+  $('#jCount').textContent = `${fmtInt(J.rows.length)} lines`;
+}
+
+/* ======================================================================
+ * Messages: searchable list and lifecycle
+ * ==================================================================== */
+const ML = { vl: null, rows: [], search: '', outcome: 'all', open: true };
+function setListOpen(on) {
+  ML.open = on;
+  $('#msgs-split').classList.toggle('nolist', !on);
+  $('#mListBtn').classList.toggle('on', on);
+  if (on) invalidate('msglist');
+}
+function outcomeText(M) {
+  if (M.outcome === 'failed') { const r = D.recs[M.fail[0]]; return 'failed ' + r.why; }
+  return M.outcome;
+}
+function rebuildMsgList() {
+  if (!D) { ML.rows = []; return; }
+  const s = ML.search.trim().toLowerCase();
+  ML.rows = D.msgList.filter(M => (ML.outcome === 'all' || M.outcome === ML.outcome) && (!s || M.search.includes(s)));
+  const c = {};
+  for (const M of D.msgList) c[M.outcome] = (c[M.outcome] || 0) + 1;
+  $('#mCount').textContent = `${ML.rows.length} shown · ` + ['delivered', 'failed', 'error', 'pending', 'refused'].filter(k => c[k]).map(k => `${c[k]} ${k}`).join(', ');
+}
+function mRow(i) {
+  const M = ML.rows[i];
+  return `<div class="mr${M.key === V.selMsg ? ' sel' : ''}" style="top:${i * 20}px" data-k="${esc(M.key)}" title="${esc(M.label)}"><span class="pill ${M.outcome}">${esc(outcomeText(M))}</span> <span class="mono">${esc(M.label)}</span> <span class="hint">${fmtT(M.t0)}</span></div>`;
+}
+function renderMsgList() {
+  if (!ML.vl) return;
+  rebuildMsgList();
+  ML.vl.setCount(ML.rows.length);
+  const i = ML.rows.findIndex(M => M.key === V.selMsg);
+  if (i >= 0) ML.vl.show(i);
+  ML.vl.draw();
+  if (D && !ML.rows.length) ML.vl.inner.innerHTML = `<div class="empty">${D.msgList.length ? 'No message matches.' : 'No class 1 or 2 message in this trace.'}</div>`;
+}
+function renderLifecycle() {
+  const el = $('#lifecycle');
+  if (!D || V.selMsg === null || !D.msgs.has(V.selMsg)) {
+    el.innerHTML = '<div class="empty">Select a message: click a data frame in the chronogram, a submission, delivery or failure mark, or a row above. Its lifecycle lists every frame carrying it, the reception at each next hop and the acknowledgements; click an item to move the cursor there.</div>';
+    return;
+  }
+  const lc = lifecycle(V.selMsg), M = lc.M;
+  let h = '<div class="lc-head">';
+  if (M.refused) h += `<div class="lc-title">Refused submission</div>`;
+  else {
+    h += `<div class="lc-title">${addrLabel(M.o)} → ${addrLabel(M.d)} · ${esc(portLabel(M.p))} · class ${M.c} · seq ${M.q} <span class="pill ${M.outcome}">${esc(outcomeText(M))}</span></div>`;
+    h += `<div class="lc-path">${lc.hops.map(x => `<span class="hop">${x.html}</span>`).join(' ') || '<span class="hint">no frame carries it</span>'}</div>`;
+    h += `<div class="hint" style="margin-top:3px"><kbd>,</kbd> <kbd>.</kbd> step through its events · <span data-tip="class1">timeouts</span> ${fmtDur(timeouts(D).relay)} / ${fmtDur(timeouts(D).root)} to the root · <a id="lcJournal" style="color:var(--accent);cursor:pointer;text-decoration:underline">${J.msg ? 'whole journal' : 'journal: this message only'}</a></div>`;
+  }
+  h += '</div>';
+  h += lc.items.map((it, i) => `<div class="lc-item l${it.level} t-${it.type}" data-p="${it.pos}" data-i="${i}"><span class="tm">${fmtT(D.times[it.pos])}</span>${it.html}</div>`).join('');
+  el.innerHTML = h;
+  el.scrollTop = 0;
+  lifecycleCursor();
+}
+function lifecycleCursor() {
+  const items = document.querySelectorAll('#lifecycle .lc-item');
+  let cur = null;
+  for (const it of items) {
+    const p = +it.dataset.p;
+    it.classList.toggle('fut', p > V.pos);
+    it.classList.remove('cur');
+    if (p <= V.pos) cur = it;
+  }
+  if (cur) {
+    cur.classList.add('cur');
+    if (cur !== lifecycleCursor.last) cur.scrollIntoView({ block: 'nearest' });
+  }
+  lifecycleCursor.last = cur;
+}
+
+/* ======================================================================
+ * Details panel and legend
+ * ==================================================================== */
+const SIDE = { tab: 'details', lastKey: null };
+const KIND_NAME = { hdr: 'Header', tx: 'Transmission', end: 'End of transmission', cs: 'Carrier sense', bo: 'Backoff', st: 'Routing state',
+  q: 'Transmit queue', cnt: 'Counters', sub: 'Submission', dlv: 'Delivery', fail: 'Failure', boot: 'Boot', down: 'Down', node: 'Node added',
+  link: 'Link change', viol: 'Invariant violation', scn: 'Scenario event', eof: 'End of trace' };
+const kvRows = rows => '<table class="kv">' + rows.filter(Boolean).map(([k, v, tip]) => `<tr><td${tip ? ` data-tip="${tip}"` : ''}>${esc(k)}${tip ? '<span class="tipmark">?</span>' : ''}</td><td>${v}</td></tr>`).join('') + '</table>';
+const rawJson = r => JSON.stringify(r, (k, v) => k.startsWith('_') ? undefined : v);
+const trackLink = key => {
+  const M = D.msgs.get(key);
+  return M ? ` <a data-track="${esc(key)}">track</a> <span class="pill ${M.outcome}">${esc(outcomeText(M))}</span>` : '';
+};
+const selLink = (p, text) => `<a data-sel="${p}">${text}</a>`;
+function frameRef(p) { const F = D.recs[p]; return selLink(p, `#${fc16(F.fc)} of ${esc(nameLabel(F.n))} → ${esc(addrLabel(F.d))} at ${fmtT(F.t)}`); }
+function txDetails(p) {
+  const F = D.recs[p], e = F._end !== undefined ? D.recs[F._end] : null, T = timeouts(D);
+  let h = kvRows([
+    ['sender', `${esc(nameLabel(F.n))}${String(F.n) !== String(F.s) ? ` <span class="hint">(medium name ${esc(F.n)})</span>` : ''}${F.sn ? ' · sniffer replay' : ''}`],
+    F.d !== undefined && ['link destination', `${esc(addrLabel(F.d))}${F.d === 0xFFFF ? ' (every neighbour)' : ''}`],
+    F.s !== undefined && ['link source', esc(addrLabel(F.s))],
+    F.fc !== undefined && ['frame counter', `${F.fc} · #${fc16(F.fc)} (low 16 bits: the name acknowledgements use)`],
+    F.r !== undefined && ['rank', esc(rk(F.r)), 'rank'],
+    F.v !== undefined && ['DODAG version', String(F.v), 'version'],
+    F.ep !== undefined && ['key epoch', String(F.ep) + (F.fk ? ' · opened by a key other than the network\'s' : '')],
+    ['length', F.len + ' B'],
+    ['on air', `${fmtT(F.t)} → ${fmtT(F.e)} (${F.e - F.t} ms)${F.t <= V.t && F.e >= V.t ? ' · <b>on air at the cursor</b>' : ''}`],
+    F.err && ['not decoded', esc(F.err), 'bad'],
+    (F.m || []).some(m => m.c >= 1) && F.d !== 0xFFFF && ['class 1 timeout', `${fmtDur(F.d === 0 ? T.root : T.relay)} after the end (computed; ${F.d === 0 ? 'root: batching delay ' + fmtDur(T.batch) + ' + acknowledgement frame + 6 slots' : '255-byte frame + 6 slots'})`, 'class1'],
+  ]);
+  const ms = F.m || [];
+  if (ms.length) h += `<h4>${plural(ms.length, 'message')}</h4>`;
+  ms.forEach((m, i) => {
+    const cat = msgCat(m), key = F._ids ? F._ids[i] : null;
+    const rows = [
+      ['mode', `${m.m} ${MODES[m.m] || '?'}`],
+      ['class', String(m.c), m.c >= 1 ? 'class1' : null],
+      ['port', esc(portLabel(m.p))],
+      m.o !== undefined && ['origin', esc(addrLabel(m.o)) + (m.m === 6 ? ' (the link source: first hop)' : '')],
+      m.d !== undefined && ['destination', esc(addrLabel(m.d))],
+      (m.m === 1 || m.m === 6) && m.d === undefined && ['destination', 'root (upward)'],
+      m.q !== undefined && ['sequence', String(m.q)],
+      ['payload', m.len + ' B'],
+      m.r && ['route', m.r.map(addrLabel).join(' → ')],
+      m.bad && ['payload', 'does not decode'],
+    ];
+    if (m.p === 9) {
+      if (m.sol) rows.push(['solicitation', 'empty DODAG information: the sender has no route or is behind a newer version', 'sol']);
+      else if (m.di) rows.push(['flags', m.di[0] & 1 ? 'topology report on change' : 'none'], ['presence period', m.di[1] + ' s'], ['topology period', m.di[2] + ' s'],
+        ['Imin', `${m.di[3]} slots = ${fmtDur(m.di[3] * T.slot)}`, 'trickle'], ['max rank increase', String(m.di[4])], ['profile', String(m.di[5])]);
+    }
+    if (m.p === 1) {
+      rows.push(['parent', m.pp !== undefined ? esc(addrLabel(m.pp)) : (m.m === 6 ? 'the link destination (first hop)' : '–')]);
+      if (m.pf !== undefined) rows.push(['flags', m.pf ? esc(pfShort(m.pf)) : 'none']);
+    }
+    if (m.p === 4 && m.e) {
+      const about = idKey(m.e[2], m.e[3], m.e[4], m.e[5]);
+      rows.push(['reason', `${m.e[0]} — ${esc(reasonName(m.e[0]))}`], ['next hop', esc(addrLabel(m.e[1]))],
+        ['failed message', `${esc(addrLabel(m.e[2]))} → ${esc(addrLabel(m.e[3]))}, port ${m.e[4]}, seq ${m.e[5]}${trackLink(about)}`]);
+    }
+    let extra = '';
+    if (m.p === 3 && m.a) {
+      extra = '<div class="note">Each entry names a frame by its link source and frame counter low 16 bits: the latest such frame before this one.</div>' +
+        kvRows(m.a.map((a, k) => [`${addrLabel(a[0])} #${a[1]}`, m._acks && m._acks[k] >= 0 ? frameRef(m._acks[k]) : 'no earlier frame in the trace']));
+    }
+    h += `<div class="card"><div>${sw(CAT_COL[cat])}<b data-tip="${CAT_TIP[cat]}">${esc(CAT_NAME[cat])}</b>${key ? trackLink(key) : ''}</div>${kvRows(rows)}${extra}</div>`;
+  });
+  const rx = F.rx || [];
+  h += `<h4>${plural(rx.length, 'receiver')}${e ? '' : ' · no end record'}${e && F._end > V.pos ? ' · fates after the cursor' : ''}</h4>`;
+  if (rx.length) {
+    h += '<table class="kv"><tr><td>receiver</td><td>fate · RSSI · SNR</td></tr>' + rx.map((x, k) => {
+      const node = D.nodeByKey.get(String(x[0]));
+      const f = e && e.f ? e.f[k] : 'unknown';
+      const hl = V.selRx && V.selRx.pos === p && V.selRx.k === k;
+      return `<tr${hl ? ' style="background:var(--sel)"' : ''}><td>${esc(nameLabel(x[0]))}${node && node.a === F.d ? ' ★' : ''}</td><td>${fatePill(f)} ${x[1]} dBm · ${x[2]} dB</td></tr>`;
+    }).join('') + '</table><div class="note">★ the link destination (next hop).</div>';
+  }
+  if (F._ackedBy && F._ackedBy.length) h += '<h4>Acknowledged explicitly by</h4>' + F._ackedBy.map(frameRef).join('<br>');
+  return h;
+}
+function recDetails(p, auto) {
+  const r = D.recs[p];
+  let h = '<div class="dt">';
+  if (auto) h += '<div class="note">Record at the cursor. Click a frame, a mark, a node or a journal line for its details.</div>';
+  h += `<h3>${esc(KIND_NAME[r.k] || r.k)} · ${fmtT(r.t)}</h3><div class="note">record ${p}${r.i !== undefined ? ' (i ' + r.i + ')' : ''}${p > V.pos ? ' · after the cursor' : ''} · ${esc(shortRec(p))}</div>`;
+  const N = x => esc(nameLabel(x));
+  switch (r.k) {
+    case 'tx': h += txDetails(p); break;
+    case 'end':
+      if (r._tx !== undefined) h += `<div class="note">End of ${frameRef(r._tx)}: TX_DONE reaches the sender, receptions get their fate.</div>` + txDetails(r._tx);
+      else h += kvRows([['fates', esc((r.f || []).join(', '))]]);
+      break;
+    case 'cs': h += kvRows([['node', N(r.n)], ['channel', r.b ? 'busy' : 'free', 'cs'], ['answer at', fmtT(r.t + (D.hdr.sense_ms || 0)) + ` (sense_ms ${D.hdr.sense_ms ?? '?'})`]]); break;
+    case 'bo': h += kvRows([['node', N(r.n)], ['until', `${fmtT(r.u)} (${fmtDur(r.u - r.t)}, ${((r.u - r.t) / timeouts(D).slot).toFixed(1)} slots)`, 'bo'],
+      ['busy senses', r.a === 0 ? '0: given up after 6; a new procedure starts after this backoff' : `${r.a} of at most 6`]]); break;
+    case 'st': {
+      const pr = r._prev || {};
+      h += kvRows([['node', N(r.n)], ['rank', `${esc(rk(pr.r))} → ${esc(rk(r.r))}`, 'rank'], ['DODAG version', `${pr.v ?? '?'} → ${r.v}`, 'version'],
+        'p' in r && ['preferred parent', `${esc(addrLabel(pr.p))} → ${esc(addrLabel(r.p))}`, 'parent'],
+        'ps' in r && ['parent set', `[${(pr.ps || []).map(addrLabel).join(', ')}] → [${(r.ps || []).map(addrLabel).join(', ')}]`, 'parent'],
+        'at' in r && ['attached', `${pr.at ?? '?'} → ${r.at}`, 'detach']]);
+      break;
+    }
+    case 'cnt': h += kvRows([['node', N(r.n)]].concat(Object.entries(r.c || {}).map(([k, v]) => [k, `+${v} <span class="hint">${esc(COUNTER_TIPS[k] || '')}</span>`])));
+      break;
+    case 'sub': {
+      const key = r.q >= 0 ? idKey(nodeAddr(r.n), r.d, r.p, r.q) : 'refused:' + p;
+      h += kvRows([['node', N(r.n)], ['port', esc(portLabel(r.p))], ['class', String(r.c), 'class1'], ['destination', esc(addrLabel(r.d))], ['payload', r.len + ' B'],
+        ['result', r.q >= 0 ? 'sequence ' + r.q : `refused: ${r.q} ${esc(reasonName(r.q))}`]]) + (D.msgs.has(key) ? '<div>' + trackLink(key) + '</div>' : '');
+      break;
+    }
+    case 'dlv': {
+      const key = idKey(r.o, nodeAddr(r.n), r.p, r.q);
+      h += kvRows([['node', N(r.n)], ['origin', esc(addrLabel(r.o))], ['port', esc(portLabel(r.p))], ['sequence', String(r.q)], ['payload', r.len + ' B'],
+        ['brought by', `frame #${fc16(r.fc)} of ${esc(addrLabel(r.s))} (counter ${r.fc})`]]) + (D.msgs.has(key) ? '<div>' + trackLink(key) + '</div>' : '');
+      break;
+    }
+    case 'fail': {
+      const key = idKey(nodeAddr(r.n), r.d, r.p, r.q);
+      h += kvRows([['node', N(r.n)], ['destination', esc(addrLabel(r.d))], ['port', esc(portLabel(r.p))], ['sequence', String(r.q)],
+        ['reason', `${r.why} — ${esc(reasonName(r.why))} (${r.why < 0 ? 'local' : 'reported by the network, port 4'})`, 'error']]) + (D.msgs.has(key) ? '<div>' + trackLink(key) + '</div>' : '');
+      break;
+    }
+    case 'viol': h += kvRows([['check', esc(r.chk)], ['at', fmtT(r.at)], ['nodes', esc((r.ns || []).map(nameLabel).join(', '))], ['detail', esc(r.why)]]); break;
+    case 'down': h += kvRows([['node', N(r.n)], ['how', esc(r.how)], ['off', fmtDur(r.off)]], 'down'); break;
+    case 'eof': case 'hdr': h += headerDetails(); break;
+    default: h += kvRows(Object.entries(r).filter(([k]) => !k.startsWith('_') && k !== 'k' && k !== 'i' && k !== 't').map(([k, v]) => [k, esc(JSON.stringify(v))]));
+  }
+  h += `<details><summary>raw record</summary><pre>${esc(rawJson(r))}</pre></details></div>`;
+  return h;
+}
+function nodeAddr(n) { const node = D.nodeByKey.get(String(n)); return node && node.kind === 'board' && typeof node.a === 'number' ? node.a : n; }
+function headerDetails() {
+  const h = D.hdr, a = h.air || {}, T = timeouts(D);
+  let s = kvRows([['label', esc(h.label || '')], ['file', esc(D.fileName)], ['format', String(h.fmt ?? '?')], ['seed', String(h.seed ?? '?')], ['SF', String(h.sf ?? '?')],
+    h.profile && ['profile', `${esc(h.profile.name)} (id ${h.profile.id}, ${h.profile.hz} Hz)`],
+    ['air', `BW ${a.bw} Hz, CR 4/${a.cr}, preamble ${a.preamble}, slot ${a.slot_ms} ms (presence frame)`],
+    ['sense_ms', String(h.sense_ms)], ['capture_db', String(h.capture_db)], ['duty budget', `${fmtDur(h.budget_ms)} per ${fmtDur(h.window_ms)}`],
+    ['class 1 timeouts (computed)', `relay ${fmtDur(T.relay)}, root ${fmtDur(T.root)} (batching delay ${fmtDur(T.batch)})`, 'class1'],
+    ['nodes', String(D.nodes.length)], ['links', String((h.links || []).length) + ' directed'],
+    ['records', fmtInt(D.N)], ['load', D.loadMs ? fmtDur(D.loadMs) : '–']]);
+  if (D.eof && D.eof.stats) {
+    s += '<h4>Medium statistics (eof)</h4><table class="kv"><tr><td>node</td><td>frames · on air · rx ok · loss · collision · half-duplex · cut · senses (busy)</td></tr>' +
+      Object.entries(D.eof.stats).map(([n, v]) => `<tr><td>${esc(nameLabel(isNaN(+n) ? n : +n))}</td><td>${v[0]} · ${fmtDur(v[1])} · ${v[3]} · ${v[4]} · ${v[5]} · ${v[6]} · ${v[7]} · ${v[8]} (${v[9]})</td></tr>`).join('') + '</table>';
+  }
+  return s;
+}
+function nodeDetails(key) {
+  const node = D.nodeByKey.get(key);
+  if (!node) return '';
+  const s = V.state.n[node.idx], L = node.lane;
+  let h = `<div class="dt"><h3>Node ${esc(nameLabel(node.n))}${node.root ? ' (root)' : ''}</h3>`;
+  h += `<div><button class="btn small" data-act="jnode">${J.node === 'sel' ? 'whole journal' : 'journal: this node only'}</button> <button class="btn small" data-act="nprev">◀ previous event</button> <button class="btn small" data-act="nnext">next event ▶</button> <span class="hint">keys [ ]</span></div>`;
+  h += kvRows([['address', node.kind === 'board' ? hex4(node.a) : '–'], ['medium name', esc(node.n)], ['kind', esc(node.kind)],
+    node.pos && ['position', node.pos.map(v => v.toFixed(3)).join(', ')]]);
+  h += `<h4>At the cursor (${fmtT(V.t)})</h4>`;
+  h += kvRows([['status', !s.exists ? 'not yet added' : !s.up ? `down (${esc(s.how || '')}) since ${fmtT(s.downT)}` : 'up', 'down'],
+    ['rank', esc(rk(s.r)), 'rank'], ['DODAG version', String(s.v ?? '?'), 'version'],
+    ['preferred parent', esc(addrLabel(s.p)), 'parent'], ['parent set', '[' + (s.ps || []).map(addrLabel).join(', ') + ']', 'parent'],
+    ['attached', s.at === null ? '?' : String(s.at), 'detach'], ['transmit queue', String(s.q)], ['boots', String(s.boots)],
+    s.stPos >= 0 && ['last state change', selLink(s.stPos, fmtT(D.times[s.stPos]))]]);
+  const tot = {};
+  for (let i = 0; i < L.cnt.length && L.cnt[i] <= V.pos; i++) for (const [k, v] of Object.entries(D.recs[L.cnt[i]].c || {})) tot[k] = (tot[k] || 0) + v;
+  const ents = Object.entries(tot).sort();
+  h += '<h4>Counters, from the start of the trace to the cursor</h4>' + (ents.length ? kvRows(ents.map(([k, v]) => [k, `${v} <span class="hint">${esc(COUNTER_TIPS[k] || '')}</span>`])) : '<div class="note">none yet</div>');
+  const st = D.eof && D.eof.stats ? D.eof.stats[String(node.n)] : null;
+  if (st) h += '<h4>Medium statistics at the end</h4>' + kvRows(st.map((v, i) => [STATS[i], i === 1 || i === 2 ? fmtDur(v) : String(v)]));
+  return h + '</div>';
+}
+function legendHtml() {
+  const row = (swatch, name, tip, text) => `<div class="lg-row">${swatch}<div><b${tip ? ` data-tip="${tip}"` : ''}>${name}</b>${tip ? '<span class="tipmark" data-tip="' + tip + '">?</span>' : ''}${text ? ' — ' + text : ''}</div></div>`;
+  const gl = (ch, col) => `<span class="gl" style="color:${col}">${ch}</span>`;
+  let h = '<div class="dt"><h4>Transmission bars (sender\'s lane, top)</h4>';
+  CAT_NAME.forEach((n, i) => { h += row(`<span class="sw big" style="background:${CAT_COL[i]}"></span>`, n, CAT_TIP[i], ''); });
+  h += row(`<span class="sw big" style="background:linear-gradient(${CAT_COL[2]} 0 50%, ${CAT_COL[6]} 50% 100%)"></span>`, 'striped', 'mixed', 'several kinds in one frame');
+  h += row('<span class="sw big" style="background:#fff;border:1px solid #111"></span>', 'outlined', null, 'on air at the cursor; black: frame of the selected message; dashed teal: its acknowledgements');
+  h += '<h4>Receptions (receiver\'s lane, lower half)</h4>';
+  FATES.forEach((f, i) => { h += row(`<span class="sw big" style="background:${FATE_COL[i]}"></span>`, f, 'f-' + f, ''); });
+  h += row('', 'hidden terminals', 'hidden', 'why collisions happen despite carrier sense');
+  h += '<h4>Lane marks</h4>';
+  h += row(gl('▮', '#b01e1e'), 'carrier sense', 'cs', 'tall dark red tick: busy; short grey: free');
+  h += row(gl('▬', '#a5672b'), 'backoff', 'bo', 'line until the next sense (red: access given up)');
+  h += row(gl('◆', ST_COL.parent), 'preferred parent change', 'parent', 'or first parent');
+  h += row(gl('▼', ST_COL.detach), 'detach / poison', 'detach', 'rank 255');
+  h += row(gl('●', ST_COL.rank), 'rank change', 'rank', 'small dot; light grey: parent set only');
+  h += row(gl('■', ST_COL.version), 'DODAG version change', 'version', '');
+  h += row(gl('▲', '#1d3557'), 'submission', 'class1', 'purple: refused');
+  h += row(gl('●', '#1f9d55'), 'delivery', null, 'at the destination');
+  h += row(gl('✕', '#c0392b'), 'failure', 'error', 'reported to the application');
+  h += row(gl('|', '#2f9e44'), 'boot', null, '');
+  h += row(gl('|', '#111') + '<span class="sw big" style="background:#cfd5dc"></span>', 'down', 'down', 'grey band until the next boot');
+  h += row(gl('▼', '#d0021b'), 'violation', null, 'events row, red; blue: scenario event');
+  h += row('', 'dimmed', null, 'after the cursor: stepping "plays" the chronogram');
+  h += '<h4>Graph</h4>';
+  h += row(gl('→', '#2b6cb0'), 'preferred parent', 'parent', 'arrow to the parent; dashed: other parent-set members');
+  h += row(gl('—', '#9fadbd'), 'link', null, 'grey; dotted: one direction only; dashed red: cut');
+  h += row(gl('○', '#c0392b'), 'detached node', 'detach', 'red outline; grey with a cross: down; dashed: sniffer');
+  h += row(gl('→', FATE_COL[3]), 'frame on air', null, 'sender ringed by its content colour, lines to the receivers by fate (dashed until known); thick: to the next hop');
+  h += row(gl('→', '#e27321'), 'selected message', 'class1', 'its frames (orange, dashed after the cursor)');
+  h += '<h4>Concepts</h4>';
+  const C = [['presence', 'Presence'], ['topology', 'Topology'], ['dio', 'DODAG information (DIO)'], ['sol', 'Solicitation'], ['trickle', 'Trickle'],
+    ['rank', 'Rank'], ['parent', 'Parent set and preferred parent'], ['detach', 'Detach and rejoin'], ['version', 'DODAG version'], ['cs', 'Carrier sense'],
+    ['bo', 'Backoff'], ['hidden', 'Hidden terminals'], ['f-collision', 'Collision'], ['f-half-duplex', 'Half duplex'], ['class1', 'Class 1'],
+    ['passive', 'Passive acknowledgement'], ['explicit', 'Explicit acknowledgement'], ['ack', 'Who acknowledges explicitly'], ['batching', 'Root batching'],
+    ['late', 'Late acknowledgement'], ['relayack', 'Relay acknowledgement'], ['duplicate', 'Duplicate'], ['holding', 'Holding'], ['error', 'Errors']];
+  h += C.map(([k, n]) => `<div class="concept"><b>${n}.</b> ${esc(TIPS[k])}</div>`).join('');
+  h += '<div class="note">Source: docs/MESH_DESIGN.md §8, §9, §11, §12, §16; trace format: sim/trace.py.</div></div>';
+  return h;
+}
+function renderDetails() {
+  const el = $('#side-body');
+  if (SIDE.tab === 'legend') { if (SIDE.lastKey !== 'legend') { el.innerHTML = legendHtml(); SIDE.lastKey = 'legend'; el.scrollTop = 0; } return; }
+  if (!D) { el.innerHTML = '<div class="empty">No trace loaded.</div>'; SIDE.lastKey = null; return; }
+  const tgt = V.detail || { type: 'rec', pos: V.pos, auto: true };
+  const key = tgt.type + ':' + (tgt.key ?? tgt.pos) + (tgt.auto ? ':a' : '');
+  const keep = key === SIDE.lastKey ? el.scrollTop : 0;
+  el.innerHTML = tgt.type === 'node' ? nodeDetails(tgt.key) : recDetails(tgt.pos, tgt.auto);
+  el.scrollTop = keep;
+  SIDE.lastKey = key;
+}
+
+/* ======================================================================
+ * Summary bar
+ * ==================================================================== */
+function renderSummary() {
+  const el = $('#summary');
+  if (!D) { el.innerHTML = ''; return; }
+  const h = D.hdr, boards = D.nodes.filter(n => n.kind === 'board').length, sn = D.nodes.length - boards;
+  const st = new Array(10).fill(0);
+  if (D.eof && D.eof.stats) for (const v of Object.values(D.eof.stats)) v.forEach((x, i) => { st[i] += x; });
+  const cnt = k => D.recs.reduce((s, r) => s + (r.k === k ? 1 : 0), 0);
+  if (!D._counts) D._counts = { sub: cnt('sub'), dlv: cnt('dlv'), fail: cnt('fail'), viol: cnt('viol') };
+  const c = D._counts, it = (label, v, cls, attr) => `<span class="${cls || ''}"${attr || ''}><b>${v}</b> ${label}</span>`;
+  el.innerHTML = [
+    `<span class="lbl" title="${esc(D.fileName)}"><b>${esc(h.label || D.fileName)}</b></span>`,
+    it(sn ? `nodes + ${sn} sniffer${sn > 1 ? 's' : ''}` : 'nodes', boards),
+    `<span>SF <b>${h.sf ?? '?'}</b></span>`,
+    it('', fmtDur(D.t1 - D.t0)),
+    it('frames', fmtInt(D.txs.length)),
+    D.eof ? it('collisions', fmtInt(st[5]), 'link', ' data-go="trouble" title="Receptions lost by collision (eof). Click: next collision or failure"') : '',
+    D.eof && st[4] ? it('losses', fmtInt(st[4]), '', ' title="Receptions lost by the link loss draw (eof)"') : '',
+    D.eof && st[6] ? it('half-duplex', fmtInt(st[6]), '', ' title="Receptions lost because the receiver was transmitting (eof)"') : '',
+    D.eof && st[7] ? it('cut', fmtInt(st[7])) : '',
+    it('submitted', c.sub, 'link', ' data-go="class1" title="Click: next submission, delivery or failure"'),
+    it('delivered', c.dlv),
+    it('failed', c.fail, c.fail ? 'warn' : ''),
+    it(c.viol === 1 ? 'violation' : 'violations', c.viol, c.viol ? 'warn link' : '', c.viol ? ' data-go="viol" title="Click: next violation or scenario event"' : ''),
+    D.warnings.length ? `<span class="warn" title="${esc(D.warnings.join('; '))}"><b>⚠ ${D.warnings.length}</b></span>` : '',
+  ].join('');
+}
+
+/* ======================================================================
+ * Selection
+ * ==================================================================== */
+function keyFromRec(p) {
+  const r = D.recs[p];
+  if (r.k === 'sub') return r.q >= 0 ? idKey(nodeAddr(r.n), r.d, r.p, r.q) : 'refused:' + p;
+  if (r.k === 'dlv') return idKey(r.o, nodeAddr(r.n), r.p, r.q);
+  if (r.k === 'fail') return idKey(nodeAddr(r.n), r.d, r.p, r.q);
+  let F = r.k === 'tx' ? r : (r.k === 'end' && r._tx !== undefined ? D.recs[r._tx] : null);
+  if (!F) return null;
+  const pick = X => {
+    if (!X._ids) return null;
+    let k = null;
+    X._ids.forEach((id, i) => { if (id && D.msgs.has(id) && (k === null || (X.m[i].p >= 16 && X.m[X._ids.indexOf(k)].p < 16))) k = id; });
+    return k;
+  };
+  let k = pick(F);
+  if (k === null && F.m) for (const m of F.m) if (m._acks) for (const fp of m._acks) if (fp >= 0 && k === null) k = pick(D.recs[fp]);
+  return k;
+}
+function selectRecord(p, track) {
+  V.selRec = p;
+  V.detail = { type: 'rec', pos: p };
+  if (track) {
+    const k = keyFromRec(p);
+    if (k && D.msgs.has(k)) selectMessage(k, false);
+  }
+  if (SIDE.tab !== 'details') setTab('details');
+  invalidate('chrono', 'graph', 'details', 'jcursor');
+}
+function selectMessage(key, moveCursor) {
+  if (!D.msgs.has(key)) return;
+  V.selMsg = key;
+  setListOpen(false);
+  if (J.msg) markDirty('journal');
+  invalidate('chrono', 'graph', 'lifecycle', 'msglist');
+  if (moveCursor) { const M = D.msgs.get(key); if (M.p0 !== null && M.p0 !== undefined) { setCursor(M.p0); centerOn(D.times[M.p0]); } }
+}
+function selectNode(key) {
+  V.selNode = key;
+  V.detail = { type: 'node', key };
+  if (SIDE.tab !== 'details') setTab('details');
+  if (J.node === 'sel') markDirty('journal');
+  invalidate('chrono', 'graph', 'details');
+}
+function clearSelection() {
+  V.selNode = V.selMsg = V.selRec = V.selRx = V.detail = null;
+  if (J.msg || J.node === 'sel') markDirty('journal');
+  invalidate('chrono', 'graph', 'details', 'lifecycle', 'msglist', 'jcursor');
+}
+function centerOn(t) { const span = CHR.t1 - CHR.t0; setView(t - span * 0.4, t + span * 0.6); }
+function setTab(tab) {
+  SIDE.tab = tab;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  SIDE.lastKey = null;
+  invalidate('details');
+}
+
+/* ======================================================================
+ * Tooltips, help, layout, input
+ * ==================================================================== */
+const tipEl = $('#tooltip');
+function showTip(html, x, y) {
+  tipEl.innerHTML = html;
+  tipEl.style.display = 'block';
+  const w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+  tipEl.style.left = Math.min(window.innerWidth - w - 8, x + 14) + 'px';
+  tipEl.style.top = (y + 16 + h > window.innerHeight ? y - h - 10 : y + 16) + 'px';
+}
+function hideTip() { tipEl.style.display = 'none'; }
+document.addEventListener('mouseover', e => {
+  const t = e.target.closest && e.target.closest('[data-tip]');
+  if (t && TIPS[t.dataset.tip]) showTip(esc(TIPS[t.dataset.tip]), e.clientX, e.clientY);
+});
+document.addEventListener('mouseout', e => {
+  const t = e.target.closest && e.target.closest('[data-tip]');
+  if (t && !(e.relatedTarget && t.contains(e.relatedTarget))) hideTip();
+});
+function helpHtml() {
+  const k = (keys, what) => `<tr><td>${keys.map(x => `<kbd>${x}</kbd>`).join(' ')}</td><td>${what}</td></tr>`;
+  return `<h2>SILy trace viewer</h2>
+  <p>One cursor on the sequence of records (and the simulated time) drives every view: the state shown is the state after the cursor's record, and later events are dimmed.</p>
+  <table>
+  ${k(['←', '→'], 'previous / next journal event (the journal\'s filters apply)')}
+  ${k(['↑', '↓'], 'previous / next record of any kind')}
+  ${k(['Shift+←', 'Shift+→'], 'previous / next transmission')}
+  ${k(['Ctrl+←', 'Ctrl+→'], 'previous / next of the kind chosen in "step by"')}
+  ${k(['[', ']'], 'previous / next event of the selected node')}
+  ${k([',', '.'], 'previous / next event of the selected message')}
+  ${k(['Home', 'End'], 'first / last record')}
+  ${k(['Space'], 'play / pause (forward, at the chosen speed)')}
+  ${k(['+', '−'], 'faster / slower')}
+  ${k(['T'], 'jump to a time (seconds, then Enter)')}
+  ${k(['F'], 'chronogram: whole trace')}
+  ${k(['C'], 'chronogram: centre on the cursor')}
+  ${k(['I', 'O'], 'chronogram: zoom in / out around the cursor')}
+  ${k(['Esc'], 'clear the selection')}
+  ${k(['?'], 'this help')}
+  </table>
+  <h2 style="margin-top:12px">Views</h2>
+  <p><b>Chronogram</b>: one lane per node. Top of a lane: its transmissions, coloured by content; middle: carrier senses and backoffs; below: its receptions of the others' frames, coloured by fate; bottom marks: routing state changes, submissions, deliveries, failures; grey: down. Wheel zooms, drag pans, Shift+wheel scrolls the lanes. Click a frame to see it and track its message, a lane label to select the node, an empty place to move the cursor; double-click an item to move the cursor to it.</p>
+  <p><b>Overview</b> (under the toolbar): the whole trace, airtime in grey and collisions in red; click or drag to move the cursor.</p>
+  <p><b>Journal</b>: every record as a sentence, following the cursor; click a line to move the cursor there. Chips choose the kinds shown (carrier sense, queue and counters are hidden at first).</p>
+  <p><b>Messages</b>: every class 1/2 message with its outcome; its lifecycle lists the submission, each frame carrying it (sender → next hop, attempt), the reception at the next hop, the explicit acknowledgements (port 3 entries naming the frame) and the passive ones (the next hop forwarding it, overheard by the sender), with their fate at the sender, late acknowledgements, errors, delivery or failure.</p>
+  <p><b>Graph</b>: nodes (positions of the topology when the trace has them, otherwise the DODAG tree at the cursor), preferred parents, ranks, the frames on air at the cursor and the selected message's path.</p>
+  <p><b>Details</b>: every field of the selected frame, record or node, with names. The <b>Legend &amp; concepts</b> tab explains colours and the mesh mechanisms; hover a <span class="tipmark">?</span> for an explanation.</p>
+  <p class="hint">Format: docstring of sim/trace.py. Mechanisms: docs/MESH_DESIGN.md. Press Esc to close.</p>`;
+}
+function toggleHelp(on) {
+  const el = $('#help');
+  const show = on === undefined ? !el.classList.contains('show') : on;
+  if (show) $('#helpBody').innerHTML = helpHtml();
+  el.classList.toggle('show', show);
+}
+function speedStep(d) {
+  const i = clamp(SPEEDS.indexOf(V.speed) + d, 0, SPEEDS.length - 1);
+  V.speed = SPEEDS[i];
+  $('#speed').value = String(V.speed);
+}
+function onKey(e) {
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') { if (e.key === 'Escape') e.target.blur(); return; }
+  if ($('#help').classList.contains('show')) { if (e.key === 'Escape' || e.key === '?') { toggleHelp(false); e.preventDefault(); } return; }
+  if (e.key === '?') { toggleHelp(true); e.preventDefault(); return; }
+  if (!D) return;
+  const kind = $('#stepKind').value;
+  let ok = true;
+  switch (e.key) {
+    case 'ArrowRight': case 'ArrowLeft': {
+      const dir = e.key === 'ArrowRight' ? 1 : -1;
+      step(e.shiftKey ? 'tx' : (e.ctrlKey || e.metaKey) ? kind : 'event', dir);
+      break;
+    }
+    case 'ArrowDown': step('record', 1); break;
+    case 'ArrowUp': step('record', -1); break;
+    case ']': step('node', 1); break;
+    case '[': step('node', -1); break;
+    case '.': case '>': step('msg', 1); break;
+    case ',': case '<': step('msg', -1); break;
+    case 'Home': setCursor(0); break;
+    case 'End': setCursor(D.N - 1); break;
+    case ' ': togglePlay(); break;
+    case '+': case '=': speedStep(1); break;
+    case '-': case '_': speedStep(-1); break;
+    case 't': case 'T': $('#timeInput').focus(); $('#timeInput').select(); break;
+    case 'f': case 'F': setView(D.t0, D.t1); break;
+    case 'c': case 'C': centerOn(V.t); break;
+    case 'i': case 'I': zoomAround(V.t, 0.5); break;
+    case 'o': case 'O': zoomAround(V.t, 2); break;
+    case 'Escape': clearSelection(); break;
+    default: ok = false;
+  }
+  if (ok) e.preventDefault();
+}
+function initGutters() {
+  for (const g of document.querySelectorAll('.gutter')) {
+    g.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const v = g.dataset.var, box = g.parentElement.getBoundingClientRect(), root = document.documentElement;
+      const move = ev => {
+        let px;
+        if (v === '--right') px = clamp(box.right - ev.clientX - 6, 260, box.width - 380);
+        else if (v === '--bottom') px = clamp(box.bottom - ev.clientY - 6, 80, box.height - 140);
+        else if (v === '--graph') px = clamp(ev.clientY - box.top, 80, box.height - 80);
+        else px = clamp(box.right - ev.clientX, 220, box.width - 220);
+        root.style.setProperty(v, px + 'px');
+      };
+      const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
+      addEventListener('mousemove', move);
+      addEventListener('mouseup', up);
+    });
+    g.addEventListener('dblclick', () => {
+      const v = g.dataset.var, root = document.documentElement;
+      const cur = getComputedStyle(root).getPropertyValue(v).trim();
+      const small = { '--right': '260px', '--bottom': '80px', '--graph': '80px', '--msgs': '220px' }[v];
+      root.style.setProperty(v, cur === small ? '' : small);
+      if (cur === small) root.style.removeProperty(v);
+    });
+  }
+}
+function localXY(e, cv) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function initChronoInput() {
+  const cv = CHR.cv;
+  cv.addEventListener('mousedown', e => {
+    if (!D || e.button !== 0) return;
+    const { x, y } = localXY(e, cv);
+    CHR.drag = { x, y, t0: CHR.t0, t1: CHR.t1, sy: CHR.scrollY, moved: false, hit: chronoHit(x, y) };
+  });
+  cv.addEventListener('mousemove', e => {
+    if (!D) return;
+    const { x, y } = localXY(e, cv);
+    const dg = CHR.drag;
+    if (dg) {
+      const dx = x - dg.x, dy = y - dg.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) dg.moved = true;
+      if (dg.moved) {
+        const k = (dg.t1 - dg.t0) / (CHR.W - CHR.labelW);
+        CHR.t0 = dg.t0 - dx * k; CHR.t1 = dg.t1 - dx * k;
+        CHR.scrollY = clamp(dg.sy - dy, 0, CHR.maxScroll || 0);
+        hideTip();
+        invalidate('chrono', 'overview');
+      }
+      return;
+    }
+    const h = chronoHit(x, y), tip = hitTip(h);
+    if (tip) showTip(tip, e.clientX, e.clientY); else hideTip();
+    cv.style.cursor = h && h.type !== 'empty' ? 'pointer' : 'crosshair';
+  });
+  addEventListener('mouseup', () => {
+    const dg = CHR.drag;
+    CHR.drag = null;
+    if (!dg || dg.moved || !D) return;
+    const h = dg.hit;
+    if (!h) return;
+    if (h.type === 'node') selectNode(h.key);
+    else if (h.type === 'rec') { V.selRx = null; selectRecord(h.pos, true); }
+    else if (h.type === 'rx') { V.selRx = { pos: h.pos, k: h.k }; selectRecord(h.pos, true); }
+    else if (h.type === 'empty') jumpTime(h.t);
+  });
+  cv.addEventListener('dblclick', e => {
+    if (!D) return;
+    const { x, y } = localXY(e, cv), h = chronoHit(x, y);
+    if (h && (h.type === 'rec' || h.type === 'rx')) setCursor(h.pos);
+  });
+  cv.addEventListener('mouseleave', hideTip);
+  cv.addEventListener('wheel', e => {
+    if (!D) return;
+    e.preventDefault();
+    const { x } = localXY(e, cv);
+    if (e.shiftKey) CHR.scrollY = clamp(CHR.scrollY + (e.deltaY || e.deltaX), 0, CHR.maxScroll || 0);
+    else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) { const k = (CHR.t1 - CHR.t0) / (CHR.W - CHR.labelW); setView(CHR.t0 + e.deltaX * k, CHR.t1 + e.deltaX * k); }
+    else zoomAround(x > CHR.labelW ? chT(x) : V.t, Math.exp(e.deltaY * 0.0015));
+    invalidate('chrono', 'overview');
+  }, { passive: false });
+}
+function initGraphInput() {
+  const cv = GR.cv;
+  cv.addEventListener('mousemove', e => {
+    if (!D) return;
+    const { x, y } = localXY(e, cv), k = graphHit(x, y);
+    if (k !== null) { showTip(nodeTip(k), e.clientX, e.clientY); cv.style.cursor = 'pointer'; } else { hideTip(); cv.style.cursor = 'default'; }
+  });
+  cv.addEventListener('mouseleave', hideTip);
+  cv.addEventListener('click', e => { if (!D) return; const { x, y } = localXY(e, cv), k = graphHit(x, y); if (k !== null) selectNode(k); });
+}
+function initOverviewInput() {
+  const cv = OV.cv;
+  let down = false;
+  const go = e => { if (!D) return; const { x } = localXY(e, cv); jumpTime(D.t0 + clamp(x / OV.W, 0, 1) * (D.t1 - D.t0)); centerOn(V.t); };
+  cv.addEventListener('mousedown', e => { down = true; go(e); });
+  addEventListener('mousemove', e => { if (down) go(e); });
+  addEventListener('mouseup', () => { down = false; });
+}
+
+/* ======================================================================
+ * Loading traces
+ * ==================================================================== */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function showLoading(text) { $('#loadingText').textContent = text; $('#loading').classList.add('show'); }
+function hideLoading() { $('#loading').classList.remove('show'); }
+function addDataset(X) {
+  DS.push(X);
+  const sel = $('#dsSelect');
+  sel.innerHTML = DS.map((x, i) => `<option value="${i}">${esc(x.hdr.label || x.fileName)} — ${esc(x.fileName)}</option>`).join('');
+  sel.hidden = DS.length < 2;
+  return DS.length - 1;
+}
+async function loadFiles(files) {
+  files = [...files];
+  if (!files.length) return;
+  let last = -1;
+  for (const f of files) {
+    showLoading(`Loading ${f.name} (${(f.size / 1e6).toFixed(1)} MB)…`);
+    await sleep(20);
+    try {
+      const t0 = performance.now();
+      const text = await f.text();
+      const X = parseTrace(text, f.name);
+      X.loadMs = performance.now() - t0;
+      X.size = f.size;
+      if (!X.N) throw new Error('no record');
+      last = addDataset(X);
+    } catch (err) {
+      console.error(err);
+      alert(`${f.name}: cannot load (${err.message})`);
+    }
+  }
+  hideLoading();
+  if (last >= 0) selectDataset(last);
+}
+function loadText(text, name) {
+  const t0 = performance.now();
+  const X = parseTrace(text, name || 'trace.jsonl');
+  X.loadMs = performance.now() - t0;
+  selectDataset(addDataset(X));
+  return X.loadMs;
+}
+function selectDataset(i) {
+  if (D) D.view = { pos: V.pos, t: V.t, selNode: V.selNode, selMsg: V.selMsg, selRec: V.selRec, detail: V.detail, t0: CHR.t0, t1: CHR.t1, scrollY: CHR.scrollY };
+  togglePlay(false);
+  D = DS[i];
+  $('#dsSelect').value = String(i);
+  $('#welcome').style.display = 'none';
+  const v = D.view;
+  if (v) {
+    Object.assign(V, { pos: v.pos, t: v.t, selNode: v.selNode, selMsg: v.selMsg, selRec: v.selRec, detail: v.detail, selRx: null });
+    CHR.t0 = v.t0; CHR.t1 = v.t1; CHR.scrollY = v.scrollY;
+  } else {
+    Object.assign(V, { pos: 0, t: D.t0, selNode: null, selMsg: null, selRec: null, selRx: null, detail: null });
+    const span = D.t1 - D.t0;
+    CHR.t0 = D.t0; CHR.t1 = span <= 120000 ? D.t1 + span * 0.01 : D.t0 + 60000;
+    CHR.scrollY = 0;
+  }
+  V.state = stateAt(V.pos);
+  computeLanes();
+  if (!v) {
+    // Many links (dense neighbourhoods) make a hairball: show the selected node's only.
+    GR.links = (D.hdr.links || []).length > 300 ? 'sel' : 'all';
+    $('#gLinks').value = GR.links;
+  }
+  $('#mSearch').value = ML.search;
+  SIDE.lastKey = null;
+  invalidate('all');
+}
+
+/* ======================================================================
+ * Start
+ * ==================================================================== */
+function onResize() {
+  canvasResize(CHR, $('#chronoBox'));
+  canvasResize(GR, $('#graphBox'));
+  canvasResize(OV, $('#ovwrap'));
+  invalidate('chrono', 'graph', 'overview', 'journal', 'msglist');
+}
+function init() {
+  CHR.cv = $('#chrono'); CHR.ctx = CHR.cv.getContext('2d');
+  GR.cv = $('#graph'); GR.ctx = GR.cv.getContext('2d');
+  OV.cv = $('#overview'); OV.ctx = OV.cv.getContext('2d');
+  J.vl = new VList($('#journal'), 18, jRow);
+  ML.vl = new VList($('#msgList'), 20, mRow);
+  $('#speed').innerHTML = SPEEDS.map(s => `<option value="${s}">${s}× · ${s * 1000 >= 1000 ? fmtDur(s * 1000) : s * 1000 + ' ms'}/s</option>`).join('');
+  $('#speed').value = String(V.speed);
+  $('#jkinds').innerHTML = JKINDS.map(([k, n, tip]) => `<button class="chip${J.kinds[k] ? ' on' : ''}" data-kind="${k}"${tip ? ` data-tip="${tip}"` : ''}>${n}</button>`).join(' ');
+  new ResizeObserver(onResize).observe($('#layout'));
+  new ResizeObserver(onResize).observe($('#ovwrap'));
+  addEventListener('resize', onResize);
+  initGutters(); initChronoInput(); initGraphInput(); initOverviewInput();
+  document.addEventListener('keydown', onKey);
+  $('#openBtn').onclick = () => $('#fileInput').click();
+  $('#fileInput').onchange = e => { loadFiles(e.target.files); e.target.value = ''; };
+  $('#dsSelect').onchange = e => selectDataset(+e.target.value);
+  $('#helpBtn').onclick = () => toggleHelp();
+  $('#help').onclick = e => { if (e.target.id === 'help') toggleHelp(false); };
+  $('#bHome').onclick = () => D && setCursor(0);
+  $('#bEnd').onclick = () => D && setCursor(D.N - 1);
+  $('#bPrev').onclick = () => step('event', -1);
+  $('#bNext').onclick = () => step('event', 1);
+  $('#bPrevK').onclick = () => step($('#stepKind').value, -1);
+  $('#bNextK').onclick = () => step($('#stepKind').value, 1);
+  $('#bPlay').onclick = () => togglePlay();
+  $('#speed').onchange = e => { V.speed = +e.target.value; e.target.blur(); };
+  $('#stepKind').onchange = e => e.target.blur();
+  $('#timeInput').onkeydown = e => {
+    if (e.key === 'Enter') { const v = parseFloat(e.target.value.replace(',', '.')); if (isFinite(v) && D) { jumpTime(v * 1000); centerOn(V.t); } e.target.blur(); }
+  };
+  $('#gLayout').onchange = e => { GR.layout = e.target.value; invalidate('graph'); e.target.blur(); };
+  $('#gLinks').onchange = e => { GR.links = e.target.value; invalidate('graph'); e.target.blur(); };
+  $('#laneOrder').onchange = e => { CHR.order = e.target.value; computeLanes(); invalidate('chrono'); e.target.blur(); };
+  const chip = (id, f) => { $(id).onclick = e => { const on = f(); e.currentTarget.classList.toggle('on', on); invalidate('chrono'); }; };
+  chip('#optOk', () => (CHR.showOk = !CHR.showOk));
+  chip('#optCs', () => (CHR.showCs = !CHR.showCs));
+  chip('#optBo', () => (CHR.showBo = !CHR.showBo));
+  chip('#optFollow', () => { CHR.follow = !CHR.follow; if (CHR.follow && D) chronoEnsureVisible(V.t); return CHR.follow; });
+  $('#zFit').onclick = () => D && setView(D.t0, D.t1);
+  $('#zIn').onclick = () => D && zoomAround(V.t, 0.5);
+  $('#zOut').onclick = () => D && zoomAround(V.t, 2);
+  $('#jkinds').onclick = e => {
+    const b = e.target.closest('[data-kind]');
+    if (!b) return;
+    J.kinds[b.dataset.kind] = J.kinds[b.dataset.kind] ? 0 : 1;
+    b.classList.toggle('on', !!J.kinds[b.dataset.kind]);
+    invalidate('journal');
+  };
+  $('#jNode').onchange = e => { J.node = e.target.value; invalidate('journal', 'details'); e.target.blur(); };
+  $('#jFuture').onchange = e => { J.future = e.target.value; invalidate('journal'); e.target.blur(); };
+  $('#jMsg').onclick = e => { J.msg = !J.msg; e.currentTarget.classList.toggle('on', J.msg); invalidate('journal', 'lifecycle'); };
+  $('#jFollow').onclick = e => { J.follow = !J.follow; e.currentTarget.classList.toggle('on', J.follow); invalidate('journal'); };
+  $('#journal').onclick = e => { const r = e.target.closest('[data-p]'); if (r && D) { const p = +r.dataset.p; selectRecord(p, false); setCursor(p); } };
+  $('#msgList').onclick = e => { const r = e.target.closest('[data-k]'); if (r && D) selectMessage(r.dataset.k, true); };
+  $('#mSearch').oninput = e => { ML.search = e.target.value; setListOpen(true); invalidate('msglist'); };
+  $('#mSearch').onfocus = () => setListOpen(true);
+  $('#mListBtn').onclick = () => setListOpen(!ML.open);
+  $('#mOutcome').onchange = e => { ML.outcome = e.target.value; setListOpen(true); invalidate('msglist'); e.target.blur(); };
+  $('#lifecycle').onclick = e => {
+    if (!D) return;
+    const a = e.target.closest('a[data-track]');
+    if (a) { selectMessage(a.dataset.track, true); return; }
+    if (e.target.closest('#lcJournal')) { J.msg = !J.msg; $('#jMsg').classList.toggle('on', J.msg); invalidate('journal', 'lifecycle'); return; }
+    const it = e.target.closest('.lc-item');
+    if (it) {
+      const p = +it.dataset.p, r = D.recs[p];
+      V.selRec = r.k === 'end' && r._tx !== undefined ? r._tx : p;
+      V.detail = { type: 'rec', pos: V.selRec };
+      setCursor(p);
+      if (CHR.follow) centerOn(D.times[p]);
+    }
+  };
+  $('#side-body').onclick = e => {
+    if (!D) return;
+    const a = e.target.closest('a[data-track], a[data-sel], [data-act]');
+    if (!a) return;
+    if (a.dataset.track) selectMessage(a.dataset.track, true);
+    else if (a.dataset.sel) { const p = +a.dataset.sel; selectRecord(p, false); setCursor(p); }
+    else if (a.dataset.act === 'jnode') { J.node = J.node === 'sel' ? 'all' : 'sel'; $('#jNode').value = J.node; invalidate('journal', 'details'); }
+    else if (a.dataset.act === 'nprev') step('node', -1);
+    else if (a.dataset.act === 'nnext') step('node', 1);
+  };
+  $('#summary').onclick = e => { const g = e.target.closest('[data-go]'); if (g && D) { $('#stepKind').value = g.dataset.go; step(g.dataset.go, 1); } };
+  document.querySelectorAll('.tab').forEach(b => { b.onclick = () => setTab(b.dataset.tab); });
+  // A clicked button keeps no focus: Space and Enter stay the viewer's shortcuts.
+  document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('button'); if (b) b.blur(); });
+  $('#clearSel').onclick = clearSelection;
+  // Drag and drop.
+  let dragDepth = 0;
+  addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; $('#dropzone').classList.add('show'); });
+  addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#dropzone').classList.remove('show'); } });
+  addEventListener('dragover', e => e.preventDefault());
+  addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; $('#dropzone').classList.remove('show'); if (e.dataTransfer.files.length) loadFiles(e.dataTransfer.files); });
+  onResize();
+  invalidate('all');
+}
+init();
+// Programmatic access (scripted checks, console).
+window.TV = {
+  get D() { return D; }, V, CHR, J, ML, GR, DS, loadText, selectDataset, setCursor, step, jumpTime, lifecycle, selectMessage, selectNode,
+  selectRecord, stateAt, timeouts: () => timeouts(D), msgPositions, posAtTime, jText,
+  render() { markDirty('all'); renderDirty(); },
+};
+</script>
+</body>
+</html>
