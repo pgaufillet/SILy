@@ -53,13 +53,21 @@ LARGE_JOBS ?= 4
 RUN ?=
 LARGE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/large.py
 
-.PHONY: help check test seeds simbench large lint firmware flash deploy spec spec-pass spec-defects
+# Trace recording (`make trace`, tools/trace.py, sim/trace.py): TEST=MODULE[.CLASS]
+# records every network a test class of tests/ builds, RUN="SCENARIO TOPOLOGY
+# SEED [NODES]" one run of the large-network suite; JSON Lines files into OUT.
+TEST ?=
+OUT ?= build/trace
+TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
+
+.PHONY: help check test seeds simbench large trace lint firmware flash deploy spec spec-pass spec-defects
 
 help:
 	@echo "make test                 host tests on the MicroPython unix port"
 	@echo "make seeds [SEEDS=24]     scenario suites on SEEDS seeds (not part of check)"
 	@echo "make simbench             simulator benchmark: wall clock, digest (NODES, MINUTES, SEED)"
 	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
+	@echo "make trace TEST=M[.C]|RUN=\"...\" record traces of a test class or a large run [OUT=build/trace]"
 	@echo "make lint                 ruff (check, format) and codespell"
 	@echo "make check                lint + test"
 	@echo "make firmware             build the $(BOARD) firmware"
@@ -87,6 +95,15 @@ ifeq ($(strip $(RUN)),)
 	$(LARGE) summary $$dir $$(($$(date +%s) - start)); status=$$?; rm -rf $$dir; exit $$status
 else
 	$(LARGE) run - $(RUN)
+endif
+
+trace:
+ifneq ($(strip $(TEST)),)
+	$(TRACE) test $(TEST)
+else ifneq ($(strip $(RUN)),)
+	$(TRACE) large $(RUN)
+else
+	@echo 'make trace TEST=MODULE[.CLASS] or RUN="SCENARIO TOPOLOGY SEED [NODES]"'; exit 2
 endif
 
 lint:

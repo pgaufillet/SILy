@@ -9,7 +9,9 @@ checks are a list of `Check` objects, so that later steps (downward
 routing, class 2, key change) add theirs. Scenario events go through the
 checker, which tells the checks: `Checker.switch_off` (a board dies),
 `Checker.global_repair` (new DODAG version), `Checker.links_changed` (links
-cut, restored or changed by the scenario).
+cut, restored or changed by the scenario). The network's observers
+(`sim.net.Observer`, e.g. `sim.trace.Recorder`) are told of each violation
+and scenario event too.
 
 Bounds are computed from the network's parameters at the time of the check
 (the root's DODAG information): presence period T, Imin, slot (time on air
@@ -173,6 +175,8 @@ class Checker:
 
     def violate(self, violation):
         self.violations.append(violation)
+        for o in self.net.observers:
+            o.violated(violation)
 
     def _sample(self):
         now = self.net.now
@@ -190,6 +194,8 @@ class Checker:
         """Switch board name off for the rest of the run (power loss, no reboot)."""
         board = self.net.boards[name]
         now = self.net.now
+        for o in self.net.observers:
+            o.scenario("switch-off", name)
         for c in self.checks:
             c.switched_off(board, now)
         self._off.append(name)
@@ -201,12 +207,16 @@ class Checker:
         now = self.net.now
         dodag = self.root.routing.dodag
         dodag.set_version(dodag.version + 1, now, info)
+        for o in self.net.observers:
+            o.scenario("global-repair", dodag.version)
         self.root.node.wake()
         for c in self.checks:
             c.new_version(now)
 
     def links_changed(self):
         """The scenario changed links: connectivity is computed again."""
+        for o in self.net.observers:
+            o.scenario("links-changed", None)
         self._hops = None
 
     # --- Graph -----------------------------------------------------------------------------

@@ -12,13 +12,16 @@ class Node:
 
     Feeds the core every radio event and a ``step(now, None)`` at its
     deadline, and executes the returned actions in order. ``steps`` counts
-    the calls to ``core.step``.
+    the calls to ``core.step``. observers: objects whose ``stepped(node,
+    event)`` is called after each step (actions executed, timer set), e.g.
+    `sim.trace.Recorder`; they read the core's state, never change it.
     """
 
-    def __init__(self, scheduler, core, radio):
+    def __init__(self, scheduler, core, radio, observers=()):
         self.scheduler = scheduler
         self.core = core
         self.radio = radio
+        self.observers = observers
         self.steps = 0
         self._timer = None
         self._timer_at = None
@@ -62,3 +65,5 @@ class Node:
             self._timer_at = deadline
             if deadline is not None:
                 self._timer = self.scheduler.at(max(deadline, now), self._on_timer)
+        for o in self.observers:
+            o.stepped(self, event)

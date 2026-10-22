@@ -41,13 +41,16 @@ class Topology:
 
     kind: generator name; names: medium names (= mesh addresses), the root
     first; links: [(a, b, rssi, snr)], each linked both ways; hops: hop
-    count of each name from the root (shortest path).
+    count of each name from the root (shortest path); positions: {name: (x,
+    y)} in the unit square for the generators drawing a geometry
+    (`geometric`, `grid`), otherwise None (for display, e.g. `sim.trace`).
     """
 
-    def __init__(self, kind, names, links):
+    def __init__(self, kind, names, links, positions=None):
         self.kind = kind
         self.names = names
         self.links = links
+        self.positions = positions
         self.hops = _hops(names, links)
 
     @property
@@ -135,7 +138,7 @@ def geometric(n, seed, degree=DEGREE):
                 if d < radius:
                     f = d / radius
                     links.append((names[i], names[j], round(-70 - 30 * f), round(10 - 10 * f)))
-        t = Topology("geometric", names, links)
+        t = Topology("geometric", names, links, dict(zip(names, points)))
         if len(t.hops) == n:
             return t
     raise ValueError("no connected graph drawn")
@@ -148,12 +151,15 @@ def grid(n):
     while width * width < n:
         width += 1
     links = []
+    positions = {}
     for i in range(n):
         if i % width + 1 < width and i + 1 < n:
             links.append((names[i], names[i + 1], -80, 10))
         if i + width < n:
             links.append((names[i], names[i + width], -80, 10))
-    return Topology("grid", names, links)
+        span = max(width - 1, 1)
+        positions[names[i]] = ((i % width) / span, (i // width) / span)
+    return Topology("grid", names, links, positions)
 
 
 GENERATORS = {

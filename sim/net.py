@@ -10,6 +10,11 @@ from what the platform kept, after an optional time off the air.
 
 A `Sniffer` is an attacker's (or an observer's) radio on the medium: it
 records every frame it hears and can transmit any bytes (replays).
+
+``Network.observers`` lists objects told of what happens to the boards
+(`Observer`: added, booted, down, steps, submissions, deliveries, failures,
+runs; `sim.invariants.Checker` adds violations and scenario events), e.g.
+`sim.trace.Recorder`; they are called synchronously and change nothing.
 """
 
 from mesh import profile as profiles
@@ -21,6 +26,44 @@ from sim.node import Node
 from sim.platform import FakePlatform
 from sim.prng import XorShift32
 from sim.scheduler import Scheduler
+
+
+class Observer:
+    """What a `Network` tells its ``observers`` (documentation base, no behaviour).
+
+    Called synchronously, at the simulated time ``net.now``; observers read
+    state, never change it, draw nothing and schedule nothing.
+    """
+
+    def added(self, radio):
+        """A `Board` (before its first boot) or a `Sniffer` joined the medium."""
+
+    def booted(self, board):
+        """board built a new engine (boot, reboot), before its first step."""
+
+    def down(self, board, how, off_ms):
+        """board goes down: how is "reset" or "power", back after off_ms."""
+
+    def stepped(self, node, event):
+        """A `sim.node.Node` stepped its core on event (None: timer, start, wake)."""
+
+    def submitted(self, board, port, cls, dest, payload, result):
+        """An application submission through `Board.submit`; result: seq or refusal."""
+
+    def delivered(self, board, origin, msg, header):
+        """A message delivered on a listened port (``Board.inbox``)."""
+
+    def failed(self, board, dest, port, seq, reason):
+        """The failure callback of board (``Board.failures``)."""
+
+    def running(self, until):
+        """`Network.run` starts, up to until."""
+
+    def violated(self, violation):
+        """`sim.invariants.Checker`: an invariant failed (`sim.invariants.Violation`)."""
+
+    def scenario(self, kind, detail):
+        """`sim.invariants.Checker`: a scenario event ("switch-off", "global-repair"...)."""
 
 
 class Network:
@@ -44,6 +87,7 @@ class Network:
         capture_db=None,
         trace=False,
     ):
+        self.seed = seed
         self.rng = XorShift32(seed)
         self.key = key
         self.sf = sf
@@ -62,6 +106,7 @@ class Network:
             trace,
         )
         self.boards = {}
+        self.observers = []  # `Observer` objects
         self._labels = 0
 
     def _label(self):
@@ -109,6 +154,8 @@ class Network:
 
     def run(self, until, limit=None):
         """Run the simulation up to until (ms)."""
+        for o in self.observers:
+            o.running(until)
         self.scheduler.run(until, limit)
 
     @property
@@ -144,6 +191,8 @@ class Board:
         self.engine = None
         self.node = None
         self._ports = []
+        for o in net.observers:
+            o.added(self)
         self._boot()
 
     def _boot(self):
@@ -167,15 +216,21 @@ class Board:
         if self.make_routing is not None:
             self.routing = self.make_routing(engine)
         self.engine = engine
-        self.node = Node(net.scheduler, engine, self.port)
+        self.node = Node(net.scheduler, engine, self.port, net.observers)
         self.boots += 1
+        for o in net.observers:
+            o.booted(self)
         self.node.start()
 
     def _record(self, origin, msg, header):
         self.inbox.append((self.net.now, origin, msg.port, bytes(msg.payload)))
+        for o in self.net.observers:
+            o.delivered(self, origin, msg, header)
 
     def _failed(self, dest, port, seq, reason):
         self.failures.append((self.net.now, dest, port, seq, reason))
+        for o in self.net.observers:
+            o.failed(self, dest, port, seq, reason)
 
     def listen(self, *ports):
         """Record the messages delivered on application ports into inbox."""
@@ -197,22 +252,26 @@ class Board:
         if self.engine is None:
             return None
         result = self.engine.submit(port, cls, dest, payload, replace)
+        for o in self.net.observers:
+            o.submitted(self, port, cls, dest, payload, result)
         self.node.wake()
         return result
 
     def reset(self, off_ms=0):
         """Soft reset: retained memory kept, uncommitted storage lost."""
-        self._down()
+        self._down("reset", off_ms)
         self.platform.reset()
         self.net.scheduler.after(off_ms, self._boot)
 
     def power_loss(self, off_ms=0):
         """Power loss: retained memory cleared, uncommitted storage lost."""
-        self._down()
+        self._down("power", off_ms)
         self.platform.power_loss()
         self.net.scheduler.after(off_ms, self._boot)
 
-    def _down(self):
+    def _down(self, how, off_ms):
+        for o in self.net.observers:
+            o.down(self, how, off_ms)
         if self.node is not None:
             self.node.stop()
         self.node = None
@@ -232,6 +291,8 @@ class Sniffer:
         self.port = net.medium.attach(name)
         self.port.sink = self._on_event
         self.frames = []
+        for o in net.observers:
+            o.added(self)
 
     def _on_event(self, event):
         if event[0] == RX:

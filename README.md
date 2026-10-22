@@ -33,9 +33,10 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   (loss, asymmetry, partitions, collisions, half duplex, carrier sense), the
   host runner of mesh cores, and networks of link engines (`sim/net.py`:
   boards with reset and power loss, sniffer for replays); seeded topologies
-  of large networks (`sim/topologies.py`) and invariant checks observing a
-  running network (`sim/invariants.py`). Imports `mesh` only; goes with it
-  if the mesh is extracted.
+  of large networks (`sim/topologies.py`), invariant checks observing a
+  running network (`sim/invariants.py`) and a trace recorder writing
+  everything a network plays as JSON Lines (`sim/trace.py`). Imports `mesh`
+  only; goes with it if the mesh is extracted.
 - `tests/` — host tests (`run.py` runner, `test_*.py` modules), scenario
   suites on several seeds (`seeds.py`) and the large-network suite
   (`large.py`), both outside `make test`.
@@ -43,6 +44,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   the serial ports; results in `docs/measurements.md`.
 - `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
   a grid network (`make simbench`); figures in `docs/measurements.md`.
+- `tools/trace.py` — traces of the networks of a test class or of one
+  large-network run (`make trace`).
 - `tools/mesh_budget.py` — airtime budget and repair times of the mesh
   design (CPython 3), the source of the figures of `docs/MESH_DESIGN.md`.
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
@@ -65,6 +68,7 @@ make check                     # lint + test
 make simbench NODES=30         # simulator wall clock for 10 simulated minutes
 make large                     # large-network invariants, about 7 min (not in check)
 make large RUN="lossy star 2"  # one run of it, with its full report
+make trace TEST=test_dodag_scenario.DetachRejoin  # traces into build/trace
 make firmware                  # build the SILY_T3S3 firmware
 make flash PORT=/dev/ttyACM0   # flash it
 make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it
@@ -109,6 +113,26 @@ neighbour table full at 64 entries), `LARGE_JOBS` runs at a time (default 4):
 about 7 minutes on the development host (8 cores). It prints the report of each failing
 run (statistics of each check, violations with time, nodes and detail, the
 command reproducing it), then a summary line, and fails if any run fails.
+
+## Traces
+
+`make trace` records what simulated networks play (`sim/trace.py`), for
+an offline viewer or a script: `TEST=MODULE[.CLASS]` runs the test classes
+of `tests/MODULE.py` and writes every network they build to its own file;
+`RUN="SCENARIO TOPOLOGY SEED [NODES]"` plays one run of the large-network
+suite and prints its report. Files go to `OUT` (default `build/trace`,
+ignored by git), one JSON object per line: a header (seed, SF, profile,
+airtime, nodes with their positions when the topology has some, links),
+then every transmission with its decoded messages and its receivers,
+the fate of each reception (ok, loss, collision, half duplex, cut),
+carrier senses and backoffs, rank, preferred parent and parent set
+changes, the counters a step changed (retries, acknowledgements, errors,
+Trickle resets...), submissions, deliveries, failures, reboots, link
+changes, invariant violations and scenario events; the format is in the
+docstring of `sim/trace.py`. The recorder only observes: a run computes
+the same with or without it. `make trace RUN="relay-death star 1"` writes
+about 3.5 MB (36 000 records) and takes 5 to 10 % longer than the run; the
+small networks of the scenario tests take about 1.6 times as long.
 
 ## Bench
 

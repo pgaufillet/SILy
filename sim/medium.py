@@ -34,7 +34,11 @@ Model, per transmission of ``airtime_ms(len(frame))`` ms over [start, end):
   heard busy (`Stats`).
 - **Observation**: ``on_transmit``, if set, is called with (source, start,
   end) at the start of each transmission, and `links` lists the scripted
-  links; neither changes what the medium does.
+  links. ``observers`` lists objects told of everything the medium does
+  (`Observer`: transmissions with their receivers, the fate of each
+  reception, carrier senses, link changes), e.g. `sim.trace.Recorder`.
+  Neither changes what the medium does: they are called synchronously, draw
+  nothing and schedule nothing.
 
 Events reach nodes through the scheduler, never re-entrantly. A transmission
 or carrier sense requested while the node transmits raises RuntimeError (a
@@ -48,6 +52,34 @@ LOSS = "loss"
 COLLISION = "collision"
 HALF_DUPLEX = "half-duplex"
 CUT = "cut"
+
+
+class Observer:
+    """What the medium tells its ``observers`` (documentation base, no behaviour).
+
+    Times in ms, addresses the medium's. Observers must not change the
+    medium, the nodes or the scheduler.
+    """
+
+    def transmitting(self, source, frame, start, end, receivers):
+        """A transmission over [start, end) begins; receivers: [(dst, rssi, snr)].
+
+        receivers lists the nodes with an up link from source at start, in
+        attach order: the receptions of the transmission.
+        """
+
+    def ended(self, source, start, end, fates):
+        """The transmission ends (``TX_DONE`` posted); fates: the receptions' outcomes.
+
+        fates: OK, LOSS, COLLISION, HALF_DUPLEX or CUT, in the order of the
+        receivers given to `transmitting`.
+        """
+
+    def sensed(self, address, now, busy):
+        """Carrier sense requested at now; busy: the answer, delivered sense_ms later."""
+
+    def linked(self, src, dst, link):
+        """The link src -> dst was created, replaced, cut or restored (`Link`)."""
 
 
 class Link:
@@ -161,6 +193,7 @@ class Medium:
         self.sense_ms = sense_ms
         self.trace = [] if trace else None
         self.on_transmit = None
+        self.observers = []  # `Observer` objects
         self.ports = {}
         self._order = []  # ports in attach order: deterministic iteration
         self._links = {}  # (src, dst) -> Link
@@ -177,6 +210,10 @@ class Medium:
         self._order.append(port)
         return port
 
+    def addresses(self):
+        """Return the addresses of the attached nodes, in attach order."""
+        return [p.address for p in self._order]
+
     def link(self, src, dst, loss=0.0, rssi=-80, snr=10):
         """Create or replace the directed link src -> dst (up)."""
         if not 0.0 <= loss <= 1.0:
@@ -187,10 +224,13 @@ class Medium:
         if src == dst:
             raise ValueError("self link")
         links = self._links
-        links[(src, dst)] = Link(loss, rssi, snr)
+        link = Link(loss, rssi, snr)
+        links[(src, dst)] = link
         self._out[src] = [
             (p, links[(src, p.address)]) for p in self._order if (src, p.address) in links
         ]
+        for o in self.observers:
+            o.linked(src, dst, link)
 
     def link_both(self, a, b, loss=0.0, rssi=-80, snr=10):
         """Create the links a -> b and b -> a with the same parameters."""
@@ -207,11 +247,11 @@ class Medium:
 
     def cut(self, src, dst):
         """Cut the directed link src -> dst (kept for restore)."""
-        self._links[(src, dst)].up = False
+        self._set(src, dst, self._links[(src, dst)], False)
 
     def restore(self, src, dst):
         """Restore the directed link src -> dst."""
-        self._links[(src, dst)].up = True
+        self._set(src, dst, self._links[(src, dst)], True)
 
     def partition(self, group_a, group_b):
         """Cut every existing link between the two groups, both ways."""
@@ -227,7 +267,12 @@ class Medium:
                 for key in ((a, b), (b, a)):
                     link = self._links.get(key)
                     if link is not None:
-                        link.up = up
+                        self._set(key[0], key[1], link, up)
+
+    def _set(self, src, dst, link, up):
+        link.up = up
+        for o in self.observers:
+            o.linked(src, dst, link)
 
     def stats(self, address):
         """Return the `Stats` of a node."""
@@ -273,6 +318,10 @@ class Medium:
             if dst._busy_since is None:
                 dst._busy_since = now
             tx.receptions.append(r)
+        if self.observers:
+            receivers = [(r.port.address, r.rssi, r.snr) for r in tx.receptions]
+            for o in self.observers:
+                o.transmitting(port.address, tx.frame, now, tx.end, receivers)
         self.scheduler.at(tx.end, self._end, port, tx)
 
     def _collide(self, new, old):
@@ -292,6 +341,7 @@ class Medium:
         if port._tx is tx:
             port._tx = None
         self._post(port, (TX_DONE, tx.end - tx.start))
+        fates = [] if self.observers else None
         for r in tx.receptions:
             dst = r.port
             dst._rx.remove(r)
@@ -321,6 +371,11 @@ class Medium:
                 stats.rx_cut += 1
             if self.trace is not None:
                 self.trace.append((now, tx.src, dst.address, fate))
+            if fates is not None:
+                fates.append(fate)
+        if fates is not None:
+            for o in self.observers:
+                o.ended(tx.src, tx.start, tx.end, fates)
 
     def _sense(self, port):
         now = self.scheduler.now
@@ -330,4 +385,6 @@ class Medium:
         port.stats.sense_count += 1
         if busy:
             port.stats.sense_busy += 1
+        for o in self.observers:
+            o.sensed(port.address, now, busy)
         self._post(port, (CHANNEL, busy), self.sense_ms)
