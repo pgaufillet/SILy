@@ -17,7 +17,13 @@ each with an RSSI and an SNR; `Topology.apply` scripts them on a
   and SNR fall with the distance (-70 to -100 dBm, 10 to 0 dB: a margin of
   10 dB or more above the SF12 limit, every link eligible, §9);
 - `grid`: the grid of `tools/simbench.py`, the root at a corner, each board
-  hearing its 4 neighbours.
+  hearing its 4 neighbours;
+- `course`: a hand-placed orienteering course, not drawn: the root at the
+  arena, the controls on three loops leaving it in three directions, 1 to
+  3 hops deep, every control beyond hop 1 hearing two controls one hop
+  closer (two possible parents), the loops out of each other's range
+  (hidden terminals); links and their RSSI and SNR from the distance as in
+  `geometric`. The nominal case; the others are limit cases.
 
 Random draws come from their own generator (`sim.prng.XorShift32`), so that
 a topology depends on its seed only, not on the network's draws.
@@ -29,6 +35,29 @@ from sim.prng import XorShift32
 DEGREE = 8  # geometric graph: mean degree before border effects
 _LABEL = 1 << 20  # derive() label of the topology generator (above board labels)
 _TRIES = 1000  # geometric graph: draws before giving up on connectivity
+COURSE_RANGE = 0.2  # course: radio range, in the unit square
+
+# Course: places of the Nodes, the root at the arena (0.5, 0.52). Loops N
+# (up), W (left), E (right); ordered by hop count, the loops in turn, so
+# that the first places of any course keep a parent for each Node and two
+# for each Node beyond hop 1. Every link is at most 0.85 of the range,
+# every other pair at least 1.15 of it (no link on the edge of the range).
+_COURSE = (
+    (0.54, 0.68),  # N hop 1
+    (0.34, 0.47),  # W hop 1
+    (0.62, 0.41),  # E hop 1
+    (0.46, 0.68),  # N hop 1
+    (0.38, 0.40),  # W hop 1
+    (0.66, 0.48),  # E hop 1
+    (0.51, 0.81),  # N hop 2
+    (0.23, 0.46),  # W hop 2
+    (0.66, 0.31),  # E hop 2
+    (0.42, 0.78),  # N hop 2
+    (0.27, 0.33),  # W hop 2
+    (0.73, 0.40),  # E hop 2
+    (0.41, 0.91),  # N hop 3
+    (0.12, 0.36),  # W hop 3
+)
 
 
 def address(i):
@@ -42,8 +71,8 @@ class Topology:
     kind: generator name; names: medium names (= mesh addresses), the root
     first; links: [(a, b, rssi, snr)], each linked both ways; hops: hop
     count of each name from the root (shortest path); positions: {name: (x,
-    y)} in the unit square for the generators drawing a geometry
-    (`geometric`, `grid`), otherwise None (for display, e.g. `sim.trace`).
+    y)} in the unit square for the generators placing the boards
+    (`geometric`, `grid`, `course`), otherwise None (for display, e.g. `sim.trace`).
     """
 
     def __init__(self, kind, names, links, positions=None):
@@ -129,19 +158,25 @@ def geometric(n, seed, degree=DEGREE):
         points = [(0.5, 0.5)]
         for _ in range(n - 1):
             points.append((rng.next32() / 4294967296, rng.next32() / 4294967296))
-        links = []
-        for i in range(n):
-            for j in range(i + 1, n):
-                dx = points[i][0] - points[j][0]
-                dy = points[i][1] - points[j][1]
-                d = (dx * dx + dy * dy) ** 0.5
-                if d < radius:
-                    f = d / radius
-                    links.append((names[i], names[j], round(-70 - 30 * f), round(10 - 10 * f)))
+        links = _ranged(names, points, radius)
         t = Topology("geometric", names, links, dict(zip(names, points)))
         if len(t.hops) == n:
             return t
     raise ValueError("no connected graph drawn")
+
+
+def _ranged(names, points, radius):
+    # Links between the points closer than radius, weaker with the distance.
+    links = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            dx = points[i][0] - points[j][0]
+            dy = points[i][1] - points[j][1]
+            d = (dx * dx + dy * dy) ** 0.5
+            if d < radius:
+                f = d / radius
+                links.append((names[i], names[j], round(-70 - 30 * f), round(10 - 10 * f)))
+    return links
 
 
 def grid(n):
@@ -162,14 +197,30 @@ def grid(n):
     return Topology("grid", names, links, positions)
 
 
+def course(n):
+    """Orienteering course of n boards: the root and the first n - 1 places.
+
+    Up to 15 boards (14 Nodes: 6 at hop 1, 6 at hop 2, 2 at hop 3); a
+    smaller n keeps the first places (see `_COURSE`), a larger one raises
+    ValueError.
+    """
+    if not 1 <= n <= len(_COURSE) + 1:
+        raise ValueError("course of 1 to %d boards" % (len(_COURSE) + 1))
+    names = _names(n)
+    points = [(0.5, 0.52)] + list(_COURSE[: n - 1])
+    links = _ranged(names, points, COURSE_RANGE)
+    return Topology("course", names, links, dict(zip(names, points)))
+
+
 GENERATORS = {
     "domain": lambda n, seed: single_domain(n),
     "star": lambda n, seed: relay_star(n),
     "geometric": geometric,
     "grid": lambda n, seed: grid(n),
+    "course": lambda n, seed: course(n),
 }
 
 
 def make(kind, n, seed):
-    """Return the topology kind ('domain', 'star', 'geometric', 'grid') of n boards."""
+    """Return the topology kind (a key of `GENERATORS`) of n boards."""
     return GENERATORS[kind](n, seed)

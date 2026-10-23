@@ -70,6 +70,7 @@ make simbench NODES=30         # simulator wall clock for 10 simulated minutes
 make large                     # large-network invariants, about 7 min (not in check)
 make large RUN="lossy star 2"  # one run of it, with its full report
 make trace TEST=test_dodag_scenario.DetachRejoin  # traces into build/trace
+make trace RUN="forming course 1 14"  # trace of one large run (nominal course)
 make firmware                  # build the SILY_T3S3 firmware
 make flash PORT=/dev/ttyACM0   # flash it
 make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it
@@ -91,6 +92,10 @@ collision domain (`domain`), the worst case of §16 (`star`: one relay next
 to the root, the 29 others one hop behind it, hearing the relay and each
 other, not the root) and a random geometric graph with hidden terminals,
 the root at its centre (`geometric`: mean degree about 6, depth 3–5).
+Single runs (`RUN=`) also take `grid` and `course`, outside the plan: a
+hand-placed orienteering course of up to 14 Nodes on three loops from the
+arena, 1 to 3 hops, two possible parents beyond hop 1, the loops hidden
+from each other (the nominal case, e.g. `RUN="relay-death course 1 14"`).
 Scenarios: `forming`, `relay-death` (the relay that forwarded the most is
 switched off at 6 minutes), `global-repair` (new DODAG version at 6
 minutes), `lossy` (30 % of the links lose 10–25 % of their frames). Each

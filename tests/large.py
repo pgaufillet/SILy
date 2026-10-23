@@ -24,6 +24,9 @@ Plan: every scenario × topology (`SCENARIOS`, `TOPOLOGIES`) at 30 nodes on
 seeds 1 to SEEDS, plus one 64-node run per scenario on the worst-case star
 (the relay's neighbour table holds 64 entries, its full size, the others
 63; every message through one relay: the MP13 bounds), seed 1.
+``run`` also takes the other generators of `sim.topologies.GENERATORS`
+(``grid``; ``course``, the nominal orienteering course, at most 14 nodes),
+outside the plan.
 
 Traffic (§15, scaled to the run): 1000 punches per hour over the whole
 network (each node submits every 30 × 3.6 s on average at 30 nodes,
