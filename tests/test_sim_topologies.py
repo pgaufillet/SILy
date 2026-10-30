@@ -1,12 +1,19 @@
-"""Topologies of large simulated networks: the hand-placed course."""
+"""Topologies of large simulated networks: the hand-placed course, the star domain."""
 
 import unittest
 
+from mesh.dodag import DodagInfo
+from mesh.frame import ROOT
+from mesh.neighbours import NeighbourTable
+from mesh.profile import EU_869
+from mesh.routing import Routing
 from sim import topologies
 from sim.net import Network
 
 _KEY = bytes(range(16))
 _BOARDS = 15  # the root and the 14 Nodes of the course
+_STAR = 30  # the root, the relay and 28 Nodes behind it
+_SF = 8  # the large-network suite's
 
 
 def _neighbours(t):
@@ -99,3 +106,65 @@ class Course(unittest.TestCase):
     def test_larger_course_refused(self):
         with self.assertRaises(ValueError):
             topologies.course(_BOARDS + 1)
+
+
+class StarDomain(unittest.TestCase):
+    def setUp(self):
+        self.t = topologies.make("star-domain", _STAR, 1)
+        self.star = topologies.make("star", _STAR, 1)
+
+    def test_star_links_kept(self):
+        self.assertEqual(self.t.names, self.star.names)
+        self.assertEqual(self.t.links[: len(self.star.links)], self.star.links)
+
+    def test_root_linked_to_every_board(self):
+        root, relay = self.t.names[0], self.t.names[1]
+        adj = _neighbours(self.t)
+        self.assertEqual(adj[root], set(self.t.names[1:]))
+        extra = self.t.links[len(self.star.links) :]
+        self.assertEqual(sorted(b for _, b, _, _ in extra), self.t.names[2:])
+        for a, b, rssi, snr in extra:
+            self.assertEqual(a, root)
+            self.assertNotEqual(b, relay)
+            self.assertEqual((rssi, snr), (topologies.WEAK_RSSI, topologies.WEAK_SNR))
+
+    def test_root_links_below_the_eligibility_margin(self):
+        # Ineligible from the first frame and after 8, at the suite's SF and
+        # at SF7; the star's links are eligible.
+        for sf in (7, _SF):
+            table = NeighbourTable(sf, 10000)
+            for counter in range(1, 9):
+                rssi, snr = topologies.WEAK_RSSI, topologies.WEAK_SNR
+                weak = table.heard(ROOT, counter, 0, 0, rssi, snr, counter)
+                self.assertFalse(weak.eligible(), (sf, counter))
+            _, _, rssi, snr = self.star.links[0]
+            self.assertTrue(table.heard(0x0101, 1, 256, 0, rssi, snr, 9).eligible(), sf)
+
+    def test_nodes_never_choose_the_root(self):
+        # A small star domain forming at SF8, fast periods: the root heard by
+        # every Node, never their preferred parent; every Node under the relay.
+        info = DodagInfo(0, 10, 60, 32, 56, EU_869)
+        t = topologies.relay_star_domain(6)
+        net = Network(1, _KEY, sf=_SF)
+        for name in t.names:
+            net.add(name, routing=lambda engine: Routing(engine, EU_869, info))
+        t.apply(net)
+        root, relay = t.names[0], t.names[1]
+        chosen = {}  # Node -> first time the root was its preferred parent
+
+        def sample():
+            for name in t.names[2:]:
+                if net.boards[name].routing.parents.preferred == root:
+                    chosen.setdefault(name, net.now)
+            if net.now < 60000:
+                net.at(net.now + 250, sample)
+
+        net.at(0, sample)
+        net.run(60000)
+        self.assertEqual(chosen, {})
+        self.assertEqual(net.boards[relay].routing.parents.preferred, root)
+        for name in t.names[2:]:
+            b = net.boards[name]
+            self.assertEqual(b.routing.parents.preferred, relay, hex(name))
+            self.assertIsNotNone(b.engine.neighbours.get(root), hex(name))
+            self.assertIsNotNone(net.boards[root].engine.neighbours.get(name), hex(name))

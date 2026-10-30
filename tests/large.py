@@ -23,7 +23,10 @@ print the summary: the reports of the failing runs, then one line.
 Plan: every scenario × topology (`SCENARIOS`, `TOPOLOGIES`) at 30 nodes on
 seeds 1 to SEEDS, plus one 64-node run per scenario on the worst-case star
 (the relay's neighbour table holds 64 entries, its full size, the others
-63; every message through one relay: the MP13 bounds), seed 1.
+63; every message through one relay: the MP13 bounds), seed 1. The star
+comes in two variants: ``star``, the root hidden from all but the relay,
+and ``star-domain``, the root also heard and hearing every board on links
+too weak to be parent links (one collision domain, §15).
 ``run`` also takes the other generators of `sim.topologies.GENERATORS`
 (``grid``; ``course``, the nominal orienteering course, at most 14 nodes),
 outside the plan.
@@ -73,7 +76,7 @@ TRAFFIC_LABEL = (1 << 20) + 1  # derive() labels of the suite's own generators
 LOSS_LABEL = (1 << 20) + 2
 
 SCENARIOS = ("forming", "relay-death", "global-repair", "lossy")
-TOPOLOGIES = ("domain", "star", "geometric")
+TOPOLOGIES = ("domain", "star", "star-domain", "geometric")
 NODES = 30
 LARGE_NODES = 64
 SHOWN = 8  # violations listed per check in a report (``run -`` lists all)

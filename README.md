@@ -90,8 +90,11 @@ the network plus one burst of 100 punches within a minute (10-byte
 payloads, 27-byte frames). Topologies (`sim/topologies.py`, seeded): one
 collision domain (`domain`), the worst case of §16 (`star`: one relay next
 to the root, the 29 others one hop behind it, hearing the relay and each
-other, not the root) and a random geometric graph with hidden terminals,
-the root at its centre (`geometric`: mean degree about 6, depth 3–5).
+other, not the root), the same star in one collision domain (`star-domain`:
+the root also hears and is heard by every board, on links too weak to be
+parent links, SNR 1 dB above the SF8 limit) and a random geometric graph
+with hidden terminals, the root at its centre (`geometric`: mean degree
+about 6, depth 3–5).
 Single runs (`RUN=`) also take `grid` and `course`, outside the plan: a
 hand-placed orienteering course of up to 14 Nodes on three loops from the
 arena, 1 to 3 hops, two possible parents beyond hop 1, the loops hidden

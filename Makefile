@@ -48,7 +48,7 @@ SEED ?= 1
 # topology at 30 nodes on LARGE_SEEDS seeds, plus one 64-node run per
 # scenario, LARGE_JOBS runs at a time; RUN="SCENARIO TOPOLOGY SEED [NODES]"
 # runs one of them alone with its full report (TOPOLOGY: domain, star,
-# geometric, or for single runs grid, course: at most 14 nodes).
+# star-domain, geometric, or for single runs grid, course: at most 14 nodes).
 LARGE_SEEDS ?= 3
 LARGE_JOBS ?= 4
 RUN ?=

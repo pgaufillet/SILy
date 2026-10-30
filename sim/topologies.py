@@ -10,6 +10,13 @@ each with an RSSI and an SNR; `Topology.apply` scripts them on a
 - `relay_star`: the worst case of §15–§16: one relay one hop from the root,
   every other board one hop behind it, hearing the relay and each other,
   not the root;
+- `relay_star_domain`: the same links plus a weak one between the root and
+  every other board (`WEAK_RSSI`, `WEAK_SNR`): the literal reading of §15,
+  every board in one collision domain, the root heard and hearing everyone
+  (carrier sense, collisions; no hidden terminal), but these links below
+  the eligibility margin of a parent link (§9) at any SF from 7, so that
+  every Node still routes through the relay (`Topology.hops` counts every
+  link: depth 1, routes 2 hops deep);
 - `geometric`: random geometric graph in the unit square, the root at its
   centre, two boards linked when closer than a radius chosen for a mean
   degree of about `DEGREE` before border effects; drawn again until
@@ -36,6 +43,11 @@ DEGREE = 8  # geometric graph: mean degree before border effects
 _LABEL = 1 << 20  # derive() label of the topology generator (above board labels)
 _TRIES = 1000  # geometric graph: draws before giving up on connectivity
 COURSE_RANGE = 0.2  # course: radio range, in the unit square
+# Star domain: the weak links of the root. SNR -9 dB: a margin of 1 dB above
+# the SF8 limit (-10 dB), -1.5 dB at SF7, under the 3 dB of an eligible
+# parent link from the first frame (§9).
+WEAK_RSSI = -120
+WEAK_SNR = -9
 
 # Course: places of the Nodes, the root at the arena (0.5, 0.52). Loops N
 # (up), W (left), E (right); ordered by hop count, the loops in turn, so
@@ -149,6 +161,14 @@ def relay_star(n):
     return Topology("star", names, links)
 
 
+def relay_star_domain(n):
+    """The star, plus weak links between the root and the n - 2 others (§15)."""
+    t = relay_star(n)
+    names = t.names
+    links = t.links + [(names[0], names[i], WEAK_RSSI, WEAK_SNR) for i in range(2, n)]
+    return Topology("star-domain", names, links)
+
+
 def geometric(n, seed, degree=DEGREE):
     """Random geometric graph of n boards, connected, the root at the centre."""
     rng = XorShift32(seed).derive(_LABEL)
@@ -215,6 +235,7 @@ def course(n):
 GENERATORS = {
     "domain": lambda n, seed: single_domain(n),
     "star": lambda n, seed: relay_star(n),
+    "star-domain": lambda n, seed: relay_star_domain(n),
     "geometric": geometric,
     "grid": lambda n, seed: grid(n),
     "course": lambda n, seed: course(n),
