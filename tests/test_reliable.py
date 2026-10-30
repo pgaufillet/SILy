@@ -18,6 +18,7 @@ from mesh.reliable import (
     ATTEMPTS,
     ERROR_SIZE,
     HOLD,
+    RETRY_DOUBLINGS,
     DuplicateCache,
     decode_acks,
     decode_error,
@@ -243,9 +244,10 @@ class Timeouts(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         timeout = end + e.reliable.timeout_ms(R)
         self.assertEqual(e.deadline(), timeout)
-        f, start, _ = _next_frame(e, end, timeout + e.reliable.retry_ms)
+        window = e.reliable.retry_window_ms()  # 64 slots: a first timeout
+        f, start, _ = _next_frame(e, end, timeout + window)
         self.assertIsNotNone(f)  # the second attempt, after its retry delay
-        self.assertTrue(timeout <= start < timeout + e.reliable.retry_ms, start - timeout)
+        self.assertTrue(timeout <= start < timeout + window, start - timeout)
         self.assertEqual(e.counters.retries, 1)
 
     def test_retry_delay_32_slots(self):
@@ -264,7 +266,7 @@ class RetryDelay(unittest.TestCase):
         e.submit(20, 1, ROOT, b"x")
         f, _, end = _next_frame(e, 0, 0)
         timeout = end + e.reliable.timeout_ms(hop)
-        f, start, _ = _next_frame(e, end, timeout + 2 * e.reliable.timeout_ms(hop))
+        f, start, _ = _next_frame(e, end, timeout + e.reliable.retry_window_ms())
         self.assertIsNotNone(f)
         self.assertEqual(e.counters.retries, 1)
         return start - timeout, e
@@ -274,7 +276,7 @@ class RetryDelay(unittest.TestCase):
         for hop in (R, ROOT):
             offsets = [self._retry(seed, hop)[0] for seed in range(1, 9)]
             self.assertTrue(len(set(offsets)) >= 6, offsets)
-            bound = self._retry(3, hop)[1].reliable.retry_ms  # 32 slots, any next hop
+            bound = 2 * self._retry(3, hop)[1].reliable.retry_ms  # 64 slots, any next hop
             self.assertTrue(min(offsets) >= 0 and max(offsets) < bound, (offsets, bound))
             self.assertEqual(self._retry(3, hop)[0], offsets[2])  # deterministic per seed
 
@@ -300,6 +302,120 @@ class RetryDelay(unittest.TestCase):
         self.assertEqual((f, r.counters.retries), (None, 0))
         entry = r.neighbours.get(ROOT)
         self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 1))  # late: a success
+
+
+class RetryBackoff(unittest.TestCase):
+    """§12: the range of the retry delay doubles per frame of the node timed
+    out since its last acknowledgement, the one timing out included, at most
+    `RETRY_DOUBLINGS` times."""
+
+    def _delays(self, seed, count):
+        # N's frames to R, never acknowledged, R kept after each round of
+        # attempts: [(offset of the retry from its frame's timeout, range of
+        # that timeout's retry, read before it)] for count timeouts.
+        e = _engine(N, R, seed=seed, reroute=lambda msg, hop: hop)
+        rel = e.reliable
+        e.submit(20, 1, ROOT, b"x")
+        f, _, end = _next_frame(e, 0, 0)
+        out = []
+        for _ in range(count):
+            window = rel.retry_window_ms()
+            timeout = end + rel.timeout_ms(R)
+            f, start, end = _next_frame(e, end, timeout + window)
+            self.assertIsNotNone(f)
+            out.append((start - timeout, window))
+        return out
+
+    def _to_r(self, count=1):
+        # N, with R in its table, sends count class 1 messages in one frame
+        # to R; R answers only when told.
+        n = _engine(N, R)
+        r = _engine(R, ROOT, seed=2)
+        r.reliable.acknowledge(X, 0, 0)  # any frame of R: R in N's table
+        (hello,), _ = _run(r, 0)
+        _rx(n, 0, hello)
+        for i in range(count):
+            n.submit(20 + i, 1, ROOT, b"m%d" % i)
+        (f,), now = _run(n, 100)
+        return n, r, f, now
+
+    def _timed_out(self, n, end):
+        # The frame that ended at end times out; returns its retry (frame, end).
+        rel = n.reliable
+        timeout = end + rel.timeout_ms(R)
+        f, _, end = _next_frame(n, end, timeout + rel.retry_window_ms())
+        self.assertIsNotNone(f)
+        return f, end
+
+    def test_range_doubles_per_frame_timed_out_up_to_three_times(self):
+        w = _engine(N, R).reliable.retry_ms  # 32 slots
+        self.assertEqual(RETRY_DOUBLINGS, 3)
+        runs = [self._delays(seed, 6) for seed in range(1, 9)]  # 8 boards
+        for run in runs:
+            # 3 attempts, then fresh attempts towards R: the count goes on.
+            self.assertEqual(
+                [window for _, window in run], [2 * w, 4 * w, 8 * w, 8 * w, 8 * w, 8 * w]
+            )
+            for offset, window in run:
+                self.assertTrue(0 <= offset < window, (offset, window))
+        # The draws cover the doubled ranges, beyond the one before.
+        for j in range(6):
+            offsets = [run[j][0] for run in runs]
+            self.assertTrue(max(offsets) >= runs[0][j][1] // 2, (j, offsets))
+
+    def test_one_frame_timed_out_doubles_the_range_once(self):
+        n, r, f, end = self._to_r(3)
+        rel = n.reliable
+        self.assertEqual(rel.retry_window_ms(), 2 * rel.retry_ms)
+        f2, _ = self._timed_out(n, end)
+        self.assertEqual(len(_messages(_KEY, f2)[1]), 3)  # the 3 retried together
+        self.assertEqual((n.counters.retries, rel.retry_window_ms()), (3, 4 * rel.retry_ms))
+
+    def test_explicit_acknowledgement_resets_the_range(self):
+        n, r, f, end = self._to_r()
+        rel = n.reliable
+        f, end = self._timed_out(n, end)
+        f, end = self._timed_out(n, end)  # the third attempt
+        self.assertEqual(rel.retry_window_ms(), 8 * rel.retry_ms)
+        r.reliable.acknowledge(N, frame.decode_header(f, len(f)).counter, end)
+        (ack,), now = _run(r, end)
+        _rx(n, now, ack)
+        self.assertEqual((len(n.queue), n.counters.acks_explicit), (0, 1))
+        self.assertEqual(rel.retry_window_ms(), 2 * rel.retry_ms)
+        # The next frame timed out drew from 64 slots: the count restarted.
+        n.submit(21, 1, ROOT, b"next")
+        (f,), end = _run(n, now)
+        self._timed_out(n, end)
+        self.assertEqual(rel.retry_window_ms(), 4 * rel.retry_ms)
+
+    def test_passive_acknowledgement_resets_the_range(self):
+        n, r, f, end = self._to_r()
+        rel = n.reliable
+        f, end = self._timed_out(n, end)
+        self.assertEqual(rel.retry_window_ms(), 4 * rel.retry_ms)
+        actions = _rx(r, end, f)
+        (fwd,), now = _run(r, end, end + 2 * r.slot_ms, actions)
+        _rx(n, now, fwd)  # overheard (to the root)
+        self.assertEqual((len(n.queue), n.counters.acks_passive), (0, 1))
+        self.assertEqual(rel.retry_window_ms(), 2 * rel.retry_ms)
+
+    def test_late_root_acknowledgement_resets_the_range(self):
+        # Towards the root: its acknowledgement arrives after the timeout.
+        r = _engine(R, ROOT, seed=2)
+        root = _engine(ROOT, None, seed=3)
+        root.reliable.acknowledge(X, 0, 0)  # any frame of the root
+        (hello,), now = _run(root, 0, root.reliable.batch_ms)
+        _rx(r, now, hello)
+        r.submit(20, 1, ROOT, b"x")
+        f, _, end = _next_frame(r, now, now)
+        _rx(root, end, f)
+        (ack,), _ = _run(root, end, end + root.reliable.batch_ms)
+        rel = r.reliable
+        timeout = end + rel.timeout_ms(ROOT)
+        _run(r, end, timeout)
+        self.assertEqual(rel.retry_window_ms(), 4 * rel.retry_ms)
+        _rx(r, timeout + 1, ack)
+        self.assertEqual((len(r.queue), rel.retry_window_ms()), (0, 2 * rel.retry_ms))
 
 
 class LinkSamples(unittest.TestCase):
@@ -341,7 +457,7 @@ class LinkSamples(unittest.TestCase):
     def test_one_failure_per_timed_out_frame(self):
         n, r, f, end = self._frame_to_r()
         timeout = end + n.reliable.timeout_ms(R)
-        f2, _, _ = _next_frame(n, end, timeout + n.reliable.retry_ms)
+        f2, _, _ = _next_frame(n, end, timeout + n.reliable.retry_window_ms())
         self.assertEqual(len(_messages(_KEY, f2)[1]), 3)  # the second attempt, the 3 together
         self.assertEqual(n.counters.retries, 3)
         entry = n.neighbours.get(R)
@@ -396,13 +512,12 @@ class RootSamples(_RootCase):
         self.assertEqual([s for s, _ in entries], [R, R, R])
         timeout = r.reliable.timeout_ms(ROOT)
         self.assertTrue(timeout > r.reliable.batch_ms > ends[2] - ends[0])
-        # Up to the last of the 3 timeouts and its retry delay, before any
-        # retry times out.
-        self.assertTrue(ends[2] + r.reliable.retry_ms < ends[0] + 2 * timeout)
-        _, now = _run(r, now, ends[2] + timeout + r.reliable.retry_ms)
-        self.assertEqual(r.counters.retries, 3)
+        # The 3 timeouts (the retries wait their delays, or go): no failure
+        # decided yet.
+        _, now = _run(r, now, ends[2] + timeout)
+        self.assertEqual(r.neighbours.get(ROOT).ack_count, 0)
         # Failures decided one root timeout after the timeouts, before any
-        # retry's.
+        # retry's (a retry ends at least a timeout after its frame).
         _run(r, now, ends[2] + 2 * timeout)
         entry = r.neighbours.get(ROOT)
         self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 0))
@@ -414,11 +529,10 @@ class RootSamples(_RootCase):
         _, end2 = self._send(r, end1 + r.reliable.batch_ms, 1)
         self.assertTrue(end2 - end1 >= r.reliable.batch_ms)
         timeout = r.reliable.timeout_ms(ROOT)
-        # Both retried (after their timeouts and retry delays), and their
+        # Both timed out (their retries wait their delays, or go), and their
         # failures decided a root timeout after the timeouts.
-        frames, _ = _run(r, end2, end2 + 2 * timeout)
-        self.assertTrue({_messages(_KEY, f)[1][0].port for f in frames} >= {20, 21})
-        self.assertEqual(self._failures(r), 2)
+        _run(r, end2, end2 + 2 * timeout)
+        self.assertEqual((len(r.queue), self._failures(r)), (2, 2))
 
     def test_every_attempt_towards_the_root_one_failure(self):
         # The attempts are a root timeout apart, longer than the batching
@@ -429,7 +543,8 @@ class RootSamples(_RootCase):
         _, end = self._send(r, now, 0)
         timeout = r.reliable.timeout_ms(ROOT)
         # One root timeout more after the last attempt (late acknowledgement).
-        _run(r, end, end + ATTEMPTS * (timeout + r.reliable.retry_ms + 1000) + timeout)
+        # Retry delays of 64 then 128 slots at most.
+        _run(r, end, end + ATTEMPTS * (timeout + 1000) + 6 * r.reliable.retry_ms + timeout)
         self.assertEqual((r.counters.retries, self._failures(r)), (2, 3))
         self.assertEqual(failures, [1])
 
@@ -446,7 +561,7 @@ class LateRootAcknowledgements(_RootCase):
         _rx(root, end, f)  # the root has it; its acknowledgement is late
         timeout = r.reliable.timeout_ms(ROOT)
         # The timeout, then the retry after its delay.
-        f2, _, end2 = _next_frame(r, end, end + timeout + r.reliable.retry_ms)
+        f2, _, end2 = _next_frame(r, end, end + timeout + r.reliable.retry_window_ms())
         self.assertEqual((r.counters.retries, self._failures(r)), (1, 0))
         actions = _rx(root, end2, f2)  # the retry too: a duplicate, acknowledged again
         acks, now = _run(root, end2, end2 + root.reliable.batch_ms, actions)
@@ -466,8 +581,10 @@ class LateRootAcknowledgements(_RootCase):
         r, root, now = self._relay(reroute=lambda msg, hop: calls.append(hop))
         timeout = r.reliable.timeout_ms(ROOT)
         _, end = self._send(r, now, 0)
-        _, _, end = _next_frame(r, end, end + timeout + r.reliable.retry_ms)
-        f3, _, end = _next_frame(r, end, end + timeout + r.reliable.retry_ms)  # the third attempt
+        _, _, end = _next_frame(r, end, end + timeout + r.reliable.retry_window_ms())
+        f3, _, end = _next_frame(
+            r, end, end + timeout + r.reliable.retry_window_ms()
+        )  # the third attempt
         self.assertEqual((f3 is None, r.counters.retries), (False, 2))
         _run(r, end, end + timeout)  # its timeout
         _rx(root, end, f3)
@@ -487,7 +604,7 @@ class LateRootAcknowledgements(_RootCase):
             _rx(root, end, f)
             (ack,), _ = _run(root, end, end + root.reliable.batch_ms)
             timeout = r.reliable.timeout_ms(ROOT)
-            f2, _, end2 = _next_frame(r, end, end + timeout + r.reliable.retry_ms)
+            f2, _, end2 = _next_frame(r, end, end + timeout + r.reliable.retry_window_ms())
             self.assertIsNotNone(f2)  # the retry, lost
             if held:
                 ((slot, msg),) = r.queue.select(lambda m: True, True)
@@ -505,12 +622,13 @@ class LateRootAcknowledgements(_RootCase):
         r.on_failure(lambda dest, port, seq, reason: failures.append((reason, r.now)))
         timeout = r.reliable.timeout_ms(ROOT)
         _, end = self._send(r, now, 0)
-        delay = r.reliable.retry_ms
-        f2, _, end2 = _next_frame(r, end, end + timeout + delay)
+        f2, _, end2 = _next_frame(r, end, end + timeout + r.reliable.retry_window_ms())
         self.assertEqual((f2 is None, self._failures(r)), (False, 0))  # failure not decided yet
         _run(r, end2, end + 2 * timeout)
         self.assertEqual(self._failures(r), 1)  # one root timeout after the timeout
-        f3, _, end3 = _next_frame(r, end + 2 * timeout, end2 + timeout + delay)
+        f3, _, end3 = _next_frame(
+            r, end + 2 * timeout, end2 + timeout + r.reliable.retry_window_ms()
+        )
         self.assertEqual((f3 is None, r.counters.retries), (False, 2))
         _run(r, end3, end3 + timeout)
         self.assertEqual((failures, len(r.queue)), ([], 1))  # waits one root timeout more
@@ -562,7 +680,8 @@ class KeptNextHop(_RootCase):
         self.assertTrue(3 * len(calls) <= len(frames) <= 3 * len(calls) + 3, len(frames))
         self.assertEqual({frame.decode_header(x, len(x)).dest for x in frames}, {ROOT})
         self.assertEqual((len(r.queue), r.counters.unreachable, r.counters.reroutes), (1, 0, 0))
-        self.assertEqual(self._failures(r), len(frames) - 1)  # each one failed sample
+        # Each one failed sample, the last one's possibly not decided yet.
+        self.assertTrue(len(frames) - 1 <= self._failures(r) <= len(frames), self._failures(r))
 
 
 def _copies(engine):
@@ -589,7 +708,9 @@ class Custody(unittest.TestCase):
         # Back from R itself, whose acknowledgement it waits for: R has it.
         self.assertFalse(rel.holding(key, R))
         # Up to the hold after the last attempt (before its first poll).
-        limit = now + ATTEMPTS * rel.timeout_ms(R) + (ATTEMPTS - 1) * rel.retry_ms + 1000
+        limit = (
+            now + ATTEMPTS * rel.timeout_ms(R) + 6 * rel.retry_ms + 1000
+        )  # delays: 64, 128 slots
         while not rel.held() and n.deadline() is not None and now < limit:
             _, now = _run(n, now, n.deadline())
         self.assertEqual((rel.pending(), rel.held()), (0, 1))
@@ -621,7 +742,9 @@ class Custody(unittest.TestCase):
         (f,), now = _run(n, 0)
         _rx(r, now, f)  # queued at R, not yet on air
         # No acknowledgement: the retry, after its delay.
-        again, _, now = _next_frame(n, now, now + n.reliable.timeout_ms(R) + n.reliable.retry_ms)
+        again, _, now = _next_frame(
+            n, now, now + n.reliable.timeout_ms(R) + n.reliable.retry_window_ms()
+        )
         actions = _rx(r, now, again)
         self.assertEqual((r.counters.duplicates, r.counters.retaken, _copies(r)), (1, 0, 1))
         frames, _ = _run(r, now, None, actions)
@@ -632,7 +755,9 @@ class Custody(unittest.TestCase):
     def test_duplicate_handed_over_is_taken_again_and_acknowledged(self):
         n, r, root, f, now = self._forwarded()
         # N missed R's forward (its passive acknowledgement): it retries.
-        again, _, now = _next_frame(n, now, now + n.reliable.timeout_ms(R) + n.reliable.retry_ms)
+        again, _, now = _next_frame(
+            n, now, now + n.reliable.timeout_ms(R) + n.reliable.retry_window_ms()
+        )
         actions = _rx(r, now, again)
         c = r.counters
         self.assertEqual((c.duplicates, c.retaken, _copies(r)), (0, 1, 1))
@@ -713,7 +838,9 @@ class Rules(unittest.TestCase):
         # is a duplicate, the other one is queued; one entry acknowledges both.
         sent, now = _run(r, now, None, actions)
         self.assertEqual((len(sent), len(r.queue)), (1, 0))  # one frame to the root
-        f2, _, now = _next_frame(n, now, now + n.reliable.timeout_ms(R) + n.reliable.retry_ms)
+        f2, _, now = _next_frame(
+            n, now, now + n.reliable.timeout_ms(R) + n.reliable.retry_window_ms()
+        )
         self.assertIsNotNone(f2)
         actions = _rx(r, now, f2)
         self.assertEqual((delivered, r.counters.duplicates), ([b"to R"], 1))
@@ -727,7 +854,7 @@ class Rules(unittest.TestCase):
         n = _engine(N, R)
         r = _engine(R, ROOT, seed=2)
         n.submit(20, 1, ROOT, b"x")
-        frames, now = _run(n, 0, 3000 + (ATTEMPTS - 1) * n.reliable.retry_ms)
+        frames, now = _run(n, 0, 3000 + 6 * n.reliable.retry_ms)  # delays: 64, 128 slots
         self.assertEqual(len(frames), ATTEMPTS)
         _rx(r, now, frames[0])
         two_periods = 2 * r.neighbours.period_ms  # §12: kept 2 presence periods

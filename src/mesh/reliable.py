@@ -34,12 +34,23 @@ a root timeout apart, longer than the batching delay, so each still fails
 once).
 
 **Retry delay** (§12): a timed-out message is queued again after a random
-delay in [0, `RETRY_SLOTS` slots) (``retry_ms``, from the engine's random
-source; one draw per frame, whose messages stay together), waiting
-meanwhile: two hidden senders whose frames collided at their common next
-hop time out together and would retry together, and collide again, at
-every attempt. The delay moves the retry only: timeouts and failure
-decisions stay anchored on the frame's end.
+delay in [0, w) (from the engine's random source; one draw per frame,
+whose messages stay together), waiting meanwhile: two hidden senders whose
+frames collided at their common next hop time out together and would
+retry together, and collide again, at every attempt. The range w is
+`RETRY_SLOTS` slots (``retry_ms``) doubled per frame of this node timed out
+since its last acknowledgement, this one included (any next hop; a frame
+timed out with none of its messages acknowledged), at most
+`RETRY_DOUBLINGS` (3) times: 64, 128, then 256 slots. Binary exponential
+backoff, as 802.11 and 802.15.4: sustained collisions between hidden
+terminals slow the retries down instead of keeping the channel busy
+(congestion collapse). Any acknowledgement of one of the node's frames
+(explicit, passive, or a late one from the root) resets the count. The
+cap keeps a delay below one presence period at every SF (256 slots: 13 s
+at SF7, 24 s at SF8, 42 s at SF9, 84 s at SF10, 169 s at SF11, 338 s at
+SF12, against 30, 30, 60, 120, 300, 600 s), within the holding of 2
+periods (MP15) and the silence limits. The delay moves the retry only:
+timeouts and failure decisions stay anchored on the frame's end.
 
 **Late root acknowledgement** (§12): under load the root's medium access
 can delay its batch beyond the timeout. Towards the root the retry still
@@ -109,7 +120,8 @@ then lost): class 2 recovers it (§12).
 
 Bounded memory: per-slot state arrays of the queue size (`ATTEMPTS`
 counters per slot towards the root), a queue-size table of pending root
-failures, a 128-entry duplicate cache, an 8-entry batch.
+failures, a 128-entry duplicate cache, an 8-entry batch, one count of
+consecutive frames timed out.
 """
 
 from mesh import frame
@@ -127,7 +139,8 @@ DUPLICATES = 128  # duplicate cache entries (§12)
 DUPLICATE_PERIODS = 2  # presence periods an entry is kept
 HOLD_PERIODS = 2  # presence periods a message without route is held (MP15)
 POLL_SLOTS = 32  # held messages query the route again every Imin (§9)
-RETRY_SLOTS = 32  # a retry waits a random delay in [0, 32 slots) after the timeout (§12)
+RETRY_SLOTS = 32  # base range of the random delay of a retry after the timeout (§12)
+RETRY_DOUBLINGS = 3  # that range doubles per consecutive frame timed out, at most 3 times
 
 HOLD = -1  # reroute result: no route for now, hold the message
 
@@ -312,7 +325,7 @@ class Reliable:
         self.batch_ms = ACK_SHARE * ack_frame
         self.root_timeout_ms = self.batch_ms + ack_frame + TIMEOUT_SLOTS * slot
         self.poll_ms = POLL_SLOTS * slot
-        self.retry_ms = RETRY_SLOTS * slot  # bound (excluded) of a retry's random delay
+        self.retry_ms = RETRY_SLOTS * slot  # base range of the retry delay (`retry_window_ms`)
         n = self.queue.size
         self._msg = [None] * n  # message tracked in each queue slot
         self._state = bytearray(n)
@@ -337,6 +350,7 @@ class Reliable:
         self._delay_hop = 0
         self._delay_ctr = 0
         self._delay = 0
+        self._streak = 0  # frames timed out since the last acknowledgement (retry backoff)
         self._poll = None
         self._next = None
 
@@ -353,6 +367,15 @@ class Reliable:
     def held(self):
         """Return the number of messages held during repair (§13 queues)."""
         return self._count(_HELD)
+
+    def retry_window_ms(self):
+        """Return the bound (excluded) of the delay of a retry after a timeout now (ms).
+
+        `retry_ms`, doubled per frame timed out since the node's last
+        acknowledgement, this one included, at most `RETRY_DOUBLINGS` times
+        (§12).
+        """
+        return self.retry_ms << min(self._streak + 1, RETRY_DOUBLINGS)
 
     def pending(self):
         """Return the number of messages waiting for an acknowledgement."""
@@ -539,6 +562,7 @@ class Reliable:
         # the root, its sample given by `_late`).
         msg = self._msg[slot]
         hop = self._hop[slot]
+        self._streak = 0  # the channel carries this node's frames again
         c = self.counters
         if passive:
             c.acks_passive += 1
@@ -567,7 +591,8 @@ class Reliable:
             self._state[slot] = _IDLE
             self._exhausted(slot, msg, hop, now)
             return
-        if not self._sampled[slot] and not self._same_frame(slot):
+        failed = not self._sampled[slot] and not self._same_frame(slot)
+        if failed:
             # A failure once the frame's last pending message times out;
             # towards the root, one root timeout later unless acknowledged.
             if hop == ROOT:
@@ -579,14 +604,17 @@ class Reliable:
         self._state[slot] = _IDLE
         if queue.attempts(slot, msg) < ATTEMPTS:
             self._retry(slot, msg, False, now)
-            return
-        if hop == ROOT:
+        elif hop == ROOT:
             # The last attempt: one more root timeout for its late acknowledgement.
             self._state[slot] = _LATE
             self._due[slot] = due + self.root_timeout_ms
             self._at(self._due[slot])
-            return
-        self._exhausted(slot, msg, hop, now)
+        else:
+            self._exhausted(slot, msg, hop, now)
+        if failed:
+            # Counted after the frame's retry delay, drawn at its first
+            # message (`retry_window_ms` counts the frame timing out).
+            self._streak += 1
 
     def _exhausted(self, slot, msg, hop, now):
         # ATTEMPTS transmissions to hop unacknowledged: next hop after failure.
@@ -609,12 +637,13 @@ class Reliable:
 
     def _retry(self, slot, msg, fresh, now):
         # Queue msg in slot again (fresh: its attempts restart) after a
-        # random delay in [0, retry_ms): senders whose frames collided at
-        # their common next hop time out together, and would otherwise retry
-        # together and collide again. One delay per frame timed out (its
-        # messages time out in one step): they are retried together. The
-        # message keeps waiting (not packed) until then; the timeouts and
-        # failure decisions stay anchored on the frame's end.
+        # random delay in [0, retry_window_ms()): senders whose frames
+        # collided at their common next hop time out together, and would
+        # otherwise retry together and collide again; the range doubles
+        # while the node's frames keep timing out. One delay per frame
+        # timed out (its messages time out in one step): they are retried
+        # together. The message keeps waiting (not packed) until then; the
+        # timeouts and failure decisions stay anchored on the frame's end.
         queue = self.queue
         queue.retry(slot, msg, None, fresh)
         hop = self._hop[slot]
@@ -623,7 +652,7 @@ class Reliable:
             self._delay_at = now
             self._delay_hop = hop
             self._delay_ctr = ctr
-            self._delay = randbelow(self.engine.random, self.retry_ms)
+            self._delay = randbelow(self.engine.random, self.retry_window_ms())
         delay = self._delay
         if not delay:
             self.engine.access_at(now)
@@ -676,6 +705,7 @@ class Reliable:
         for i in range(len(ends)):
             if ends[i] is not None and self._fctr[i] == c16:
                 ends[i] = None
+                self._streak = 0
                 self.engine.neighbours.acked(ROOT, True, self.engine.now)
                 return
 

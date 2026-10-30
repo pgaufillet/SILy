@@ -770,15 +770,17 @@ How each fix is implemented, what it costs, and the limits accepted.
   the message fresh attempts when the next hop after failure is the hop
   itself (`KeepHop`), still after the `_LATE` wait. Any other hop is
   dropped as before. With it, a **random retry delay**
-  (`Reliable._retry`, uniform in [0, 32 slots), one draw per timed-out
-  frame, state `_DELAY`): timing only, outside the model; the timeouts
-  and the deferred failure decisions stay anchored on the frame's end.
-  Cost: a failed link to the root is left at its ineligibility (13
-  failed samples from a full window) or at the silence limit, later than
-  after 3 attempts (MESH_DESIGN §9 repair table); every retry waits up to
-  32 slots more. MESH_DESIGN §12 (retry delay, upward failure) describes
-  it; host tests `KeepRoot` (tests/test_parents.py), `RetryDelay`,
-  `KeptNextHop` (tests/test_reliable.py), and
+  (`Reliable._retry`, uniform in [0, w), one draw per timed-out frame,
+  state `_DELAY`; w = 32 slots doubled per frame of the node timed out
+  since its last acknowledgement, that one included, at most 3 times):
+  timing only, outside the model; the timeouts and the deferred failure
+  decisions stay anchored on the frame's end. Cost: a failed link to the
+  root is left at its ineligibility (13 failed samples from a full
+  window) or at the silence limit, later than after 3 attempts
+  (MESH_DESIGN §9 repair table); every retry waits up to 64 to 256 slots
+  more. MESH_DESIGN §12 (retry delay, retry backoff, upward failure)
+  describes it; host tests `KeepRoot` (tests/test_parents.py),
+  `RetryDelay`, `RetryBackoff`, `KeptNextHop` (tests/test_reliable.py), and
   `LocalRepair.test_root_kept_after_exhausted_attempts_until_its_link_is_ineligible`
   (tests/test_routing.py).
 - **Abstractions to keep in mind**: no timing bound is checked (events

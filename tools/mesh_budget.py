@@ -103,8 +103,12 @@ K_PARENT = SILENCE_LIMIT  # presence periods without any frame from the preferre
 N_TX = 3  # class 1 transmission attempts
 # Class 1 timeout beyond the forwarded frame: forwarding delay 1 + backoff 4 + margin 1.
 RTO_SLOTS = 6
-# Random delay of a class 1 retry after its timeout: [0, 32) slots (§12).
+# Random delay of a class 1 retry after its timeout: [0, 32) slots, the range
+# doubled per frame timed out since the last acknowledgement (the one timing
+# out included), at most 3 times: 64, 128, then 256 slots, below one presence
+# period at every SF (§12).
 RETRY_SLOTS = 32
+RETRY_DOUBLINGS = 3
 # Failed samples that make a link with a full acknowledgement window of
 # successes ineligible (ETX 16/3 > 4, §9): the root is left after them.
 INELIG_FAILURES = 13
@@ -270,7 +274,8 @@ def main():
 
     print(
         f"\nE. Repair times (s), depth {DEPTH}, Trickle Imin {TRICKLE_IMIN} slots k {TRICKLE_K}, "
-        f"{N_TX} class 1 attempts, retry delays at most {RETRY_SLOTS} slots, "
+        f"{N_TX} class 1 attempts, retry delays at most {RETRY_SLOTS << 1} slots "
+        f"doubling up to {RETRY_SLOTS << RETRY_DOUBLINGS}, "
         f"parent lost after {K_PARENT} silent presence periods"
     )
     print(
@@ -299,10 +304,9 @@ def main():
         peak = TRICKLE_K * adv / (imin / 2)
         node = n_int * adv * WINDOW / (GLOBAL_REPAIR_MIN * live)
         rejoin = (1 + DETACH_HOLD + 1) * imin + WINDOW_SLOTS * slot
-        delay = RETRY_SLOTS * slot
         # Through a relay: N_TX timeouts, a retry delay before each attempt
         # after the first.
-        relay_switch = N_TX * rto_relay + (N_TX - 1) * delay
+        relay_switch = N_TX * rto_relay + retry_slots(N_TX - 1) * slot
         # The root is kept while heard and eligible (§12): left once its link
         # is ineligible, at the decision of the INELIG_FAILURES-th failed
         # sample. The attempts of one message go one root timeout and a retry
@@ -310,7 +314,7 @@ def main():
         # acknowledgement); a failure is decided one root timeout after its
         # timeout. (A root not heard at all is left at the silence limit.)
         gaps = INELIG_FAILURES - 1
-        root_switch = (gaps + gaps // N_TX + 2) * rto_root + gaps * delay
+        root_switch = (gaps + gaps // N_TX + 2) * rto_root + retry_slots(gaps) * slot
         print(
             f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {relay_switch:>6.1f}  "
             f"{root_switch:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
@@ -330,7 +334,7 @@ def main():
         rto_root = ack / ACK_SHARE + ack + RTO_SLOTS * slot
         # The time a message retried on the last hop needs: N_TX timeouts and
         # the retry delays between them.
-        nack = N_TX * rto_root + (N_TX - 1) * RETRY_SLOTS * slot
+        nack = N_TX * rto_root + retry_slots(N_TX - 1) * slot
         # NACK down then message up again, each hop at most one timeout.
         trip = 2 * DEPTH * rto_relay
         # Idle flow: the tail rides on the presence report after one silent
@@ -343,6 +347,15 @@ def main():
             period(s_net + t_bc, PRESENCE_LOAD * PRESENCE_SIZING * WINDOW),
         )
         print(f"{sf:<4}{nack:>5.1f}  {nack + trip:>10.0f}  {tail:>19.0f}  {heavy:>18}")
+
+
+def retry_slots(n):
+    """Return the sum of the maxima of n retry delays after consecutive timeouts (slots).
+
+    From the first timeout after an acknowledgement: the range doubles per
+    frame timed out, that one included.
+    """
+    return sum(RETRY_SLOTS << min(i, RETRY_DOUBLINGS) for i in range(1, n + 1))
 
 
 if __name__ == "__main__":

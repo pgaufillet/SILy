@@ -27,7 +27,7 @@ from mesh.neighbours import popcount16
 from mesh.parents import MIN_HOP, SWITCH_THRESHOLD, link_cost
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
-from mesh.reliable import ATTEMPTS, identity
+from mesh.reliable import ATTEMPTS, RETRY_DOUBLINGS, identity
 from mesh.replay import ReplayTable
 from mesh.routing import Routing
 from mesh.security import KeyRing, Security
@@ -369,15 +369,16 @@ class RelayKilled(unittest.TestCase):
         m.run(kill + 3 * P)
         t, parent = switched(log, C, relay)
         self.assertEqual(parent, other)
-        # Switch with traffic through a relay (§9 table, SF7: 5.4 s): 3
-        # attempts, each the frame and its acknowledgement timeout, the last
-        # 2 after a retry delay. Channel access may add a backoff (4 slots
-        # at first) per attempt.
+        # Switch with traffic through a relay (§9 table): 3 attempts, each
+        # the frame and its acknowledgement timeout, the last 2 after a
+        # retry delay (at most 256 slots: C's other frames timing out double
+        # its range too, §12). Channel access may add a backoff (4 slots at
+        # first) per attempt.
         rel = c.engine.reliable
         frame_ms = c.engine.toa_ms(frame.OVERHEAD + 2 + 2 + 2)
         slot = c.engine.slot_ms
         bound = ATTEMPTS * (frame_ms + rel.relay_timeout_ms + 4 * slot)
-        bound += (ATTEMPTS - 1) * rel.retry_ms
+        bound += 2 * (rel.retry_ms << RETRY_DOUBLINGS)
         took = t - 100
         self.assertTrue(took <= bound, (took, bound))
         # At least one timeout: the failed attempts raise A's ETX (p_ack), so
@@ -517,8 +518,9 @@ class LoopDuringRepair(unittest.TestCase):
 
         b.engine.sent = watched_sent
         start = m.net.now
+        until = start + 24000  # B's attempts to A and their retry delays, then the climb
         log = m.watch((B, C, D), start)
-        loops = m.loop_samples((B, C, D), start, start + 12000)
+        loops = m.loop_samples((B, C, D), start, until)
         m.net.medium.cut(A, B)
         m.net.medium.cut(C, B)
         b.engine.neighbours.get(C).rank = 8
@@ -533,7 +535,7 @@ class LoopDuringRepair(unittest.TestCase):
                 m.net.at(m.net.now + 20, d_traffic)
 
         m.net.at(start, d_traffic)
-        m.run(start + 12000)
+        m.run(until)
         loop_at, parent = switched(log, B, A)
         self.assertEqual(parent, C)  # the loop B -> C -> B formed
         # C saw B's rank not above its own (rank error: Trickle reset and an
@@ -562,10 +564,11 @@ class LoopDuringRepair(unittest.TestCase):
         # attempts of the last hop exhausted.
         rel = b.engine.reliable
         quiet = max(loops) + ATTEMPTS * (rel.relay_timeout_ms + 100)
+        quiet += (ATTEMPTS - 1) * (rel.retry_ms << RETRY_DOUBLINGS)  # retry delays
         for src in (B, C):
             for t, h, msgs in m.frames(src):
                 for msg in msgs:
-                    if msg.port == APP and h.dest in (B, C) and t < start + 12000:
+                    if msg.port == APP and h.dest in (B, C) and t < until:
                         key = identity(msg, h.source, h.dest) + (src,)
                         if key[0] == B:
                             self.assertTrue(t <= quiet, (t - start, quiet - start, key))

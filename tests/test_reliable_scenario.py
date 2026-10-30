@@ -151,6 +151,7 @@ class Acknowledgements(unittest.TestCase):
             overheard(h, msgs, now)
 
         n.overheard = deaf_once
+        n.reliable.retry_ms = 1  # N retries at its timeout, while R holds its copy
         line.net.at(1000, line.node.submit, 20, 1, ROOT, b"punch")
         line.net.run(10000)
         self.assertEqual(len(missed), 1)
@@ -239,7 +240,8 @@ class Failures(unittest.TestCase):
         self.assertEqual((dest, port, reason), (ROOT, 20, UNREACHABLE))
         self.assertEqual(seq, line.data_frames(N)[0][2][0].seq)
         timeout = n.reliable.timeout_ms(R)
-        delays = 2 * n.reliable.retry_ms  # before the second and the third attempts
+        # Before the second and the third attempts: ranges of 64 then 128 slots.
+        delays = 6 * n.reliable.retry_ms
         self.assertTrue(1000 + 3 * timeout <= t < 1000 + 3 * timeout + delays + 1000, t)
         self.assertEqual((n.counters.retries, n.counters.unreachable, len(n.queue)), (2, 1, 0))
         entry = n.neighbours.get(R)
@@ -359,8 +361,8 @@ class Holding(unittest.TestCase):
         line.net.at(300, line.relay.submit, 21, 0, N, b"hello")
         line.net.at(900, line.net.medium.cut, N, R)
         line.net.at(1000, line.node.submit, 20, 1, ROOT, b"patient")
-        line.net.at(8000, repaired)
-        line.net.run(20000)
+        line.net.at(16000, repaired)  # after the 3 attempts and their retry delays
+        line.net.run(30000)
         self.assertEqual(line.root.received(), [b"patient"])
         n = line.node.engine
         self.assertEqual(line.node.failures, [])
@@ -413,11 +415,12 @@ class RelayReboot(unittest.TestCase):
     def test_power_loss_then_delivery(self):
         self._delivered(self._run("power_loss", 200))
 
+    # Off beyond N's 3 attempts and their retry delays (64, 128 slots).
     def test_long_reset_ends_in_explicit_failure(self):
-        self._failed(self._run("reset", 10000))
+        self._failed(self._run("reset", 20000))
 
     def test_long_power_loss_ends_in_explicit_failure(self):
-        self._failed(self._run("power_loss", 10000))
+        self._failed(self._run("power_loss", 20000))
 
 
 class LateAcknowledgement(unittest.TestCase):

@@ -249,8 +249,8 @@ class LocalRepair(unittest.TestCase):
         start = line.net.now
         adverts = n.routing.dodag.counters.adverts
         n.submit(APP, 1, ROOT, b"lost")
-        # 3 attempts, the last 2 each after a retry delay (§12).
-        limit = 3000 + 2 * n.engine.reliable.retry_ms
+        # 3 attempts, the last 2 each after a retry delay (§12): 64, 128 slots.
+        limit = 3000 + 6 * n.engine.reliable.retry_ms
         while not reroutes and line.net.now - start < limit:
             line.run(100)
         line.run(800)  # the desynchronisation delay

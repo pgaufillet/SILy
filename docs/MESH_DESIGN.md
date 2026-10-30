@@ -472,7 +472,8 @@ gets its share, not its relays' capacity.
   silence threshold (`K_MISS`); measured loss rates decide whether more is
   needed (§18). Two hidden senders whose frames collided at their common
   next hop time out together: a class 1 retry waits a random delay after
-  its timeout (§12), so that their retries do not collide again.
+  its timeout (§12), so that their retries do not collide again; its range
+  doubles while the sender's frames keep timing out.
 
 ## 9. Routing and repair
 
@@ -835,22 +836,24 @@ acknowledgement window and the time of its newest failure.
 
 | SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
 |---|---|---|---|---|---|---|---|---|
-| 7 | 1.6 | 5.4 | 60 | 75 | 7.0 | 13 | 12 | 11 |
-| 8 | 3.0 | 9.7 | 112 | 75 | 12.6 | 24 | 10 | 17 |
-| 9 | 5.3 | 17.3 | 198 | 150 | 22.4 | 42 | 10 | 15 |
-| 10 | 10.6 | 33.9 | 380 | 300 | 44.8 | 84 | 10 | 14 |
-| 11 | 21.1 | 69.1 | 791 | 750 | 89.7 | 169 | 10 | 12 |
-| 12 | 42.2 | 135.2 | 1519 | 1500 | 179.4 | 338 | 10 | 11 |
+| 7 | 1.6 | 12.0 | 182 | 75 | 7.0 | 13 | 12 | 11 |
+| 8 | 3.0 | 21.6 | 331 | 75 | 12.6 | 24 | 10 | 17 |
+| 9 | 5.3 | 38.4 | 588 | 150 | 22.4 | 42 | 10 | 15 |
+| 10 | 10.6 | 76.1 | 1161 | 300 | 44.8 | 84 | 10 | 14 |
+| 11 | 21.1 | 153.5 | 2352 | 750 | 89.7 | 169 | 10 | 12 |
+| 12 | 42.2 | 304.0 | 4642 | 1500 | 179.4 | 338 | 10 | 11 |
 
 (Times in seconds, from section E of `mesh_budget.py`; the "switch with
-traffic" columns are upper bounds, retry delays at their maximum; "switch,
-idle" is the silence limit, 2.5 presence periods; "global repair wave"
-assumes no frame of the exchange lost on any hop, see below.)
+traffic" columns are upper bounds, retry delays at their maximum from the
+first timeout after an acknowledgement; "switch, idle" is the silence
+limit, 2.5 presence periods; "global repair wave" assumes no frame of the
+exchange lost on any hop, see below.)
 
 - **Switch with traffic, parent relay**: the preferred parent is dropped
-  after 3 class 1 attempts without acknowledgement (§12), the last two each
-  after a retry delay of up to 32 slots (1.7 s at SF7, 5.3 s at SF9).
-  Timeout through a relay: time on air of a 255-byte frame + 6 slots
+  after 3 class 1 attempts without acknowledgement (§12), the last two
+  after retry delays of up to 64 then 128 slots (3.3 then 6.7 s at SF7,
+  10.6 then 21.1 s at SF9; up to 256 slots each when other frames of the
+  node time out meanwhile, §12). Timeout through a relay: time on air of a 255-byte frame + 6 slots
   (forwarding delay 1, backoff 4, margin 1): 0.7 s at SF7, 2.2 s at SF9.
 - **Switch with traffic, parent root**: the root is not dropped after
   failed attempts while it is heard and its link eligible (§12): it is
@@ -861,7 +864,9 @@ assumes no frame of the exchange lost on any hop, see below.)
   first 4 samples). The attempts of one message go a root timeout and a
   retry delay apart, with one more root timeout after each round of 3
   (late acknowledgement, §12), and a failure is decided one root timeout
-  after its timeout: 18 root timeouts and 12 retry delays at most. Root
+  after its timeout: 18 root timeouts and 12 retry delays at most (64,
+  128, then 256 slots each: their range doubles with the consecutive
+  timeouts, §12, and makes up most of the figure). Root
   timeout: its acknowledgement batching delay (§16) + one acknowledgement
   frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9. Slower than a drop after 3
   attempts would be (4 root timeouts: 9 s at SF7, 30 s at SF9), but a root
@@ -903,10 +908,10 @@ assumes no frame of the exchange lost on any hop, see below.)
 Findings:
 
 1. **With traffic, local repair takes seconds** through a relay at SF7–9
-   (at most 5–17 s, retry delays included). The node switches to the next
+   (at most 12–38 s, retry delays included). The node switches to the next
    parent of its set without any exchange. Next to the root, the root is
-   kept while heard and eligible: a failed link to it is left within 60 s
-   at SF7, 112 s at SF8, 198 s at SF9 (ineligibility, or the silence limit
+   kept while heard and eligible: a failed link to it is left within 182 s
+   at SF7, 331 s at SF8, 588 s at SF9 (ineligibility, or the silence limit
    if the root is not heard).
 2. **Idle, local repair is bounded by the silence limit**, 2.5 presence
    periods (75 s at SF7–8, 150 s at SF9), and costs no airtime. The children
@@ -1225,17 +1230,32 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   + 6 slots; when the next hop is the root, the root's acknowledgement
   batching delay is added (§16).
 - **Retry delay**: after a timeout the retry waits a random delay, uniform
-  in [0, 32 slots) (1.7 s at SF7, 3.0 s at SF8, 5.3 s at SF9), drawn once
-  per frame so that its messages are retried together. Two senders hidden
-  from each other whose frames collided at their common next hop time out
-  together: retried at the timeout, they would collide again at every
-  attempt (host simulator, before the delay: about 70 % of such retries
-  collided again, mostly with the same partner, against a third of all
-  frames). The delay moves the retry only: timeouts and failure decisions
-  stay anchored on the end of the frame. A fixed range of 32 slots rather
-  than one scaled to the timeout: the relay timeout (1.8 frames of 255 B)
-  spreads two retries too little, and on 30-node networks of the host
-  simulator the scaled range gave more retries and detaches.
+  in [0, w), drawn once per frame so that its messages are retried
+  together. Two senders hidden from each other whose frames collided at
+  their common next hop time out together: retried at the timeout, they
+  would collide again at every attempt (host simulator, before the delay:
+  about 70 % of such retries collided again, mostly with the same partner,
+  against a third of all frames). The delay moves the retry only: timeouts
+  and failure decisions stay anchored on the end of the frame.
+- **Retry backoff**: w is 32 slots doubled per frame of the node timed out
+  since its last acknowledgement (any next hop), that one included, at
+  most 3 times: 64, 128, then 256 slots (3.3, 6.7, 13.3 s at SF7; 6.0,
+  11.9, 23.8 s at SF8; 10.6, 21.1, 42.2 s at SF9). Any acknowledgement of
+  one of its frames (explicit, passive, or late from the root) resets the
+  count. Binary exponential backoff, as 802.11 and 802.15.4, against
+  congestion collapse: with a fixed range, sustained collisions between
+  hidden terminals kept the channel at a relay about 90 % busy, retries a
+  third of the air time, never slowing down (30-node star of the host
+  simulator). The cap keeps every delay below one presence period (256
+  slots: 13 s at SF7, 24 s at SF8, 42 s at SF9, 84 s at SF10, 169 s at
+  SF11, 338 s at SF12; a fourth doubling would exceed it from SF8, 48 s
+  against 30 s), so that the holding of 2 periods (MP15) and the silence
+  limits keep their meaning. A base of 32 slots rather than one scaled to
+  the timeout: the relay timeout (1.8 frames of 255 B) spreads two retries
+  too little, and on 30-node networks of the host simulator the scaled
+  range gave more retries and detaches. Cost: a failed link is left later
+  (§9 repair table), and a lost message takes longer to recover (class 2
+  NACK delay below).
 - **Passive acknowledgement**: the sender overhears the next hop forwarding
   the message (identified by origin, destination, port and sequence).
 - **Explicit acknowledgement** (port 3, link-local), sent by:
@@ -1341,7 +1361,8 @@ expired, a whole path lost).
   Each new message is delivered at once; duplicates are dropped.
 - **NACK**: a received sequence above the highest one so far reveals a gap.
   After the **NACK delay** (3 timeouts towards the root and 2 retry
-  delays: the time a message retried on the last hop needs to arrive), the
+  delays, 64 then 128 slots: the time a message retried on the last hop
+  needs to arrive), the
   receiver sends a NACK with C and the missing ranges (port 10). It repeats
   it every presence period while a gap remains.
 - **Tail**: a flow with unacknowledged messages, and none sent since the
@@ -1375,14 +1396,14 @@ Recovery times (worst depth 8, a hop costing at most one class 1 timeout):
 
 | SF | NACK delay (s) | lost message, after the gap is seen (s) | lost last message, from its sending (s) | presence period if every node carried a tail (s) |
 |---|---|---|---|---|
-| 7 | 10.0 | 21 | 71 | 30 |
-| 8 | 18.6 | 39 | 80 | 45 |
-| 9 | 32.9 | 69 | 156 | 90 |
-| 10 | 63.3 | 132 | 308 | 180 |
-| 11 | 131.7 | 275 | 743 | 300 |
-| 12 | 253.2 | 524 | 1471 | 600 |
+| 7 | 16.6 | 28 | 71 | 30 |
+| 8 | 30.5 | 51 | 80 | 45 |
+| 9 | 54.0 | 90 | 156 | 90 |
+| 10 | 105.5 | 174 | 308 | 180 |
+| 11 | 216.2 | 359 | 743 | 300 |
+| 12 | 422.0 | 693 | 1471 | 600 |
 
-- At SF7–9, a lost message is recovered within 21 to 69 s of the gap being
+- At SF7–9, a lost message is recovered within 28 to 90 s of the gap being
   seen, and a lost last message within the detection targets (135 s at
   SF7–8, 270 s at SF9, §15).
 - **Tails must stay transient.** If every presence report carried one (6 B),
