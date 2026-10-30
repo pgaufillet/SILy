@@ -278,12 +278,12 @@ class LinkSamples(unittest.TestCase):
         self.assertEqual(entry.etx(), 128)
 
 
-class RootSamples(unittest.TestCase):
-    """§9, §12: towards the root, one failed sample per batching delay."""
+class _RootCase(unittest.TestCase):
+    """A relay R sending class 1 messages to the root, its next hop."""
 
-    def _relay(self):
+    def _relay(self, reroute=None):
         # R, with the root in its table, and the root.
-        r = _engine(R, ROOT, seed=2)
+        r = _engine(R, ROOT, seed=2, reroute=reroute)
         root = _engine(ROOT, None, seed=3)
         root.reliable.acknowledge(X, 0, 0)  # any frame of the root
         (hello,), now = _run(root, 0, root.reliable.batch_ms)
@@ -301,6 +301,10 @@ class RootSamples(unittest.TestCase):
         entry = r.neighbours.get(ROOT)
         return entry.ack_count - entry.acknowledged()
 
+
+class RootSamples(_RootCase):
+    """§9, §12: towards the root, one failed sample per batching delay."""
+
     def test_one_lost_batch_of_three_frames_one_failure(self):
         r, root, now = self._relay()
         ends = []
@@ -315,8 +319,11 @@ class RootSamples(unittest.TestCase):
         timeout = r.reliable.timeout_ms(ROOT)
         self.assertTrue(timeout > r.reliable.batch_ms > ends[2] - ends[0])
         # Up to the last of the 3 timeouts, before any retry times out.
-        _run(r, now, ends[2] + timeout)
+        _, now = _run(r, now, ends[2] + timeout)
         self.assertEqual(r.counters.retries, 3)
+        # Failures decided one root timeout after the timeouts, before any
+        # retry's.
+        _run(r, now, ends[2] + 2 * timeout)
         entry = r.neighbours.get(ROOT)
         self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 0))
 
@@ -326,8 +333,11 @@ class RootSamples(unittest.TestCase):
         _run(r, end1, end1 + r.reliable.batch_ms)
         _, end2 = self._send(r, end1 + r.reliable.batch_ms, 1)
         self.assertTrue(end2 - end1 >= r.reliable.batch_ms)
-        _run(r, end2, end2 + r.reliable.timeout_ms(ROOT))
-        self.assertEqual((r.counters.retries, self._failures(r)), (2, 2))
+        timeout = r.reliable.timeout_ms(ROOT)
+        _, now = _run(r, end2, end2 + timeout)
+        self.assertEqual(r.counters.retries, 2)
+        _run(r, now, end2 + 2 * timeout)  # failures decided a root timeout later
+        self.assertEqual(self._failures(r), 2)
 
     def test_every_attempt_towards_the_root_one_failure(self):
         # The attempts are a root timeout apart, longer than the batching
@@ -336,9 +346,116 @@ class RootSamples(unittest.TestCase):
         failures = []
         r.on_failure(lambda dest, port, seq, reason: failures.append(reason))
         _, end = self._send(r, now, 0)
-        _run(r, end, end + ATTEMPTS * (r.reliable.timeout_ms(ROOT) + 1000))
+        timeout = r.reliable.timeout_ms(ROOT)
+        # One root timeout more after the last attempt (late acknowledgement).
+        _run(r, end, end + ATTEMPTS * (timeout + 1000) + timeout)
         self.assertEqual((r.counters.retries, self._failures(r)), (2, 3))
         self.assertEqual(failures, [1])
+
+
+class LateRootAcknowledgements(_RootCase):
+    """§12: towards the root, a late acknowledgement of an earlier transmission
+    is accepted; a failure is decided one root timeout after the timeout."""
+
+    def test_late_acknowledgement_after_the_retry_is_a_success(self):
+        r, root, now = self._relay()
+        delivered = []
+        root.bind(20, lambda origin, msg, h: delivered.append(origin))
+        f, end = self._send(r, now, 0)
+        _rx(root, end, f)  # the root has it; its acknowledgement is late
+        timeout = r.reliable.timeout_ms(ROOT)
+        (f2,), end2 = _run(r, end, end + timeout)  # the timeout: retry at once
+        self.assertEqual((r.counters.retries, self._failures(r)), (1, 0))
+        actions = _rx(root, end2, f2)  # the retry too: a duplicate, acknowledged again
+        acks, now = _run(root, end2, end2 + root.reliable.batch_ms, actions)
+        self.assertTrue(now < end + 2 * timeout and now < end2 + timeout)
+        self.assertEqual((delivered, root.counters.duplicates), ([R], 1))
+        for a in acks:
+            _rx(r, now, a)
+        self.assertEqual(len(r.queue), 0)
+        entry = r.neighbours.get(ROOT)
+        self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 1))
+        # Nothing more: no further attempt, no failed sample.
+        frames, _ = _run(r, now, end + 2 * ATTEMPTS * timeout)
+        self.assertEqual((frames, r.counters.retries, self._failures(r)), ([], 1, 0))
+
+    def test_late_acknowledgement_of_the_last_attempt_cancels_the_drop(self):
+        calls = []
+        r, root, now = self._relay(reroute=lambda msg, hop: calls.append(hop))
+        timeout = r.reliable.timeout_ms(ROOT)
+        _, end = self._send(r, now, 0)
+        frames, end = _run(r, end, end + timeout)
+        frames, end = _run(r, end, end + timeout)  # the third attempt
+        self.assertEqual((len(frames), r.counters.retries), (1, 2))
+        f3 = frames[0]
+        _run(r, end, end + timeout)  # its timeout
+        _rx(root, end, f3)
+        (ack,), _ = _run(root, end, end + root.reliable.batch_ms)
+        late = end + timeout + timeout // 2
+        _rx(r, late, ack)
+        self.assertEqual((len(r.queue), calls), (0, []))
+        _run(r, late, end + 3 * timeout)
+        self.assertEqual((calls, self._failures(r)), ([], 2))
+
+    def test_acknowledgement_of_an_earlier_transmission_removes_the_message(self):
+        # The root has the first transmission only; its acknowledgement
+        # comes while R waits for the retry's, or once R holds the message.
+        for held in (False, True):
+            r, root, now = self._relay()
+            f, end = self._send(r, now, 0)
+            _rx(root, end, f)
+            (ack,), _ = _run(root, end, end + root.reliable.batch_ms)
+            timeout = r.reliable.timeout_ms(ROOT)
+            (f2,), end2 = _run(r, end, end + timeout)  # the retry, lost
+            if held:
+                ((slot, msg),) = r.queue.select(lambda m: True, True)
+                r.reliable.hold(slot, msg, end2)
+                self.assertEqual((r.reliable.pending(), r.reliable.held()), (0, 1))
+            _rx(r, end2, ack)
+            self.assertEqual((len(r.queue), r.counters.acks_explicit), (0, 1))
+            frames, _ = _run(r, end2, end + 4 * timeout)
+            self.assertEqual((frames, self._failures(r)), ([], 0))
+            self.assertEqual(r.neighbours.get(ROOT).acknowledged(), 1)  # late: a success
+
+    def test_no_acknowledgement_fails_one_root_timeout_after_the_last(self):
+        r, root, now = self._relay()
+        failures = []
+        r.on_failure(lambda dest, port, seq, reason: failures.append((reason, r.now)))
+        timeout = r.reliable.timeout_ms(ROOT)
+        _, end = self._send(r, now, 0)
+        frames, end2 = _run(r, end, end + timeout)
+        self.assertEqual((len(frames), self._failures(r)), (1, 0))  # failure not decided yet
+        _run(r, end2, end + 2 * timeout)
+        self.assertEqual(self._failures(r), 1)  # one root timeout after the timeout
+        frames, end3 = _run(r, end + 2 * timeout, end2 + timeout)
+        self.assertEqual((len(frames), r.counters.retries), (1, 2))
+        _run(r, end3, end3 + timeout)
+        self.assertEqual((failures, len(r.queue)), ([], 1))  # waits one root timeout more
+        _run(r, end3 + timeout, end3 + 2 * timeout)
+        self.assertEqual(failures, [(1, end3 + 2 * timeout)])
+        self.assertEqual((self._failures(r), len(r.queue)), (3, 0))
+
+    def test_failures_decided_together_in_frame_order(self):
+        # Frames A, B, then C a batching delay after B; A's late
+        # acknowledgement frees its pending failure before C times out. B's
+        # and C's failures, decided in one step, are a batching delay apart:
+        # two samples, whatever the order C and B were recorded in.
+        r, root, now = self._relay()
+        timeout = r.reliable.timeout_ms(ROOT)
+        fa, end_a = self._send(r, now, 0)
+        _rx(root, end_a, fa)
+        (ack,), _ = _run(root, end_a, end_a + root.reliable.batch_ms)
+        _, end_b = self._send(r, end_a, 1)
+        _, end_c = self._send(r, end_b + r.reliable.batch_ms, 2)
+        self.assertTrue(end_c < end_a + timeout and end_c - end_b >= r.reliable.batch_ms)
+        _, now = _run(r, end_c, end_a + timeout)  # A times out: its retry
+        _rx(r, now, ack)  # A acknowledged late: a success
+        _, now = _run(r, now, end_c + timeout)  # B and C time out: their retries
+        self.assertTrue(now < end_b + 2 * timeout)  # B's failure not decided yet
+        self.assertEqual((r.counters.retries, len(r.queue), self._failures(r)), (3, 2, 0))
+        r.step(end_c + 2 * timeout, None)  # both failures due in this step
+        entry = r.neighbours.get(ROOT)
+        self.assertEqual((entry.ack_count, entry.acknowledged()), (3, 1))
 
 
 def _copies(engine):

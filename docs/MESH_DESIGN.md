@@ -509,7 +509,9 @@ acknowledgement window and the time of its newest failure.
   (an explicit entry acknowledges them all, §12; a **passive
   acknowledgement**, the node overhearing the parent forward one of them
   within its forwarding delay, §7, proves the frame was received), a
-  failure when they all time out (§12). Towards the root, **one failed
+  failure when they all time out (§12). Towards the root, the failure is
+  decided one root timeout after the timeout, and an acknowledgement of the
+  frame arriving before (late, §12) makes it a success instead; **one failed
   sample per batching delay**: a timeout gives no failed sample if its
   frame ended within one batching delay (§16) of the frame of the last
   failed sample towards the root. The root acknowledges in batches, so one
@@ -830,12 +832,12 @@ acknowledgement window and the time of its newest failure.
 
 | SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
 |---|---|---|---|---|---|---|---|---|
-| 7 | 1.6 | 2.1 | 6.7 | 75 | 7.0 | 13 | 12 | 11 |
-| 8 | 3.0 | 3.8 | 12.7 | 75 | 12.6 | 24 | 10 | 17 |
-| 9 | 5.3 | 6.7 | 22.4 | 150 | 22.4 | 42 | 10 | 15 |
-| 10 | 10.6 | 12.8 | 42.2 | 300 | 44.8 | 84 | 10 | 14 |
-| 11 | 21.1 | 26.9 | 89.5 | 750 | 89.7 | 169 | 10 | 12 |
-| 12 | 42.2 | 50.8 | 168.8 | 1500 | 179.4 | 338 | 10 | 11 |
+| 7 | 1.6 | 2.1 | 9.0 | 75 | 7.0 | 13 | 12 | 11 |
+| 8 | 3.0 | 3.8 | 16.9 | 75 | 12.6 | 24 | 10 | 17 |
+| 9 | 5.3 | 6.7 | 29.8 | 150 | 22.4 | 42 | 10 | 15 |
+| 10 | 10.6 | 12.8 | 56.3 | 300 | 44.8 | 84 | 10 | 14 |
+| 11 | 21.1 | 26.9 | 119.4 | 750 | 89.7 | 169 | 10 | 12 |
+| 12 | 42.2 | 50.8 | 225.0 | 1500 | 179.4 | 338 | 10 | 11 |
 
 (Times in seconds, from section E of `mesh_budget.py`; "switch, idle" is
 the silence limit, 2.5 presence periods; "global repair wave" assumes no
@@ -845,7 +847,9 @@ frame of the exchange lost on any hop, see below.)
   attempts without acknowledgement (§12). Timeout through a relay: time on air
   of a 255-byte frame + 6 slots (forwarding delay 1, backoff 4, margin 1): 0.7
   s at SF7, 2.2 s at SF9. Through the root: its acknowledgement batching delay
-  (§16) + one acknowledgement frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9.
+  (§16) + one acknowledgement frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9;
+  the root is dropped one more timeout after the last attempt (late
+  acknowledgement, §12).
 - **Switch, idle**: no frame from the preferred parent for 2.5 presence
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
@@ -1212,6 +1216,18 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   next hop's acknowledgement window, whatever its messages; towards the
   root, at most one failed sample per batching delay, one lost batch being
   one loss (§9).
+- **Late root acknowledgement**: under load the root's medium access can
+  delay its batched acknowledgement beyond the timeout. Towards the root
+  the retry still goes at the timeout, but the sender keeps the frame
+  counters of the message's last 3 transmissions: an acknowledgement of
+  any of them removes the message, whether it waits for an
+  acknowledgement, is queued for its retry or is held. A frame's failed
+  sample is decided one root timeout after its timeout, and an
+  acknowledgement of that frame arriving before makes it a success
+  instead; after the last attempt the sender waits one more root timeout
+  before dropping the root. Ignored, late acknowledgements would fail
+  samples and, after three attempts, drop the root although no frame was
+  lost (TLA+ `DODAG_line_lateignore_drop`; accepted: `DODAG_*_lateack_*`).
 - **Duplicate cache** on every node: (origin, destination, port, sequence),
   128 entries, each kept for at least 2 presence periods. A duplicate is
   always acknowledged. **Custody**: the final destination drops it; any
@@ -1226,7 +1242,9 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   already forwarded the message travels the rest of the path once more;
   the destination filters it.
 - **Upward failure**: after 3 attempts the preferred parent is dropped (§9)
-  and the message goes to the next parent with fresh attempts.
+  and the message goes to the next parent with fresh attempts; the root is
+  dropped one root timeout after the last attempt (late acknowledgement,
+  above).
 - **Downward failure** (source route): error to the root (port 4, reason 1 or
   2); the root reroutes (§10) and sends the message again, being its origin
   (or, for P2P, the origin of the downward half).
@@ -1802,7 +1820,9 @@ SF9, 46 s at SF12; at most 180 s/h of the root's budget, reached only under
 saturating traffic (1000 single-punch frames/h at SF7 cost about 51 s/h).
 The root beacon, two per presence period, takes 15 to 27 s/h of the root's
 budget besides (27 s/h at SF8).
-Class 1 retransmission timeouts must exceed this delay (§9).
+Class 1 retransmission timeouts must exceed this delay (§9). Under load the
+root's medium access can delay a batch beyond the timeout; such a late
+acknowledgement is still accepted (§12).
 
 ### Findings
 

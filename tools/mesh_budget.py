@@ -293,9 +293,11 @@ def main():
         peak = TRICKLE_K * adv / (imin / 2)
         node = n_int * adv * WINDOW / (GLOBAL_REPAIR_MIN * live)
         rejoin = (1 + DETACH_HOLD + 1) * imin + WINDOW_SLOTS * slot
+        # Towards the root, one more root timeout after the last attempt for
+        # its late acknowledgement (§12).
         print(
             f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {N_TX * rto_relay:>6.1f}  "
-            f"{N_TX * rto_root:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
+            f"{(N_TX + 1) * rto_root:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
             f"{DEPTH * imin:>6.1f}  {TRICKLE_K * n_int:>6}  {peak:>8.0%}  {node:>28.1f}"
         )
 

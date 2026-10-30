@@ -31,6 +31,19 @@ one batching delay of the frame of the last failed sample towards the root
 gives no sample: one lost batch acknowledges several frames of a relay and
 is one loss, not one per frame (the attempts of one message are a root
 timeout apart, longer than the batching delay, so each still fails once).
+
+**Late root acknowledgement** (§12): under load the root's medium access
+can delay its batch beyond the timeout. Towards the root the retry still
+goes at the timeout, but each slot keeps the frame counters of its
+message's last `ATTEMPTS` transmissions there: a root acknowledgement of
+any of them removes the message whatever its state (waiting, queued for
+its retry, held, or `_LATE` below). A timed-out frame's failure is decided
+one root timeout after its timeout (a table of one pending failure per
+slot: a slot times out at most once per root timeout), then subject to
+the batching delay rule; the root's acknowledgement of that frame arriving
+before cancels it and counts as a success. After the last attempt the
+message waits one more root timeout (`_LATE`) before the reroute below.
+
 After `ATTEMPTS` (3) transmissions to one next hop, the injected
 ``engine.reroute(msg, hop)`` ("next hop after failure"; routing's parent
 set later) returns another next hop (fresh attempts), `HOLD` (no route for
@@ -81,8 +94,9 @@ time it is held, across resumptions. Class 1 alone cannot survive a relay
 reboot after the relay acknowledged (explicitly, or by forwarding a frame
 then lost): class 2 recovers it (§12).
 
-Bounded memory: per-slot state arrays of the queue size, a 128-entry
-duplicate cache, an 8-entry batch.
+Bounded memory: per-slot state arrays of the queue size (`ATTEMPTS`
+counters per slot towards the root), a queue-size table of pending root
+failures, a 128-entry duplicate cache, an 8-entry batch.
 """
 
 from mesh import frame
@@ -117,6 +131,7 @@ NO_HOP = BROADCAST  # next hop field of an error without next hop (reason 3)
 _IDLE = 0  # queued, not waiting for an acknowledgement
 _PENDING = 1  # sent, waiting for an acknowledgement
 _HELD = 2  # held during repair
+_LATE = 3  # towards the root, last attempt timed out: one more root timeout
 
 
 def _classed(msg):
@@ -293,6 +308,10 @@ class Reliable:
         self._osrc = [0] * n  # owed explicit acknowledgement: link source,
         self._octr = [0] * n  # frame counter,
         self._odue = [None] * n  # and time it is due
+        self._rctr = [0] * (n * ATTEMPTS)  # towards the root: counters (low 16 bits)
+        self._rn = bytearray(n)  # of the slot's last ATTEMPTS transmissions, oldest first
+        self._fctr = [0] * n  # towards the root, frames timed out, failure undecided:
+        self._fend = [None] * n  # counter (low 16 bits), frame end (None: free entry)
         self._keys = {}  # identity -> slot, pending messages (passive acknowledgement)
         self._batch = []  # root: (link source, counter) waiting for the batch
         self._batch_due = None
@@ -316,7 +335,7 @@ class Reliable:
 
     def pending(self):
         """Return the number of messages waiting for an acknowledgement."""
-        return self._count(_PENDING)
+        return self._count(_PENDING) + self._count(_LATE)
 
     def _count(self, state):
         n = 0
@@ -349,7 +368,8 @@ class Reliable:
         for slot, msg in self.queue.select(_classed, True):
             if identity(msg, own, BROADCAST) != key:
                 continue
-            if self._msg[slot] is msg and self._state[slot] == _PENDING:
+            state = self._state[slot]
+            if self._msg[slot] is msg and (state == _PENDING or state == _LATE):
                 if self._hop[slot] == source:
                     continue
             return True
@@ -373,6 +393,7 @@ class Reliable:
         self._key[slot] = None
         self._since[slot] = None
         self._odue[slot] = None
+        self._rn[slot] = 0
 
     def _at(self, time):
         if self._next is None or time < self._next:
@@ -409,7 +430,31 @@ class Reliable:
             self._due[slot] = due
             self._key[slot] = key
             self._keys[key] = slot
+            if dest == ROOT:
+                self._record(slot, c16)
             self._at(due)
+
+    def _record(self, slot, c16):
+        # Towards the root: keep the counter of this transmission, with those
+        # of the slot's previous ones (at most ATTEMPTS, oldest dropped).
+        ctr = self._rctr
+        base = slot * ATTEMPTS
+        n = self._rn[slot]
+        if n == ATTEMPTS:
+            n -= 1
+            for i in range(base, base + n):
+                ctr[i] = ctr[i + 1]
+        ctr[base + n] = c16
+        self._rn[slot] = n + 1
+
+    def _sent_to_root(self, slot, c16):
+        # True if one of the slot's kept transmissions to the root had counter c16.
+        base = slot * ATTEMPTS
+        ctr = self._rctr
+        for i in range(base, base + self._rn[slot]):
+            if ctr[i] == c16:
+                return True
+        return False
 
     def overheard(self, header, messages, now):
         """Passive acknowledgement: the next hop forwards a pending message."""
@@ -421,7 +466,9 @@ class Reliable:
                 continue
             slot = self._keys.get(identity(m, source, header.dest))
             if slot is not None and self._hop[slot] == source:
-                self._acknowledged(slot, True)
+                if source == ROOT:
+                    self._late(self._ctr[slot])
+                self._acknowledged(slot, True, self._ctr[slot])
 
     def on_ack(self, origin, msg, header):
         """Port 3 handler: explicit acknowledgements from the link source origin."""
@@ -431,16 +478,27 @@ class Reliable:
             self.counters.malformed_acks += 1
             return
         own = self.engine.address
+        queue = self.queue
         for source, c16 in entries:
             if source != own:
                 continue
-            for slot in range(self.queue.size):
+            if origin == ROOT:
+                # Any transmission kept, whatever the message's state (late
+                # acknowledgement, §12).
+                self._late(c16)
+                rn = self._rn
+                for slot in range(queue.size):
+                    if rn[slot] and self._sent_to_root(slot, c16):
+                        if queue.holds(slot, self._msg[slot]):
+                            self._acknowledged(slot, False, c16)
+                continue
+            for slot in range(queue.size):
                 if (
                     self._state[slot] == _PENDING
                     and self._ctr[slot] == c16
                     and self._hop[slot] == origin
                 ):
-                    self._acknowledged(slot, False)
+                    self._acknowledged(slot, False, c16)
 
     def _same_frame(self, slot):
         # The other pending slots sent in the frame of slot, not yet sampled.
@@ -455,7 +513,9 @@ class Reliable:
                     out.append(i)
         return out
 
-    def _acknowledged(self, slot, passive):
+    def _acknowledged(self, slot, passive, c16):
+        # c16: counter of the frame acknowledged (an earlier one: late, towards
+        # the root, its sample given by `_late`).
         msg = self._msg[slot]
         hop = self._hop[slot]
         c = self.counters
@@ -463,7 +523,7 @@ class Reliable:
             c.acks_passive += 1
         else:
             c.acks_explicit += 1
-        if not self._sampled[slot]:
+        if c16 == self._ctr[slot] and not self._sampled[slot]:
             # One sample per frame (§9): the frame's other messages give none.
             self.engine.neighbours.acked(hop, True, self.engine.now)
             for i in self._same_frame(slot):
@@ -475,16 +535,37 @@ class Reliable:
         queue = self.queue
         msg = self._msg[slot]
         hop = self._hop[slot]
-        if not self._sampled[slot] and not self._same_frame(slot):
-            # A failure once the frame's last pending message times out.
-            if hop != ROOT or self._root_failure(self._due[slot] - self.root_timeout_ms):
-                self.engine.neighbours.acked(hop, False, now)
+        due = self._due[slot]
         self._due[slot] = None
+        if self._state[slot] == _LATE:
+            self._state[slot] = _IDLE
+            self._exhausted(slot, msg, hop, now)
+            return
+        if not self._sampled[slot] and not self._same_frame(slot):
+            # A failure once the frame's last pending message times out;
+            # towards the root, one root timeout later unless acknowledged.
+            if hop == ROOT:
+                self._defer(self._ctr[slot], due - self.root_timeout_ms, now)
+            else:
+                self.engine.neighbours.acked(hop, False, now)
+        if hop == ROOT:
+            self._sampled[slot] = 1  # its sample: deferred, or by the frame's last message
         self._state[slot] = _IDLE
         if queue.attempts(slot, msg) < ATTEMPTS:
             queue.retry(slot, msg)
             self.engine.access_at(now)
             return
+        if hop == ROOT:
+            # The last attempt: one more root timeout for its late acknowledgement.
+            self._state[slot] = _LATE
+            self._due[slot] = due + self.root_timeout_ms
+            self._at(self._due[slot])
+            return
+        self._exhausted(slot, msg, hop, now)
+
+    def _exhausted(self, slot, msg, hop, now):
+        # ATTEMPTS transmissions to hop unacknowledged: next hop after failure.
+        queue = self.queue
         reroute = self.engine.reroute
         alt = reroute(msg, hop) if reroute is not None else None
         if alt == HOLD:
@@ -505,6 +586,43 @@ class Reliable:
             return False
         self._root_fail = end
         return True
+
+    def _defer(self, c16, end, now):
+        # The failure of the root frame (c16, ended at end) timed out: decided
+        # one root timeout later (`_decide`), cancelled by its late
+        # acknowledgement (`_late`). One entry per slot is enough (a slot
+        # times out at most once per root timeout); if full, the oldest entry
+        # is decided now.
+        ends = self._fend
+        free = None
+        for i in range(len(ends)):
+            e = ends[i]
+            if e is None:
+                free = i
+                break
+            if free is None or e < ends[free]:
+                free = i
+        if ends[free] is not None:
+            self._decide(free, now)
+        self._fctr[free] = c16
+        ends[free] = end
+        self._at(end + 2 * self.root_timeout_ms)
+
+    def _decide(self, i, now):
+        end = self._fend[i]
+        self._fend[i] = None
+        if self._root_failure(end):
+            self.engine.neighbours.acked(ROOT, False, now)
+
+    def _late(self, c16):
+        # A root acknowledgement of the frame c16: if that frame timed out,
+        # its failure is cancelled and the frame gives a success instead.
+        ends = self._fend
+        for i in range(len(ends)):
+            if ends[i] is not None and self._fctr[i] == c16:
+                ends[i] = None
+                self.engine.neighbours.acked(ROOT, True, self.engine.now)
+                return
 
     # --- Holding -----------------------------------------------------------------
 
@@ -711,6 +829,24 @@ class Reliable:
                 self._flush()
             else:
                 self._at(self._batch_due)
+        # Failures towards the root first: decided before a drop of the root,
+        # the earliest frame first (the batching delay rule compares frame
+        # ends; a lower entry may hold a later frame, once freed by `_late`).
+        ends = self._fend
+        wait = 2 * self.root_timeout_ms
+        while True:
+            first = None
+            for i in range(len(ends)):
+                end = ends[i]
+                if end is not None and now >= end + wait:
+                    if first is None or end < ends[first]:
+                        first = i
+            if first is None:
+                break
+            self._decide(first, now)
+        for end in ends:
+            if end is not None:
+                self._at(end + wait)
         queue = self.queue
         for slot in range(queue.size):
             msg = self._msg[slot]

@@ -240,9 +240,10 @@ section,
 and later defects of the readings: a child cannot follow its preferred
 parent's rank increase (it detaches), a node behind a new DODAG version
 detaches after one lost advertisement, a node rejoins through the first
-neighbour that answers its solicitation, not the best, and a node
+neighbour that answers its solicitation, not the best, a node
 whose link cost rises takes its own descendant as parent without any
-loss; against MP5, MP10, MP11 and MP12.
+loss, and a late root acknowledgement, ignored, makes a node drop the
+root without any loss; against MP5, MP10, MP11 and MP12.
 Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 
 ## Scope and abstractions
@@ -314,6 +315,23 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   only the poison and the solicitation); a detaching node holds its waiting
   copies. Only the destination of the acknowledgement hears it
   (pessimistic: neighbours overhearing it are not modelled).
+- **Late root acknowledgements** (`LateAck`, with `Acks = "frame"`): the
+  root batches its acknowledgements, and under load its medium access can
+  delay one beyond the root timeout. `"none"` (the earlier model, every
+  configuration before this option): an acknowledgement on its way always
+  comes before the timeout. `"ignore"` (the code before late
+  acknowledgements were accepted): the timeout towards the root may also
+  fire while the root's acknowledgement is on its way, which is then
+  ignored (retry, or the drop after the last attempt). `"accept"` (the
+  code): the same timeout and retry, but the acknowledgement of the
+  earlier transmission stays expected (late) and, when it comes, removes
+  the copy wherever it is (queued, waiting, held); after the last attempt
+  the drop waits for the acknowledgement of that attempt. Timing kept: an
+  acknowledgement is late by less than one root timeout, so it comes (or
+  is lost) before the next timeout of the copy and before the drop. The
+  code accepts an acknowledgement of any of the last 3 transmissions
+  while the message is queued, even later; the model leaves that out, and
+  the failed samples (`AckWindow`) too.
 - **Class 1**: one message per origin in `Origins`; per node a copy queued,
   waiting (passively acknowledged by the next hop's forward, overheard, not
   when the forward is addressed to the waiting node itself — as the code —
@@ -360,6 +378,10 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 - **NoLagDetach** (MP10, action property): a node whose preferred parent is
   not lost never detaches because that parent moved to a newer version: no
   connected node detaches during a global repair.
+- **RootKept** (`LateAck`): no node drops the root after failed attempts.
+  Every such drop takes three timeouts of one copy towards the root, each
+  after a lost frame or acknowledgement, unless an acknowledgement on its
+  way is ignored: with `MaxLoss` < 3 it must hold.
 - Witnesses: loops form (`NoCycle` violated), messages are delivered
   (`NeverDelivered`), errors reach origins (`NeverError`), data-path
   validation fires (`NoRankError`); a node keeps its parent heard at a rank
@@ -367,7 +389,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   (`NoBoundDetach`), a node stays attached through a parent of a newer
   version (`NoLagParent`), a class 1 message is taken across versions
   (`NoCrossVersion`), a node rejoins at the close of its answer window
-  (`NoWindowRejoin`).
+  (`NoWindowRejoin`), a copy is retried while the root's acknowledgement
+  of an earlier transmission is still expected (`NoLateRetry`).
 
 ## Fixes modelled
 
@@ -486,6 +509,16 @@ of cost rise overall:
 | Rejected: rank increase advertised at once | in the event model an advertisement queued at once still leaves the window between the increase and its frame: the trace above (1's frame is due, 0's frame comes first). At its idealised limit (`IncAdv`: the frame is the very next step, which no radio gives) no loop without loss, a loop with one loss (the advertisement lost by 2, which keeps rank 2) | `DODAG_chain_current_loop`, `DODAG_chain_advertise_nocycle`, `DODAG_chain_advertise_loss` |
 | Rejected: test against the rank on air, or the lowest of it and the current rank | no loss: 1 puts rank 4 on air, 2 follows (rank 5) but has not sent it; 1 still hears 2 at 2 < 4 and takes it. A child's rank comes from a rank the node sent, but the node may hear an older rank of the child still: the last rank sent bounds nothing | `DODAG_chain_air_loop`, `DODAG_chain_minair_loop` |
 | Retained: test against L | no loop with at most 1 consecutive loss per link: chain, Rise 4, ≤ 2 losses (12 790 states, 7 s); line, relay 1 dies, a message, Rise 2, ≤ 2 losses, also no silent loss and no detach while the parent stays attached (2 986 432 states, 23 min); subtree, relay 1 dies, Rise 1, ≤ 2 losses, also KeepParent (722 276 states, 36 min). No loop without loss, relay 1 dies, Rise 4 (checked once, not kept: line 16 s, diamond 2 min, follow 3 min, rejoin 5 min, subtree 3.6 million states, 50 min). Liveness: MP5Live, MP10, LoopsEnd, RanksSettle, CutOffLive, RoutesSettle on the chain, Rise 4, a message, ≤ 2 losses in any pattern (102 365 states, 9 min); LoopsEnd, RanksSettle, MP10Live, CutOffLive, RoutesSettle on the line, relay 1 dies, a message, Rise 2, ≤ 2 losses in any pattern (879 344 states, 22 min) and on the subtree graph, relay 1 dies, Rise 1, ≤ 1 loss (24 930 states, 2 min). With fixed costs, every earlier `DODAG` configuration run with this test (`Thr = "low"`) keeps its expected outcome: the 35 that hold still hold, the 27 defects and witnesses still fail on the same property (loops after two consecutive losses included: the rule does not cover views older than an attach) | `DODAG_*_low_*` |
+
+Late root acknowledgements, on the code since the test against L (`Thr =
+"low"`):
+
+| Item | Result | Configurations |
+|---|---|---|
+| Late acknowledgement ignored (the code before) | no loss at all: the timeouts fire while the root's acknowledgements are on their way, and after 3 attempts a node drops the root | `DODAG_line_lateignore_drop` |
+| Late acknowledgement accepted (fix) | no silent loss and the root never dropped with ≤ 2 losses in any pattern (line, relay 1 dies; diamond, relay 1 dies, two messages: 280 s); MP5Live, LoopsEnd, RanksSettle, MP10Live (line, no death; diamond, relay 1 dies; ≤ 2 losses in any pattern) | `DODAG_*_lateack_MP5`, `DODAG_*_lateack_live` |
+| Non-vacuity | a retry goes while the acknowledgement of the earlier transmission is still expected | `DODAG_line_lateack_witness_retry` |
+| Earlier configurations | given `LateAck = "none"`, the earlier model (state count unchanged where compared: 18 839) | the 74 other `DODAG_*` |
 
 **Why L.** Every rank a node puts on air since it attached is at least
 L; a child's rank is the rank it heard from its parent plus a link cost
@@ -655,6 +688,24 @@ How each fix is implemented, what it costs, and the limits accepted.
   against the current rank, B took C, heard at its rank from before it
   followed B's increase, and the cycle B → C → B formed on 41 of 56 seeds
   tried, none with the test against L).
+- **Code changes for late root acknowledgements**: `Reliable`
+  (reliable.py) keeps, per queue slot, the frame counters of the
+  message's last 3 transmissions to the root (`_record`); an
+  acknowledgement from the root of any of them removes the message
+  whatever its state (`on_ack`: waiting, queued for its retry, held, or
+  waiting after the last attempt). The retry still goes at the timeout.
+  A frame's failed sample towards the root is decided one root timeout
+  after its timeout (`_defer`, `_decide`, then the one failed sample per
+  batching delay rule), and an acknowledgement of that frame arriving
+  before cancels it and counts as a success (`_late`); after the last
+  attempt the message waits one more root timeout (state `_LATE`) before
+  the next hop after failure. Cost: per queue slot 3 counters, plus a
+  table of one pending failure per slot; the root is dropped one root
+  timeout later after a real loss (MESH_DESIGN §9 repair table), a real
+  loss is read one root timeout later, and real-loss recovery is not
+  slowed (the retry is unchanged). MESH_DESIGN §12 (late root
+  acknowledgement) describes it; host tests `LateRootAcknowledgements`
+  and `RootSamples` (tests/test_reliable.py).
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
