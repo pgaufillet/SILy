@@ -29,13 +29,23 @@ received), a failure when the last of them still pending times out without
 any acknowledged. Towards the root, a failure of a frame that ended within
 one batching delay of the frame of the last failed sample towards the root
 gives no sample: one lost batch acknowledges several frames of a relay and
-is one loss, not one per frame (the attempts of one message are a root
-timeout apart, longer than the batching delay, so each still fails once).
+is one loss, not one per frame (the attempts of one message are more than
+a root timeout apart, longer than the batching delay, so each still fails
+once).
+
+**Retry delay** (§12): a timed-out message is queued again after a random
+delay in [0, `RETRY_SLOTS` slots) (``retry_ms``, from the engine's random
+source; one draw per frame, whose messages stay together), waiting
+meanwhile: two hidden senders whose frames collided at their common next
+hop time out together and would retry together, and collide again, at
+every attempt. The delay moves the retry only: timeouts and failure
+decisions stay anchored on the frame's end.
 
 **Late root acknowledgement** (§12): under load the root's medium access
 can delay its batch beyond the timeout. Towards the root the retry still
-goes at the timeout, but each slot keeps the frame counters of its
-message's last `ATTEMPTS` transmissions there: a root acknowledgement of
+goes after the timeout (and its delay), but each slot keeps the frame
+counters of its message's last `ATTEMPTS` transmissions there: a root
+acknowledgement of
 any of them removes the message whatever its state (waiting, queued for
 its retry, held, or `_LATE` below). A timed-out frame's failure is decided
 one root timeout after its timeout (a table of one pending failure per
@@ -46,8 +56,11 @@ message waits one more root timeout (`_LATE`) before the reroute below.
 
 After `ATTEMPTS` (3) transmissions to one next hop, the injected
 ``engine.reroute(msg, hop)`` ("next hop after failure"; routing's parent
-set later) returns another next hop (fresh attempts), `HOLD` (no route for
-now: held) or None (no alternative: the message fails, reason 1).
+set later) returns another next hop (fresh attempts), hop itself (kept:
+fresh attempts towards it, after a retry delay; routing keeps the root
+while it is a candidate apart from drops, `mesh.parents`), `HOLD` (no
+route for now: held) or None (no alternative: the message fails, reason
+1).
 
 **Holding during repair** (MP15): a class 1/2 message without next hop
 (``engine.next_hop`` returns None, or `HOLD` above) keeps its queue entry
@@ -101,6 +114,7 @@ failures, a 128-entry duplicate cache, an 8-entry batch.
 
 from mesh import frame
 from mesh.frame import BROADCAST, DOWNWARD, FIRST_HOP, LINK_LOCAL, P2P, ROOT, UPWARD, Message
+from mesh.platform import randbelow
 from mesh.ports import ACK, ERROR
 from mesh.txqueue import accepted
 
@@ -113,6 +127,7 @@ DUPLICATES = 128  # duplicate cache entries (§12)
 DUPLICATE_PERIODS = 2  # presence periods an entry is kept
 HOLD_PERIODS = 2  # presence periods a message without route is held (MP15)
 POLL_SLOTS = 32  # held messages query the route again every Imin (§9)
+RETRY_SLOTS = 32  # a retry waits a random delay in [0, 32 slots) after the timeout (§12)
 
 HOLD = -1  # reroute result: no route for now, hold the message
 
@@ -132,6 +147,7 @@ _IDLE = 0  # queued, not waiting for an acknowledgement
 _PENDING = 1  # sent, waiting for an acknowledgement
 _HELD = 2  # held during repair
 _LATE = 3  # towards the root, last attempt timed out: one more root timeout
+_DELAY = 4  # timed out, queued: its retry waits its random delay
 
 
 def _classed(msg):
@@ -296,6 +312,7 @@ class Reliable:
         self.batch_ms = ACK_SHARE * ack_frame
         self.root_timeout_ms = self.batch_ms + ack_frame + TIMEOUT_SLOTS * slot
         self.poll_ms = POLL_SLOTS * slot
+        self.retry_ms = RETRY_SLOTS * slot  # bound (excluded) of a retry's random delay
         n = self.queue.size
         self._msg = [None] * n  # message tracked in each queue slot
         self._state = bytearray(n)
@@ -316,6 +333,10 @@ class Reliable:
         self._batch = []  # root: (link source, counter) waiting for the batch
         self._batch_due = None
         self._root_fail = None  # end of the frame of the last failed sample towards the root
+        self._delay_at = None  # last retry delay drawn: time, frame (next hop, counter), delay
+        self._delay_hop = 0
+        self._delay_ctr = 0
+        self._delay = 0
         self._poll = None
         self._next = None
 
@@ -537,6 +558,11 @@ class Reliable:
         hop = self._hop[slot]
         due = self._due[slot]
         self._due[slot] = None
+        if self._state[slot] == _DELAY:
+            self._state[slot] = _IDLE
+            queue.retry(slot, msg)
+            self.engine.access_at(now)
+            return
         if self._state[slot] == _LATE:
             self._state[slot] = _IDLE
             self._exhausted(slot, msg, hop, now)
@@ -552,8 +578,7 @@ class Reliable:
             self._sampled[slot] = 1  # its sample: deferred, or by the frame's last message
         self._state[slot] = _IDLE
         if queue.attempts(slot, msg) < ATTEMPTS:
-            queue.retry(slot, msg)
-            self.engine.access_at(now)
+            self._retry(slot, msg, False, now)
             return
         if hop == ROOT:
             # The last attempt: one more root timeout for its late acknowledgement.
@@ -570,13 +595,43 @@ class Reliable:
         alt = reroute(msg, hop) if reroute is not None else None
         if alt == HOLD:
             self.hold(slot, msg, now)
-        elif alt is None or alt == hop:
+        elif alt is None:
             self.counters.unreachable += 1
             self.fail(slot, msg, UNREACHABLE, hop, now)
+        elif alt == hop:
+            # hop kept (routing: the root while it is a candidate apart from
+            # drops): fresh attempts towards it, after a delay as any retry.
+            self._retry(slot, msg, True, now)
         else:
             self.counters.reroutes += 1
             queue.retry(slot, msg, alt)
             self.engine.access_at(now)
+
+    def _retry(self, slot, msg, fresh, now):
+        # Queue msg in slot again (fresh: its attempts restart) after a
+        # random delay in [0, retry_ms): senders whose frames collided at
+        # their common next hop time out together, and would otherwise retry
+        # together and collide again. One delay per frame timed out (its
+        # messages time out in one step): they are retried together. The
+        # message keeps waiting (not packed) until then; the timeouts and
+        # failure decisions stay anchored on the frame's end.
+        queue = self.queue
+        queue.retry(slot, msg, None, fresh)
+        hop = self._hop[slot]
+        ctr = self._ctr[slot]
+        if now != self._delay_at or hop != self._delay_hop or ctr != self._delay_ctr:
+            self._delay_at = now
+            self._delay_hop = hop
+            self._delay_ctr = ctr
+            self._delay = randbelow(self.engine.random, self.retry_ms)
+        delay = self._delay
+        if not delay:
+            self.engine.access_at(now)
+            return
+        queue.hold(slot, msg)
+        self._state[slot] = _DELAY
+        self._due[slot] = now + delay
+        self._at(self._due[slot])
 
     def _root_failure(self, end):
         # True if the failure of the frame ended at end gives a sample: one

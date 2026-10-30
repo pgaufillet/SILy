@@ -239,7 +239,8 @@ class Failures(unittest.TestCase):
         self.assertEqual((dest, port, reason), (ROOT, 20, UNREACHABLE))
         self.assertEqual(seq, line.data_frames(N)[0][2][0].seq)
         timeout = n.reliable.timeout_ms(R)
-        self.assertTrue(1000 + 3 * timeout <= t < 1000 + 3 * timeout + 1000, t)
+        delays = 2 * n.reliable.retry_ms  # before the second and the third attempts
+        self.assertTrue(1000 + 3 * timeout <= t < 1000 + 3 * timeout + delays + 1000, t)
         self.assertEqual((n.counters.retries, n.counters.unreachable, len(n.queue)), (2, 1, 0))
         entry = n.neighbours.get(R)
         self.assertEqual((entry.ack_count, entry.acknowledged()), (3, 0))

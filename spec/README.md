@@ -49,7 +49,9 @@ outcome differs from its expectation. A full run takes about 75 minutes on
 and its two-version safety configurations on the diamond (≈ 8 and 3
 minutes; with the answer window and its ghost variables ≈ 15 minutes on 4
 cores), plus about 1.5 hours for the link cost rise configurations
-(`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 35 minutes each).
+(`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 35 minutes each),
+and about 20 minutes for the link death configurations (`DODAG_*_cutlive`:
+1.5 to 9 minutes each).
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
@@ -242,8 +244,10 @@ parent's rank increase (it detaches), a node behind a new DODAG version
 detaches after one lost advertisement, a node rejoins through the first
 neighbour that answers its solicitation, not the best, a node
 whose link cost rises takes its own descendant as parent without any
-loss, and a late root acknowledgement, ignored, makes a node drop the
-root without any loss; against MP5, MP10, MP11 and MP12.
+loss, a late root acknowledgement, ignored, makes a node drop the
+root without any loss, and three frames of a root child lost at the root
+(collisions, no failed link) make it drop the root, its only candidate,
+and detach; against MP5, MP10, MP11 and MP12.
 Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 
 ## Scope and abstractions
@@ -262,7 +266,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 - **Ranks** in whole hops (MIN_HOP 8 = 1): the hysteresis of 4 never holds a
   change back, the switch threshold 12 is a gain of 2 hops; 254 and
   MaxRankIncrease 56 scaled to `MaxRank` = 6 and `MaxInc` = 3. Links always
-  eligible (no ETX estimation: `AckWindow`/`LinkCut` cover it). Parent sets
+  eligible (no ETX estimation: `AckWindow`/`LinkCut` cover it), except a
+  dead link (`Cut`, below). Parent sets
   not truncated to 3 (degree ≤ 3). Link costs are fixed (`Rise = 0`, a
   rank then rises only by a local repair after a relay death, `follow`
   graph) or rise (`Rise` > 0, below): the environment raises a node's
@@ -332,6 +337,33 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   code accepts an acknowledgement of any of the last 3 transmissions
   while the message is queued, even later; the model leaves that out, and
   the failed samples (`AckWindow`) too.
+- **Exhausted attempts** (`Exhaust`): what the last timeout of a copy does
+  to its hop. `"drop"` (the code before `"keeproot"`, every configuration
+  before this option): the hop is dropped (`Parents.next_parent`), the
+  node selects again, the copy goes to the new preferred parent with fresh
+  attempts or is held; under the test against L the root is a root
+  child's only candidate, so the drop is a detach. `"keeproot"` (the
+  code): towards the root, while the root is still a candidate apart from
+  drops (heard, i.e. its entry not expired; link eligible; within the
+  bound), the copy is queued towards the root again with fresh attempts
+  instead; only the silence limit or the link's ineligibility removes the
+  root. `"keeplast"`: the
+  same for the preferred parent, root or not, when it is the node's last
+  candidate (dropping it would detach the node); otherwise the drop. The
+  random retry delay that goes with it in the code is timing only,
+  outside this untimed model.
+- **Link death** (`Cut`, with `Acks = "frame"`): `"none"` (every
+  configuration before this option); `"both"`: the link 0 – 1 dies once,
+  at any moment, both ways; `"up"`: only 1 → 0 dies (the root no longer
+  hears node 1, node 1 still hears the root). A dead link loses every
+  frame and acknowledgement, outside the loss bounds, and carries no route
+  (`MP10Live`, `CutOffLive` and error delivery read the graph of live
+  links). The silence limit removes a neighbour no longer heard (`Expire`,
+  as for a dead relay). Node 1's timeouts towards the root after the death
+  are failed samples, and `INELIG` = 4 of them make the link ineligible
+  (13 from a full window, `AckWindow`; scaled to 4, more than one round of
+  attempts, so that `"keeproot"` gives fresh attempts at least once).
+  Failure ageing is not modelled: the dead link stays ineligible.
 - **Class 1**: one message per origin in `Origins`; per node a copy queued,
   waiting (passively acknowledged by the next hop's forward, overheard, not
   when the forward is addressed to the waiting node itself — as the code —
@@ -357,7 +389,7 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   every attached node's parent is alive, of strictly lower rank, and seen at
   its actual rank.
 - **MP10Live**: eventually every node connected to the root (graph of live
-  nodes) is attached through a chain to the root; **CutOffLive**: every node
+  nodes and links) is attached through a chain of live links to the root; **CutOffLive**: every node
   cut off ends detached; **VersionSettle**: eventually every node connected
   to the root is in the root's version.
 - **RoutesSettle** (MP12, no flapping): eventually no preferred parent
@@ -378,10 +410,12 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 - **NoLagDetach** (MP10, action property): a node whose preferred parent is
   not lost never detaches because that parent moved to a newer version: no
   connected node detaches during a global repair.
-- **RootKept** (`LateAck`): no node drops the root after failed attempts.
-  Every such drop takes three timeouts of one copy towards the root, each
-  after a lost frame or acknowledgement, unless an acknowledgement on its
-  way is ignored: with `MaxLoss` < 3 it must hold.
+- **RootKept** (`LateAck`, `Exhaust`): no node drops the root after
+  failed attempts, unless its link to the root died (`Cut`). With
+  `"drop"`, every such drop takes three timeouts of one copy towards the
+  root, each after a lost frame or acknowledgement, unless an
+  acknowledgement on its way is ignored: with `MaxLoss` < 3 it must hold;
+  with `"keeproot"` or `"keeplast"`, whatever the losses.
 - Witnesses: loops form (`NoCycle` violated), messages are delivered
   (`NeverDelivered`), errors reach origins (`NeverError`), data-path
   validation fires (`NoRankError`); a node keeps its parent heard at a rank
@@ -390,7 +424,9 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   version (`NoLagParent`), a class 1 message is taken across versions
   (`NoCrossVersion`), a node rejoins at the close of its answer window
   (`NoWindowRejoin`), a copy is retried while the root's acknowledgement
-  of an earlier transmission is still expected (`NoLateRetry`).
+  of an earlier transmission is still expected (`NoLateRetry`), a copy
+  gets fresh attempts towards the root after its last attempt
+  (`NoFreshRoot`).
 
 ## Fixes modelled
 
@@ -458,6 +494,12 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   step; `FALSE`, the code, leaves it to any later moment (a Trickle
   advertisement or the next presence), which is also what an advertisement
   queued at once is in this event abstraction.
+- **Root kept after exhausted attempts** (`Exhaust = "keeproot"`, the
+  code, with a random retry delay against lockstep retries): the root is
+  not dropped while it is heard and its link eligible; the copy gets fresh
+  attempts towards it. `"keeplast"` (variant): the preferred parent, root
+  or not, is kept while it is the last candidate. `"drop"`: the code
+  before.
 
 ## Results
 
@@ -519,6 +561,19 @@ Late root acknowledgements, on the code since the test against L (`Thr =
 | Late acknowledgement accepted (fix) | no silent loss and the root never dropped with ≤ 2 losses in any pattern (line, relay 1 dies; diamond, relay 1 dies, two messages: 280 s); MP5Live, LoopsEnd, RanksSettle, MP10Live (line, no death; diamond, relay 1 dies; ≤ 2 losses in any pattern) | `DODAG_*_lateack_MP5`, `DODAG_*_lateack_live` |
 | Non-vacuity | a retry goes while the acknowledgement of the earlier transmission is still expected | `DODAG_line_lateack_witness_retry` |
 | Earlier configurations | given `LateAck = "none"`, the earlier model (state count unchanged where compared: 18 839) | the 74 other `DODAG_*` |
+
+Exhausted attempts and link death, on the code since late
+acknowledgements (`LateAck = "accept"`):
+
+| Item | Result | Configurations |
+|---|---|---|
+| Root dropped after collisions, the code before (`Exhaust = "drop"`) | no failed link, no death: 3's message reaches 1; 1's three transmissions to the root are lost there (hidden terminals colliding again at each retry); 1 drops the root, its only candidate under L, and detaches, its subtree following (910 states, 4 s) | `DODAG_line_drop_rootloss` |
+| Root kept (`"keeproot"`) | ≤ 3 losses in any pattern: no silent loss, the root never dropped (line, relay 1 dies: 18 669 states, 10 s; diamond, relay 1 dies, a message of 4: 20 446 states, 56 s); ≤ 3 losses, ≤ 1 consecutive per link: no loop, no rejoin loop, KeepParent (line, relay 1 dies: 84 119 states, 45 s); MP5Live, LoopsEnd, RanksSettle, MP10Live (line, no death, ≤ 3 losses: 1 987 states, 19 s) | `DODAG_*_keeproot_MP5`, `DODAG_line_keeproot_nocycle`, `DODAG_line_keeproot_live` |
+| Root kept, dead link | the root is not kept on a dead link: link 0 – 1 dead both ways, the silence limit removes the root; line, ≤ 2 losses: LoopsEnd, RanksSettle, CutOffLive, no silent loss (262 927 states, 9 min); diamond, a message of 4, ≤ 1 loss: also MP5Live and MP10Live, 1 rejoining through 3 (20 765 states, 4 min). Link 1 → 0 dead, 1 still hearing the root: its failed timeouts make the link ineligible; diamond, ≤ 1 loss: MP5Live, LoopsEnd, RanksSettle, no silent loss (4 457 states, 61 s). The root is dropped only over the dead link (`RootKept`) | `DODAG_*_keeproot_cutlive`, `DODAG_diamond_keeproot_cutuplive` |
+| Limit, not of the option (the same with `"drop"`) | link 1 → 0 dead and no class 1 traffic through 1: nothing reads the dead link (presence to the root gives no sample), 1 stays attached over it and MP10Live fails | `DODAG_diamond_keeproot_cutup_idle` |
+| Last candidate kept (`"keeplast"`) | the same results on the line (MP5: 7 361 states, 8 s; nocycle: 47 324, 37 s; live: 1 157, 17 s; dead link, ≤ 1 loss: 43 997, 82 s) and on the diamond (MP5: 12 593 states, 42 s; dead link both ways: 20 765, 4 min) | `DODAG_*_keeplast_*` |
+| Non-vacuity | a copy gets fresh attempts towards the root after its last attempt: after 3 losses (line), or with no loss over the dead link 1 → 0 (diamond) | `DODAG_line_keeproot_witness_fresh`, `DODAG_diamond_keeproot_witness_cutfresh` |
+| Earlier configurations | given `Exhaust = "drop"`, `Cut = "none"`, the earlier model (state counts unchanged where compared: `DODAG_line_lateignore_drop` 13, `DODAG_line_lateack_witness_retry` 10, `DODAG_chain_low_nocycle` 12 790, `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413) | the 80 other `DODAG_*` |
 
 **Why L.** Every rank a node puts on air since it attached is at least
 L; a child's rank is the rank it heard from its parent plus a link cost
@@ -693,7 +748,8 @@ How each fix is implemented, what it costs, and the limits accepted.
   message's last 3 transmissions to the root (`_record`); an
   acknowledgement from the root of any of them removes the message
   whatever its state (`on_ack`: waiting, queued for its retry, held, or
-  waiting after the last attempt). The retry still goes at the timeout.
+  waiting after the last attempt). The retry still goes at the timeout
+  (since then after a random delay, below).
   A frame's failed sample towards the root is decided one root timeout
   after its timeout (`_defer`, `_decide`, then the one failed sample per
   batching delay rule), and an acknowledgement of that frame arriving
@@ -706,6 +762,25 @@ How each fix is implemented, what it costs, and the limits accepted.
   slowed (the retry is unchanged). MESH_DESIGN §12 (late root
   acknowledgement) describes it; host tests `LateRootAcknowledgements`
   and `RootSamples` (tests/test_reliable.py).
+- **Code changes for the root kept** (`Exhaust = "keeproot"`):
+  `Parents.next_parent` (parents.py) returns the root instead of dropping
+  it while `candidate_cost(n, now, drops=False)` holds (heard within the
+  silence limit, eligible link, of the node's version or kept behind it,
+  within the bound: `Usable`); `Reliable._exhausted` (reliable.py) gives
+  the message fresh attempts when the next hop after failure is the hop
+  itself (`KeepHop`), still after the `_LATE` wait. Any other hop is
+  dropped as before. With it, a **random retry delay**
+  (`Reliable._retry`, uniform in [0, 32 slots), one draw per timed-out
+  frame, state `_DELAY`): timing only, outside the model; the timeouts
+  and the deferred failure decisions stay anchored on the frame's end.
+  Cost: a failed link to the root is left at its ineligibility (13
+  failed samples from a full window) or at the silence limit, later than
+  after 3 attempts (MESH_DESIGN §9 repair table); every retry waits up to
+  32 slots more. MESH_DESIGN §12 (retry delay, upward failure) describes
+  it; host tests `KeepRoot` (tests/test_parents.py), `RetryDelay`,
+  `KeptNextHop` (tests/test_reliable.py), and
+  `LocalRepair.test_root_kept_after_exhausted_attempts_until_its_link_is_ineligible`
+  (tests/test_routing.py).
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG

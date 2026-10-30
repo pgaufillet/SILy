@@ -249,7 +249,11 @@ class LocalRepair(unittest.TestCase):
         start = line.net.now
         adverts = n.routing.dodag.counters.adverts
         n.submit(APP, 1, ROOT, b"lost")
-        line.run(3000)
+        # 3 attempts, the last 2 each after a retry delay (§12).
+        limit = 3000 + 2 * n.engine.reliable.retry_ms
+        while not reroutes and line.net.now - start < limit:
+            line.run(100)
+        line.run(800)  # the desynchronisation delay
         self.assertEqual(len(reroutes), 1)
         # Applied in the step of the reroute: rank 255 in the header, the
         # poison on air within the desynchronisation delay, the message held.
@@ -258,7 +262,7 @@ class LocalRepair(unittest.TestCase):
         self.assertEqual(d.counters.poisons, 1)
         self.assertEqual(d.counters.adverts, adverts + 1)
         self.assertEqual(n.engine.reliable.held(), 1)
-        self.assertTrue(reroutes[0] - start < 3000)
+        self.assertTrue(reroutes[0] - start < limit)
 
     def test_detach_holds_waiting_copies(self):
         # N's message waits for R's acknowledgement when R poisons: N
@@ -276,3 +280,37 @@ class LocalRepair(unittest.TestCase):
         line.run(rel.timeout_ms(R) + 1000)  # its timeout passed, within the hold
         self.assertEqual(n.engine.rank, RANK_INFINITE)
         self.assertEqual((rel.pending(), rel.held(), n.engine.counters.retries), (0, 1, 0))
+
+    def test_root_kept_after_exhausted_attempts_until_its_link_is_ineligible(self):
+        # The root no longer hears R, which still hears its beacons: R's
+        # attempts towards the root all fail. While the link is eligible the
+        # root, R's only candidate, is kept (§12 upward failure): no detach,
+        # fresh attempts; the failed samples then make the link ineligible
+        # and R leaves the root.
+        line = Line(13)
+        r = line.relay
+        parents = r.routing.parents
+        reroutes = []
+        original = parents.next_parent
+
+        def next_parent(hop, now=None):
+            hop = original(hop, now)
+            entry = r.engine.neighbours.get(ROOT)
+            reroutes.append((hop, entry is not None and entry.eligible()))
+            return hop
+
+        parents.next_parent = next_parent
+        line.net.medium.cut(R, ROOT)
+        r.submit(APP, 1, ROOT, b"unheard")
+        while not reroutes:
+            line.run(500)
+        self.assertEqual(reroutes, [(ROOT, True)])
+        self.assertEqual((parents.preferred, parents.detaches, parents.drops), (ROOT, 0, 0))
+        rel = r.engine.reliable
+        self.assertEqual((len(r.engine.queue), rel.held()), (1, 0))
+        # Left once the link is ineligible: a detach (no other candidate).
+        while not parents.detaches:
+            line.run(100)
+        self.assertFalse(r.engine.neighbours.get(ROOT).eligible())
+        self.assertTrue(all(hop == ROOT for hop, eligible in reroutes if eligible), reroutes)
+        self.assertEqual((rel.held(), r.engine.counters.unreachable), (1, 0))

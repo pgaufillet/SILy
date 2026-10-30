@@ -470,7 +470,9 @@ gets its share, not its relays' capacity.
 - **Hidden terminals** remain (nodes that hear the relay but not each other).
   Accepted: class 1/2 recover losses, presence losses are absorbed by the
   silence threshold (`K_MISS`); measured loss rates decide whether more is
-  needed (§18).
+  needed (§18). Two hidden senders whose frames collided at their common
+  next hop time out together: a class 1 retry waits a random delay after
+  its timeout (§12), so that their retries do not collide again.
 
 ## 9. Routing and repair
 
@@ -519,8 +521,8 @@ acknowledgement window and the time of its newest failure.
   it is one loss event, and one failed sample per frame would make
   congestion at the root read as a bad link (rank jump of the relay, TLA+
   `AckWindow_rootbatch_P4`). Successes are still sampled per frame; the
-  attempts of one message are a root timeout apart, longer than the
-  batching delay, so each failed attempt is still one sample. Cost:
+  attempts of one message are more than a root timeout apart, longer than
+  the batching delay, so each failed attempt is still one sample. Cost:
   separate frame losses within one batching delay count once, so a lossy
   link to the root reads slightly better. **Presence reports** are included,
   matched by origin: a presence sent to a preferred parent other than the
@@ -606,7 +608,8 @@ acknowledgement window and the time of its newest failure.
   follows the advertised rank's decreases, and the members other than the
   preferred parent not below L leave the set, so that it never holds a
   member the next selection would refuse; a parent
-  dropped after failed attempts stays out until a new frame of it is heard;
+  dropped after failed attempts stays out until a new frame of it is heard
+  (the root is not dropped while it is a candidate apart from drops, §12);
   equal cost and margin go to the lower address.
 
 ### Loop freedom (MP11)
@@ -832,24 +835,39 @@ acknowledgement window and the time of its newest failure.
 
 | SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
 |---|---|---|---|---|---|---|---|---|
-| 7 | 1.6 | 2.1 | 9.0 | 75 | 7.0 | 13 | 12 | 11 |
-| 8 | 3.0 | 3.8 | 16.9 | 75 | 12.6 | 24 | 10 | 17 |
-| 9 | 5.3 | 6.7 | 29.8 | 150 | 22.4 | 42 | 10 | 15 |
-| 10 | 10.6 | 12.8 | 56.3 | 300 | 44.8 | 84 | 10 | 14 |
-| 11 | 21.1 | 26.9 | 119.4 | 750 | 89.7 | 169 | 10 | 12 |
-| 12 | 42.2 | 50.8 | 225.0 | 1500 | 179.4 | 338 | 10 | 11 |
+| 7 | 1.6 | 5.4 | 60 | 75 | 7.0 | 13 | 12 | 11 |
+| 8 | 3.0 | 9.7 | 112 | 75 | 12.6 | 24 | 10 | 17 |
+| 9 | 5.3 | 17.3 | 198 | 150 | 22.4 | 42 | 10 | 15 |
+| 10 | 10.6 | 33.9 | 380 | 300 | 44.8 | 84 | 10 | 14 |
+| 11 | 21.1 | 69.1 | 791 | 750 | 89.7 | 169 | 10 | 12 |
+| 12 | 42.2 | 135.2 | 1519 | 1500 | 179.4 | 338 | 10 | 11 |
 
-(Times in seconds, from section E of `mesh_budget.py`; "switch, idle" is
-the silence limit, 2.5 presence periods; "global repair wave" assumes no
-frame of the exchange lost on any hop, see below.)
+(Times in seconds, from section E of `mesh_budget.py`; the "switch with
+traffic" columns are upper bounds, retry delays at their maximum; "switch,
+idle" is the silence limit, 2.5 presence periods; "global repair wave"
+assumes no frame of the exchange lost on any hop, see below.)
 
-- **Switch with traffic**: the preferred parent is dropped after 3 class 1
-  attempts without acknowledgement (§12). Timeout through a relay: time on air
-  of a 255-byte frame + 6 slots (forwarding delay 1, backoff 4, margin 1): 0.7
-  s at SF7, 2.2 s at SF9. Through the root: its acknowledgement batching delay
-  (§16) + one acknowledgement frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9;
-  the root is dropped one more timeout after the last attempt (late
-  acknowledgement, §12).
+- **Switch with traffic, parent relay**: the preferred parent is dropped
+  after 3 class 1 attempts without acknowledgement (§12), the last two each
+  after a retry delay of up to 32 slots (1.7 s at SF7, 5.3 s at SF9).
+  Timeout through a relay: time on air of a 255-byte frame + 6 slots
+  (forwarding delay 1, backoff 4, margin 1): 0.7 s at SF7, 2.2 s at SF9.
+- **Switch with traffic, parent root**: the root is not dropped after
+  failed attempts while it is heard and its link eligible (§12): it is
+  left once its link turns ineligible (ETX above 4), or at the silence
+  limit if it is not heard at all ("switch, idle"), whichever comes first.
+  From a full acknowledgement window of successes, 13 failed samples make
+  the link ineligible (fewer after a short history: 4 failures out of the
+  first 4 samples). The attempts of one message go a root timeout and a
+  retry delay apart, with one more root timeout after each round of 3
+  (late acknowledgement, §12), and a failure is decided one root timeout
+  after its timeout: 18 root timeouts and 12 retry delays at most. Root
+  timeout: its acknowledgement batching delay (§16) + one acknowledgement
+  frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9. Slower than a drop after 3
+  attempts would be (4 root timeouts: 9 s at SF7, 30 s at SF9), but a root
+  child does not detach, its subtree following, after frames lost to
+  collisions at the root (hidden terminals), the root being its only
+  candidate under L (TLA+ `DODAG`, Exhaust = "keeproot").
 - **Switch, idle**: no frame from the preferred parent for 2.5 presence
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
@@ -884,9 +902,12 @@ frame of the exchange lost on any hop, see below.)
 
 Findings:
 
-1. **With traffic, local repair takes seconds** at SF7–9 (2–7 s through a
-   relay, 7–22 s next to the root, where batched acknowledgements dominate).
-   The node switches to the next parent of its set without any exchange.
+1. **With traffic, local repair takes seconds** through a relay at SF7–9
+   (at most 5–17 s, retry delays included). The node switches to the next
+   parent of its set without any exchange. Next to the root, the root is
+   kept while heard and eligible: a failed link to it is left within 60 s
+   at SF7, 112 s at SF8, 198 s at SF9 (ineligibility, or the silence limit
+   if the root is not heard).
 2. **Idle, local repair is bounded by the silence limit**, 2.5 presence
    periods (75 s at SF7–8, 150 s at SF9), and costs no airtime. The children
    of a failed relay re-attach and send their presence before the root
@@ -1203,6 +1224,18 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   **3 attempts** per next hop. Timeout (§9): time on air of a 255-byte frame
   + 6 slots; when the next hop is the root, the root's acknowledgement
   batching delay is added (§16).
+- **Retry delay**: after a timeout the retry waits a random delay, uniform
+  in [0, 32 slots) (1.7 s at SF7, 3.0 s at SF8, 5.3 s at SF9), drawn once
+  per frame so that its messages are retried together. Two senders hidden
+  from each other whose frames collided at their common next hop time out
+  together: retried at the timeout, they would collide again at every
+  attempt (host simulator, before the delay: about 70 % of such retries
+  collided again, mostly with the same partner, against a third of all
+  frames). The delay moves the retry only: timeouts and failure decisions
+  stay anchored on the end of the frame. A fixed range of 32 slots rather
+  than one scaled to the timeout: the relay timeout (1.8 frames of 255 B)
+  spreads two retries too little, and on 30-node networks of the host
+  simulator the scaled range gave more retries and detaches.
 - **Passive acknowledgement**: the sender overhears the next hop forwarding
   the message (identified by origin, destination, port and sequence).
 - **Explicit acknowledgement** (port 3, link-local), sent by:
@@ -1218,16 +1251,17 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   one loss (§9).
 - **Late root acknowledgement**: under load the root's medium access can
   delay its batched acknowledgement beyond the timeout. Towards the root
-  the retry still goes at the timeout, but the sender keeps the frame
-  counters of the message's last 3 transmissions: an acknowledgement of
-  any of them removes the message, whether it waits for an
-  acknowledgement, is queued for its retry or is held. A frame's failed
+  the retry still goes after the timeout (and its delay), but the sender
+  keeps the frame counters of the message's last 3 transmissions: an
+  acknowledgement of any of them removes the message, whether it waits for
+  an acknowledgement, is queued for its retry or is held. A frame's failed
   sample is decided one root timeout after its timeout, and an
   acknowledgement of that frame arriving before makes it a success
   instead; after the last attempt the sender waits one more root timeout
-  before dropping the root. Ignored, late acknowledgements would fail
-  samples and, after three attempts, drop the root although no frame was
-  lost (TLA+ `DODAG_line_lateignore_drop`; accepted: `DODAG_*_lateack_*`).
+  before the upward failure below. Ignored, late acknowledgements would
+  fail samples although no frame was lost and, with a drop of the root
+  after three attempts, drop it (TLA+ `DODAG_line_lateignore_drop`;
+  accepted: `DODAG_*_lateack_*`).
 - **Duplicate cache** on every node: (origin, destination, port, sequence),
   128 entries, each kept for at least 2 presence periods. A duplicate is
   always acknowledged. **Custody**: the final destination drops it; any
@@ -1241,10 +1275,19 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   a lost acknowledgement, the retransmission reaching a relay that has
   already forwarded the message travels the rest of the path once more;
   the destination filters it.
-- **Upward failure**: after 3 attempts the preferred parent is dropped (§9)
-  and the message goes to the next parent with fresh attempts; the root is
-  dropped one root timeout after the last attempt (late acknowledgement,
-  above).
+- **Upward failure**: after 3 attempts a relay parent is dropped (§9) and
+  the message goes to the next parent with fresh attempts. **The root is
+  kept** while it is a candidate apart from the drop (heard within the
+  silence limit, link eligible, of the node's version, within the bound):
+  one root timeout after the last attempt (late acknowledgement, above),
+  the message gets fresh attempts towards it, after a retry delay. Only
+  the silence limit or the link's ineligibility (its failed samples, §9)
+  removes the root. Under the test against L the root is a root child's
+  only candidate: a drop would be a detach, its subtree following, after
+  mere collisions at the root (TLA+ `DODAG_line_drop_rootloss`; kept:
+  `DODAG_*_keeproot_*`, no silent loss and the root never dropped with up
+  to 3 losses in any pattern, left over a dead link). Cost: a failed link
+  to the root is left later (§9 repair table).
 - **Downward failure** (source route): error to the root (port 4, reason 1 or
   2); the root reroutes (§10) and sends the message again, being its origin
   (or, for P2P, the origin of the downward half).
@@ -1297,10 +1340,10 @@ expired, a whole path lost).
   declared gone) and a bitmap of the sequences received in (C, C + 64].
   Each new message is delivered at once; duplicates are dropped.
 - **NACK**: a received sequence above the highest one so far reveals a gap.
-  After the **NACK delay** (3 timeouts towards the root: the time a message
-  retried on the last hop needs to arrive), the receiver sends a NACK with C
-  and the missing ranges (port 10). It repeats it every presence period while
-  a gap remains.
+  After the **NACK delay** (3 timeouts towards the root and 2 retry
+  delays: the time a message retried on the last hop needs to arrive), the
+  receiver sends a NACK with C and the missing ranges (port 10). It repeats
+  it every presence period while a gap remains.
 - **Tail**: a flow with unacknowledged messages, and none sent since the
   previous presence report, announces its tail [oldest unacknowledged, last].
   Towards the root, the tail rides on the presence report (§11). Towards any
@@ -1332,14 +1375,14 @@ Recovery times (worst depth 8, a hop costing at most one class 1 timeout):
 
 | SF | NACK delay (s) | lost message, after the gap is seen (s) | lost last message, from its sending (s) | presence period if every node carried a tail (s) |
 |---|---|---|---|---|
-| 7 | 6.7 | 18 | 71 | 30 |
-| 8 | 12.7 | 33 | 80 | 45 |
-| 9 | 22.4 | 58 | 156 | 90 |
-| 10 | 42.2 | 111 | 308 | 180 |
-| 11 | 89.5 | 233 | 743 | 300 |
-| 12 | 168.8 | 440 | 1471 | 600 |
+| 7 | 10.0 | 21 | 71 | 30 |
+| 8 | 18.6 | 39 | 80 | 45 |
+| 9 | 32.9 | 69 | 156 | 90 |
+| 10 | 63.3 | 132 | 308 | 180 |
+| 11 | 131.7 | 275 | 743 | 300 |
+| 12 | 253.2 | 524 | 1471 | 600 |
 
-- At SF7–9, a lost message is recovered within a minute of the gap being
+- At SF7–9, a lost message is recovered within 21 to 69 s of the gap being
   seen, and a lost last message within the detection targets (135 s at
   SF7–8, 270 s at SF9, §15).
 - **Tails must stay transient.** If every presence report carried one (6 B),

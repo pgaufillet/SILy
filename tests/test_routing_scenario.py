@@ -369,13 +369,15 @@ class RelayKilled(unittest.TestCase):
         m.run(kill + 3 * P)
         t, parent = switched(log, C, relay)
         self.assertEqual(parent, other)
-        # Switch with traffic through a relay (§9 table, SF7: 2.1 s): 3
-        # attempts, each the frame and its acknowledgement timeout.
-        # Channel access may add a backoff (4 slots at first) per attempt.
+        # Switch with traffic through a relay (§9 table, SF7: 5.4 s): 3
+        # attempts, each the frame and its acknowledgement timeout, the last
+        # 2 after a retry delay. Channel access may add a backoff (4 slots
+        # at first) per attempt.
         rel = c.engine.reliable
         frame_ms = c.engine.toa_ms(frame.OVERHEAD + 2 + 2 + 2)
         slot = c.engine.slot_ms
         bound = ATTEMPTS * (frame_ms + rel.relay_timeout_ms + 4 * slot)
+        bound += (ATTEMPTS - 1) * rel.retry_ms
         took = t - 100
         self.assertTrue(took <= bound, (took, bound))
         # At least one timeout: the failed attempts raise A's ETX (p_ack), so

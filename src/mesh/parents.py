@@ -23,6 +23,15 @@ infinite: no route or poisoned).
   A neighbour dropped after failed attempts (`next_parent`) is no
   candidate until a new frame of it is heard; after a detach, only
   neighbours heard after the solicitation that ends its hold are.
+- **Root kept** (`next_parent`, §12): the root is not dropped after failed
+  attempts while it is a candidate apart from drops (heard within the
+  silence limit, eligible link, of the node's version, within the bound):
+  the message gets fresh attempts towards it. Under the test against L the
+  root is a root child's only candidate, so a drop would be a detach, its
+  subtree following, after mere collisions at the root (hidden
+  terminals); only the silence limit or the link's ineligibility (its
+  failed samples, ETX above 4) removes the root (TLA+ `DODAG`, Exhaust =
+  "keeproot"). Any other parent is dropped.
 - **Behind a newer version** (``behind``, set by the Trickle step when a
   frame of a newer version is heard; cleared by `on_new_version` and the
   detach): the preferred parent stays a candidate once it has moved to a
@@ -88,7 +97,7 @@ a solicitation sent while the window is open (another version heard) does
 not extend it.
 """
 
-from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, UPWARD
+from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, ROOT, UPWARD
 from mesh.neighbours import ETX_ONE, silence_ms
 from mesh.reliable import HOLD
 
@@ -193,13 +202,14 @@ class Parents:
         bound = self.lowest + self.max_increase
         return bound if bound < MAX_COST else MAX_COST
 
-    def candidate_cost(self, n, now):
+    def candidate_cost(self, n, now, drops=True):
         """Return the path cost through neighbour entry n if it is a candidate, else None.
 
         The preferred parent is one at any rank (its increase is followed,
         within the bound), the others below L (any finite rank without
         route). While the node is behind, the preferred parent moved to a
-        newer version is one at the node's own rank.
+        newer version is one at the node's own rank. drops: False to ignore
+        a drop after failed attempts (`next_parent`).
         """
         lowest = RANK_INFINITE if self.lowest is None else self.lowest
         across = n.version != self.version
@@ -214,7 +224,7 @@ class Parents:
             return None
         if self.poisoned_at is not None and n.heard <= self.poisoned_at:
             return None
-        if self._dropped.get(n.address, -1) == n.counter:
+        if drops and self._dropped.get(n.address, -1) == n.counter:
             return None
         if not n.eligible():
             return None
@@ -298,20 +308,25 @@ class Parents:
         return events
 
     def next_parent(self, hop, now=None):
-        """Drop hop after exhausted attempts; return the new preferred parent or `HOLD`.
+        """Drop hop after exhausted attempts; return the new preferred parent, `HOLD` or hop.
 
-        hop stays out of the candidates until a new frame of it is heard;
-        the set is selected again at now (default: ``clock()``, else the
-        time of the last `recompute`), which may detach the node.
+        The root is kept (returned, unchanged set: fresh attempts) while it
+        is a candidate apart from drops (module docstring). Any other hop is
+        dropped: it stays out of the candidates until a new frame of it is
+        heard, and the set is selected again at now (default: ``clock()``,
+        else the time of the last `recompute`), which may detach the node.
         """
         if self.root:
             return None
+        if now is None:
+            now = self.clock() if self.clock is not None else self.now
         n = self.table.get(hop)
+        if hop == ROOT and n is not None and now is not None:
+            if self.candidate_cost(n, now, False) is not None:
+                return hop
         if n is not None:
             self._dropped[hop] = n.counter
             self.drops += 1
-        if now is None:
-            now = self.clock() if self.clock is not None else self.now
         if now is not None:
             self.recompute(now)
         p = self.preferred

@@ -597,6 +597,76 @@ class NextParent(unittest.TestCase):
         self.assertEqual(self.p.members(), (A, C))
 
 
+class KeepRoot(unittest.TestCase):
+    """§12 upward failure: the root is kept after exhausted attempts while it
+    is a candidate apart from drops (TLA+ `DODAG`, Exhaust = "keeproot")."""
+
+    def setUp(self):
+        # A root child: the root (ETX 1) is its only candidate under L.
+        net = self.net = Net()
+        net.hear(ROOT, 0, 0)
+        self.now = 0
+        p = self.p = Parents(net.table, clock=lambda: self.now)
+        p.recompute(0)
+        p.events()
+        self.assertEqual((p.members(), p.rank), ((ROOT,), 8))
+
+    def _kept(self, hop):
+        p = self.p
+        self.assertEqual(hop, ROOT)
+        self.assertEqual((p.members(), p.rank, p.drops, p.detaches), ((ROOT,), 8, 0, 0))
+        self.assertEqual(p.events(), 0)
+        self.assertTrue(self.net.table.get(ROOT).parent)
+
+    def _left(self, hop):
+        p = self.p
+        self.assertEqual(hop, HOLD)
+        self.assertEqual((p.members(), p.rank, p.drops), ((), RANK_INFINITE, 1))
+        self.assertTrue(p.events() & DETACHED)
+
+    def test_heard_and_eligible_root_kept(self):
+        self.now = 100
+        self._kept(self.p.next_parent(ROOT))
+        # Again and again while it stays a candidate: no detach.
+        self.now = 2 * _PERIOD
+        self._kept(self.p.next_parent(ROOT))
+        self._kept(self.p.reroute(Message(UPWARD, 1, 20, b"x", origin=A, seq=1), ROOT))
+
+    def test_root_kept_whatever_the_other_candidates(self):
+        # ETX 2 to the root: rank 16; B (rank 8, 16 through it) a candidate.
+        net = Net()
+        net.hear(ROOT, 0, 0)
+        net.etx(ROOT, 1, 2)
+        net.hear(B, 8, 0)
+        p = Parents(net.table)
+        p.recompute(0)
+        self.assertEqual((p.members(), p.rank), ((ROOT, B), 16))
+        self.assertEqual(p.next_parent(ROOT, 20), ROOT)
+        self.assertEqual((p.members(), p.drops), ((ROOT, B), 0))
+
+    def test_ineligible_root_left(self):
+        self.net.etx(ROOT, 1, 5, 50)  # ETX 5 > 4
+        self._left(self.p.next_parent(ROOT, 100))
+
+    def test_silent_root_left(self):
+        # Silent from 2.5 periods on (strict, §9).
+        self._left(self.p.next_parent(ROOT, 5 * _PERIOD // 2))
+
+    def test_root_of_another_version_left(self):
+        self.net.hear(ROOT, 0, 50, version=1)  # not behind: not a candidate
+        self._left(self.p.next_parent(ROOT, 100))
+
+    def test_relay_parent_still_dropped(self):
+        # Only the root is kept: a relay parent, even the last candidate, is
+        # dropped (the node detaches).
+        net = Net()
+        net.hear(A, 8, 0)
+        p = Parents(net.table)
+        p.recompute(0)
+        self.assertEqual(p.next_parent(A, 100), HOLD)
+        self.assertEqual((p.members(), p.drops, p.rank), ((), 1, RANK_INFINITE))
+
+
 class Detach(unittest.TestCase):
     def test_hold_until_the_solicitation_then_neighbours_heard_after_it(self):
         net = Net()

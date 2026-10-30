@@ -108,7 +108,7 @@
 (* origin itself fails it or when the error reaches it, which happens once *)
 (* both the failing node and the origin are connected to the root (the    *)
 (* error travels as class 1 to the root, then downward, reliable.py:       *)
-(* 494-558; its own custody is not modelled).                             *)
+(* 691-757; its own custody is not modelled).                             *)
 (*                                                                         *)
 (* Late root acknowledgements (LateAck, Acks = "frame"): the root batches *)
 (* its acknowledgements, and under load its medium access can delay one   *)
@@ -126,6 +126,29 @@
 (* comes (or is lost) before the next timeout of the copy, and before the *)
 (* drop. The code accepts an acknowledgement of any earlier transmission  *)
 (* while the message is queued, even later; the model leaves that out.    *)
+(*                                                                         *)
+(* Exhausted attempts (Exhaust): what the last timeout of a copy does to   *)
+(* its hop. "drop" (the code before the root was kept): the hop is dropped *)
+(* (Parents.next_parent), the node selects again, the copy goes to the new *)
+(* preferred parent or is held. "keeproot" (the code): towards the root,   *)
+(* while the root is still a candidate                                     *)
+(* apart from drops (heard: entry not expired; link eligible; of the       *)
+(* node's version; within the bound), the copy gets fresh attempts towards *)
+(* the root instead: only the silence limit or the link's ineligibility   *)
+(* removes the root. "keeplast": the same for the preferred parent, root   *)
+(* or not, when it is the node's last candidate (no other candidate apart  *)
+(* from drops: dropping it would detach the node); otherwise the drop.   *)
+(*                                                                         *)
+(* Death of the link 0 - 1 (Cut, Acks = "frame"): "none" (every earlier    *)
+(* configuration); "both": once, at any moment, the link dies both ways;   *)
+(* "up": only 1 -> 0 dies (the root never hears node 1, node 1 still hears *)
+(* the root). A dead link loses every frame, outside the loss bounds. The *)
+(* silence limit removes the root from node 1's table once the root is not *)
+(* heard ("both"; Expire); node 1's timeouts towards the root after the    *)
+(* cut are failed samples, and INELIG of them make the link ineligible    *)
+(* (13 from a full acknowledgement window, AckWindow; scaled to 4, more    *)
+(* than one round of attempts). Failure ageing is not modelled: the dead   *)
+(* link stays ineligible.                                                  *)
 (*                                                                         *)
 (* The relay Victim may die once, at a moment it holds no message (a      *)
 (* relay dying with a message it acknowledged is MP5's accepted exception, *)
@@ -209,14 +232,18 @@ CONSTANTS
     Rise,       \* link cost rises, in hops overall (0: fixed costs)
     Thr,        \* rank test of the other candidates: "rank" (the code before the fix), "air", "minair" or "low" (the code)
     IncAdv,     \* BOOLEAN: a rank increase goes on air in the very next step (idealised)
-    LateAck     \* root acknowledgement later than the timeout: "none", "ignore" or "accept" (the code)
+    LateAck,    \* root acknowledgement later than the timeout: "none", "ignore" or "accept" (the code)
+    Exhaust,    \* after the last attempt: "drop", "keeproot" (the code) or "keeplast"
+    Cut         \* death of the link 0 - 1: "none", "both" or "up" (1 -> 0 only)
 
 NONE == -1
 Root == 0
 INF  == MaxRank + 1        \* rank 255: no route, or poisoned
 SwitchThr == 2             \* 12 / 8 = 1.5 hops: a gain of 2 whole hops (parents.py:297)
-ATTEMPTS == 3              \* reliable.py:72
+ATTEMPTS == 3              \* reliable.py:107
 LoopCap == 2               \* saturation of the loop formation counter
+CutChild == 1              \* the link that may die: CutChild - Root
+INELIG == 4                \* failed timeouts making the dead link ineligible (scaled)
 
 (***************************************************************************)
 (* Graphs: edges <<a, b, cost>>, cost in hops (ETX).                       *)
@@ -271,6 +298,8 @@ ASSUME Rejoin \in {"first", "window", "window_rejoin"} /\ Best \in BOOLEAN
 ASSUME (Rejoin # "first" \/ Best) => Fix5 = "solicit"
 ASSUME Rise \in Nat /\ Thr \in {"rank", "air", "minair", "low"} /\ IncAdv \in BOOLEAN
 ASSUME LateAck \in {"none", "ignore", "accept"} /\ (LateAck # "none" => Acks = "frame")
+ASSUME Exhaust \in {"drop", "keeproot", "keeplast"}
+ASSUME Cut \in {"none", "both", "up"} /\ (Cut # "none" => Acks = "frame" /\ CutChild \in Nbr(Root))
 
 \* The rank of the last frame is tracked (otherwise constant).
 TrackAir == Thr \in {"air", "minair"}
@@ -328,13 +357,16 @@ VARIABLES
     dc,        \* dc[k][c]: rise of k's link cost to c, in hops (Rise)
     rises,     \* link cost rises so far
     air,       \* air[k]: rank carried by k's last frame (TrackAir; otherwise constant)
-    inc        \* inc[k]: k's rank rose since its last frame (IncAdv; otherwise FALSE)
+    inc,       \* inc[k]: k's rank rose since its last frame (IncAdv; otherwise FALSE)
+    cut,       \* the link CutChild - Root is dead (Cut)
+    cutf       \* CutChild's timeouts towards the root since the cut, saturated at INELIG
 
 routing0 == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
               ver, vview, behind, sol, owe, win, wh, rj>>
 routing == <<routing0, dc, rises, air, inc>>
 msgvars == <<sub, cp, giver, delivered, err, errFrom>>
-vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv>>
+linkvars == <<cut, cutf>>
+vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv, linkvars>>
 
 \* Link cost of k to c, as k currently estimates it.
 LCost(k, c) == Cost(k, c) + dc[k][c]
@@ -366,6 +398,7 @@ TypeOK ==
     /\ loops \in 0..LoopCap /\ rl \in BOOLEAN /\ rerr \in BOOLEAN /\ xv \in BOOLEAN
     /\ dc \in [Nodes -> [Nodes -> 0..Rise]] /\ rises \in 0..Rise
     /\ air \in [Nodes -> 0..INF] /\ inc \in [Nodes -> BOOLEAN]
+    /\ cut \in BOOLEAN /\ cutf \in 0..INELIG
 
 (***************************************************************************)
 (* Chains of preferred parents (dead nodes have none).                     *)
@@ -378,14 +411,27 @@ Climb(n, P, k) == IF k = 0 \/ n = NONE THEN n ELSE Climb(P[n], P, k - 1)
 InCycle(n, P) == \E k \in 1..Cardinality(Nodes) : Climb(n, P, k) = n
 Cycle(P) == \E n \in Nodes : P[n] # NONE /\ InCycle(n, P)
 
+(***************************************************************************)
+(* Death of the link CutChild - Root (Cut): a frame of s is not heard by k *)
+(* (Severed), outside the loss bounds; the dead link carries no route      *)
+(* either way (LinkUp); after INELIG failed timeouts of CutChild towards   *)
+(* the root, its link to the root is ineligible (Inel).                    *)
+(***************************************************************************)
+CutPair(a, b) == {a, b} = {CutChild, Root}
+Severed(s, k) == cut /\ IF Cut = "up" THEN s = CutChild /\ k = Root ELSE CutPair(s, k)
+LinkUp(a, b) == b \in Nbr(a) /\ ~(cut /\ CutPair(a, b))
+Inel(k, c) == k = CutChild /\ c = Root /\ cutf >= INELIG
+
+\* n is attached through a chain of preferred parents to the root, over live links.
 RECURSIVE ToRoot(_, _)
-ToRoot(n, k) == n = Root \/ (k > 0 /\ alive[n] /\ pref[n] # NONE /\ ToRoot(pref[n], k - 1))
+ToRoot(n, k) == n = Root \/ (k > 0 /\ alive[n] /\ pref[n] # NONE /\ LinkUp(n, pref[n])
+                             /\ ToRoot(pref[n], k - 1))
 Connected(n) == ToRoot(n, Cardinality(Nodes))
 
-\* n is connected to the root in the graph of the live nodes.
+\* n is connected to the root in the graph of the live nodes and live links.
 RECURSIVE Reach(_, _)
 Reach(S, k) == IF k = 0 THEN S
-               ELSE Reach(S \cup {m \in Nodes : alive[m] /\ \E x \in S : m \in Nbr(x)}, k - 1)
+               ELSE Reach(S \cup {m \in Nodes : alive[m] /\ \E x \in S : LinkUp(x, m)}, k - 1)
 GraphConnected(n) == n \in Reach({Root}, Cardinality(Nodes))
 
 (***************************************************************************)
@@ -412,6 +458,8 @@ Keep(k) == KeepR(Rec(k))
 (* Follow: the preferred parent at any finite rank), heard within 2       *)
 (* periods (an entry), heard after the poison while detached               *)
 (* (parents.py:215), not dropped after failed attempts (parents.py:217),  *)
+(* through an eligible link (parents.py:219; Cut: not made ineligible by   *)
+(* its death),                                                             *)
 (* whose path cost is within the bound min(254, L + 56) (parents.py:      *)
 (* 189-194, 223-224). Behind "keep": the preferred parent moved to a      *)
 (* newer version, heard at a finite rank and not dropped, at the node's   *)
@@ -431,7 +479,7 @@ ThrR(k, R) ==
 
 CandCost(k, c, V, VV, Dr, Fr, R) ==
     LET v == V[k][c] IN
-    IF v = NONE \/ v = INF \/ Dr[k][c] THEN NONE
+    IF v = NONE \/ v = INF \/ Dr[k][c] \/ Inel(k, c) THEN NONE
     ELSE IF VV[k][c] = R.ver
     THEN IF /\ \/ v < ThrR(k, R)
                \/ Follow /\ c = R.pref
@@ -474,7 +522,7 @@ Sel(k, V, VV, Dr, Fr, R) ==
     IF k = Root \/ R.hold \/ InWindow(R) \/ (Behind = "detach" /\ R.behind) THEN KeepR(R)
     ELSE SelCore(k, V, VV, Dr, Fr, R)
 
-\* Selection after a class 1 drop (Parents.next_parent, parents.py:242-260: recompute
+\* Selection after a class 1 drop (Parents.next_parent, parents.py:300-318: recompute
 \* called directly, not through the paused Dodag step).
 SelDrop(k, V, VV, Dr, Fr, R) ==
     IF k = Root \/ R.hold \/ InWindow(R) THEN KeepR(R) ELSE SelCore(k, V, VV, Dr, Fr, R)
@@ -491,8 +539,8 @@ WithLate(c2, c) ==
 (* Effect of a selection on the queued copies of the node (Routing._changed,*)
 (* routing.py:180-195): after a parent change the copies not waiting      *)
 (* follow the new parent with fresh attempts (TxQueue.redirect,            *)
-(* txqueue.py:503-518); after a detach they are held (Reliable.hold,       *)
-(* reliable.py:434-455). Waiting copies keep their next hop.               *)
+(* txqueue.py:508-523); after a detach they are held (Reliable.hold,       *)
+(* reliable.py:629-652). Waiting copies keep their next hop.               *)
 (***************************************************************************)
 ReshapeCore(c, S) ==
     IF c.st = "q" /\ S.det THEN Held
@@ -566,7 +614,7 @@ SoKeep(S) == [k \in Nodes |-> sol[k] /\ S[k].behind]
 (* (Parents.on_new_version, parents.py:207-240). SS: the sender's own      *)
 (* routing record after the frame, SF its fresh row.                       *)
 (***************************************************************************)
-Receivers(s) == {k \in Nbr(s) : alive[k]}
+Receivers(s) == {k \in Nbr(s) : alive[k] /\ ~Severed(s, k)}
 
 LossOK(s, L, extra) ==
     /\ Cardinality(L) + extra <= MaxLoss - lost
@@ -635,7 +683,7 @@ HeaderFrame(s, SS, SF, dio, ann) ==
             /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, s, H)
             /\ FrameCounters(s, L, H, 0)
             /\ cp' = [m \in Msgs |-> [k \in Nodes |-> Reshape(cp[m][k], E.S[k])]]
-            /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv>>
+            /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
 
 (***************************************************************************)
 (* Announce: a frame of an alive node without class 1 message.             *)
@@ -689,7 +737,7 @@ HoldEnd(s) ==
            ELSE IF S0.rank # INF
            THEN /\ Commit(S, view, vview, dropped, fresh, OwKeep(S), SoKeep(S))
                 /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![s] = Reshape(cp[m][s], S0)]]
-                /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
+                /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
            ELSE HeaderFrame(s, free, fresh[s], FALSE, TRUE)
 
 (***************************************************************************)
@@ -706,7 +754,7 @@ BehindEnd(k) ==
            S == [x \in Nodes |-> IF x = k THEN S0 ELSE Keep(x)]
        IN  /\ Commit(S, view, vview, dropped, fresh, OwKeep(S), SoKeep(S))
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S0)]]
-    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
+    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
 
 (***************************************************************************)
 (* Close of the answer window (Rejoin "window", "window_rejoin"), one Imin *)
@@ -724,7 +772,7 @@ WindowClose(k) ==
            S  == [x \in Nodes |-> IF x = k THEN S0 ELSE Keep(x)]
        IN  /\ Commit(S, view, vview, dropped, fresh, OwKeep(S), SoKeep(S))
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S0)]]
-    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
+    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
 
 \* The root issues a new DODAG version (global repair, Dodag.set_version, dodag.py:359-369):
 \* Trickle reset with its DODAG information owed.
@@ -734,19 +782,20 @@ NewVersion ==
     /\ owe' = [owe EXCEPT ![Root] = TRUE]
     /\ UNCHANGED <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
                    vview, behind, sol, win, wh, rj, lost, consec, msgvars, loops, rl, rerr, xv,
-                   dc, rises, air, inc>>
+                   dc, rises, air, inc, linkvars>>
 
 (***************************************************************************)
-(* Silence (parents.py:164, dodag.py:536-549): a dead neighbour's entry   *)
-(* goes; the node selects again.                                           *)
+(* Silence (parents.py:164, dodag.py:536-549): the entry of a dead        *)
+(* neighbour, or of one whose link to the node is dead (Cut), goes; the    *)
+(* node selects again.                                                     *)
 (***************************************************************************)
 Expire(k, c) ==
-    /\ alive[k] /\ c \in Nbr(k) /\ ~alive[c] /\ view[k][c] # NONE
+    /\ alive[k] /\ c \in Nbr(k) /\ (~alive[c] \/ Severed(c, k)) /\ view[k][c] # NONE
     /\ LET V == [view EXCEPT ![k][c] = NONE]
            S == [x \in Nodes |-> IF x = k THEN Sel(k, V, vview, dropped, fresh, Rec(k)) ELSE Keep(x)]
        IN  /\ Commit(S, V, vview, dropped, fresh, OwKeep(S), SoKeep(S))
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S[k])]]
-    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
+    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
 
 Die ==
     /\ Victim # Root /\ alive[Victim]
@@ -756,7 +805,13 @@ Die ==
     /\ alive' = [alive EXCEPT ![Victim] = FALSE]
     /\ UNCHANGED <<rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
                    ver, vview, behind, sol, owe, win, wh, rj, lost, consec, msgvars, loops, rl,
-                   rerr, xv, dc, rises, air, inc>>
+                   rerr, xv, dc, rises, air, inc, linkvars>>
+
+\* The link CutChild - Root dies (Cut), once, at any moment.
+CutLink ==
+    /\ Cut # "none" /\ ~cut
+    /\ cut' = TRUE
+    /\ UNCHANGED <<routing, lost, consec, msgvars, loops, rl, rerr, xv, cutf>>
 
 (***************************************************************************)
 (* Link cost rise (Rise): k's estimate of its link to c rises by one       *)
@@ -769,13 +824,13 @@ CostUp(k, c) ==
     /\ rises < Rise /\ k # Root /\ alive[k] /\ c \in Nbr(k)
     /\ dc' = [dc EXCEPT ![k][c] = dc[k][c] + 1]
     /\ rises' = rises + 1
-    /\ UNCHANGED <<routing0, air, inc, lost, consec, msgvars, loops, rl, rerr, xv>>
+    /\ UNCHANGED <<routing0, air, inc, lost, consec, msgvars, loops, rl, rerr, xv, linkvars>>
 
 (***************************************************************************)
 (* Class 1.                                                                *)
 (***************************************************************************)
 
-\* Submission by the origin (Reliable.send_own, reliable.py:526-539): queued
+\* Submission by the origin (Reliable.send_own, reliable.py:723-736): queued
 \* towards the preferred parent, held without one.
 Submit(m) ==
     LET o == Orig(m) IN
@@ -783,17 +838,17 @@ Submit(m) ==
     /\ sub' = [sub EXCEPT ![m] = TRUE]
     /\ cp' = [cp EXCEPT ![m][o] = IF pref[o] # NONE THEN Queued(pref[o]) ELSE Held]
     /\ giver' = [giver EXCEPT ![m][o] = o]
-    /\ UNCHANGED <<routing, lost, consec, delivered, err, errFrom, loops, rl, rerr, xv>>
+    /\ UNCHANGED <<routing, lost, consec, delivered, err, errFrom, loops, rl, rerr, xv, linkvars>>
 
 (***************************************************************************)
 (* Transmission of copy m by s to its next hop d (Reliable.sent,           *)
-(* reliable.py:336-364), in a frame heard by H.                            *)
-(* Passive acknowledgements (Reliable.overheard, reliable.py:366-376): a   *)
+(* reliable.py:404-435), in a frame heard by H.                            *)
+(* Passive acknowledgements (Reliable.overheard, reliable.py:459-471): a   *)
 (* node k whose copy waits for s ("pas") is acknowledged when it overhears *)
 (* this forward; it is not when it is itself the destination (overheard is *)
 (* called only for frames to other nodes, link.py:737-740) nor when it     *)
 (* loses the frame: it then waits for its timeout. The owed explicit       *)
-(* acknowledgement of s is cancelled by the forward (reliable.py:345-346). *)
+(* acknowledgement of s is cancelled by the forward (reliable.py:414).     *)
 (* At d (link.py:741-771):                                                 *)
 (* - data-path validation (Routing.inconsistent, routing.py:140-148): the *)
 (*   sender's rank, of d's version, not above d's finite rank is a rank   *)
@@ -806,7 +861,7 @@ Submit(m) ==
 (*   message: from anyone); Fix3 "custody": dropped only while d holds a   *)
 (*   copy, otherwise taken as new; Fix3 "refined": a copy of d waiting for *)
 (*   the acknowledgement of s does not count as held (Reliable.holding      *)
-(*   with source, reliable.py of the fix);                                  *)
+(*   with source, reliable.py:357-378);                                     *)
 (* - otherwise recorded (link.py:761) and queued towards d's preferred     *)
 (*   parent after this frame's selection, or held (link.py:497-537,        *)
 (*   routing.py:180-195);                                                  *)
@@ -878,13 +933,17 @@ SendData(s, m) ==
              /\ delivered' = IF got /\ d = Root THEN [delivered EXCEPT ![m] = TRUE] ELSE delivered
              /\ rerr' = (rerr \/ (Ghosts /\ incons))
              /\ xv' = (xv \/ (Ghosts /\ got /\ ver[s] # ver[d]))
-             /\ UNCHANGED <<alive, sub, err, errFrom>>
+             /\ UNCHANGED <<alive, sub, err, errFrom, linkvars>>
 
 \* An acknowledgement frame of h to k about m (Acks = "frame"): lost by k (k's
-\* copy becomes NC), or heard (the copy goes; k selects again).
+\* copy becomes NC), or heard (the copy goes; k selects again). On a dead link
+\* it is lost, outside the loss bounds.
+AckLost(h, k) == IF Severed(h, k) THEN {TRUE} ELSE BOOLEAN
+
 AckOnAir(h, k, m, lostIt, NC) ==
     IF lostIt
-    THEN /\ LossOK(h, {k}, 0) /\ FrameCounters(h, {k}, {}, 0)
+    THEN /\ IF Severed(h, k) THEN UNCHANGED <<lost, consec>>
+            ELSE LossOK(h, {k}, 0) /\ FrameCounters(h, {k}, {}, 0)
          \* a frame of h on air, lost by its destination
          /\ air' = IF TrackAir THEN [air EXCEPT ![h] = rank[h]] ELSE air
          /\ inc' = [inc EXCEPT ![h] = FALSE]
@@ -899,8 +958,8 @@ AckOnAir(h, k, m, lostIt, NC) ==
 (***************************************************************************)
 (* Explicit acknowledgement of k's waiting copy by its hop h: "exp" (the  *)
 (* duplicate, held or delivered case), or owed by a relay that has not     *)
-(* forwarded within half a timeout (Reliable.owe, reliable.py:603-613,     *)
-(* 643-647: queue, duty cycle, the copy held after a detach). It may be   *)
+(* forwarded within half a timeout (Reliable.owe, reliable.py:800-810,     *)
+(* 858-862: queue, duty cycle, the copy held after a detach). It may be   *)
 (* lost (then k times out). Acks "atomic": owed acknowledgements only, and *)
 (* they carry no rank. Acks "frame": the acknowledgement is a frame of h   *)
 (* heard by k: it updates k's entry of h (rank 255 if h is detached; its  *)
@@ -914,7 +973,7 @@ AckFrame(k, m) ==
        IN  /\ alive[h]
            /\ \/ c.acc = "exp"
               \/ c.acc = "pas" /\ cp[m][h].st \in {"q", "h"}
-           /\ \E lostIt \in BOOLEAN :
+           /\ \E lostIt \in AckLost(h, k) :
                 IF Acks = "atomic"
                 THEN IF lostIt
                      THEN /\ lost < MaxLoss /\ lost' = lost + 1 /\ UNCHANGED <<consec, air, inc>>
@@ -923,7 +982,7 @@ AckFrame(k, m) ==
                      ELSE /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
                           /\ UNCHANGED <<routing, lost, consec, loops, rl>>
                 ELSE AckOnAir(h, k, m, lostIt, [c EXCEPT !.acc = "no"])
-    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv>>
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
 
 (***************************************************************************)
 (* Late root acknowledgement (LateAck = "accept", Reliable.on_ack): the    *)
@@ -933,21 +992,36 @@ AckFrame(k, m) ==
 (***************************************************************************)
 LateAckFrame(k, m) ==
     /\ LateAck = "accept" /\ alive[k] /\ cp[m][k].late
-    /\ \E lostIt \in BOOLEAN : AckOnAir(Root, k, m, lostIt, [cp[m][k] EXCEPT !.late = FALSE])
-    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv>>
+    /\ \E lostIt \in AckLost(Root, k) : AckOnAir(Root, k, m, lostIt, [cp[m][k] EXCEPT !.late = FALSE])
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
 
 (***************************************************************************)
-(* Timeout (Reliable._timeout, reliable.py:409-430): fewer than 3          *)
-(* attempts: retried towards the same hop (txqueue.py:476-491); else the   *)
-(* hop is dropped (Parents.next_parent, parents.py:242-260), the node      *)
-(* selects again, and the copy goes to the new preferred parent with fresh *)
-(* attempts, or is held (HOLD) when there is none or it is the same.       *)
+(* Timeout (Reliable._timeout, reliable.py:534-564): fewer than 3          *)
+(* attempts: retried towards the same hop (txqueue.py:478-493); else the   *)
+(* hop is dropped (Reliable._exhausted, reliable.py:566-579;               *)
+(* Parents.next_parent, parents.py:300-318), the node selects again, and   *)
+(* the copy goes to the new preferred parent with fresh attempts, or is    *)
+(* held (HOLD) when there is none or it is the same.                       *)
 (* Towards the root (LateAck): "ignore", also while the root's             *)
 (* acknowledgement is on its way, which is lost to the copy; "accept",     *)
 (* also while it is on its way before the last attempt (it becomes late),  *)
 (* never while a late one is expected (it comes within one root timeout),  *)
 (* and the drop only once the last attempt's acknowledgement is out.       *)
+(* Exhaust "keeproot", "keeplast": no drop while the hop is kept (KeepHop),*)
+(* the copy is queued towards it again with fresh attempts. After a dead   *)
+(* link (Cut), each timeout of CutChild towards the root is a failed       *)
+(* sample (cutf).                                                          *)
 (***************************************************************************)
+\* h is still a candidate of s apart from drops (heard, eligible, of s's version or
+\* its kept parent behind a version, within the bound).
+Usable(s, h) == CandCost(s, h, view, vview, [dropped EXCEPT ![s][h] = FALSE], fresh, Rec(s)) # NONE
+
+KeepHop(s, h) ==
+    CASE Exhaust = "keeproot" -> h = Root /\ Usable(s, h)
+      [] Exhaust = "keeplast" -> /\ h = pref[s] /\ Usable(s, h)
+                                 /\ \A c \in Nbr(s) \ {h} : CandCost(s, c, view, vview, dropped, fresh, Rec(s)) = NONE
+      [] OTHER                -> FALSE
+
 Timeout(s, m) ==
     /\ alive[s] /\ cp[m][s].st = "p"
     /\ LET c == cp[m][s]
@@ -957,9 +1031,13 @@ Timeout(s, m) ==
               \/ LateAck = "ignore" /\ inflight
               \/ LateAck = "accept" /\ inflight /\ c.att < ATTEMPTS
            /\ ~c.late
+           /\ cutf' = IF cut /\ s = CutChild /\ h = Root /\ cutf < INELIG THEN cutf + 1 ELSE cutf
            /\ IF c.att < ATTEMPTS
               THEN /\ cp' = [cp EXCEPT ![m][s] = [c EXCEPT !.st = "q", !.acc = "no",
                                                           !.late = (LateAck = "accept" /\ inflight)]]
+                   /\ UNCHANGED <<routing, loops, rl>>
+              ELSE IF KeepHop(s, h)
+              THEN /\ cp' = [cp EXCEPT ![m][s] = Queued(h)]
                    /\ UNCHANGED <<routing, loops, rl>>
               ELSE LET Dr == [dropped EXCEPT ![s][h] = TRUE]
                        S  == [x \in Nodes |-> IF x = s THEN SelDrop(s, view, vview, Dr, fresh, Rec(s))
@@ -969,15 +1047,16 @@ Timeout(s, m) ==
                        /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![s] =
                                    IF mm = m THEN (IF p = NONE \/ p = h THEN Held ELSE Queued(p))
                                    ELSE Reshape(cp[mm][s], S[s])]]
-    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv>>
+    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, cut>>
 
-\* A held copy resumes once there is a route (Reliable._resume_held, reliable.py:467-490).
+\* A held copy resumes once there is a route (Reliable._resume_held, reliable.py:664-689).
 Resume(s, m) ==
     /\ alive[s] /\ cp[m][s].st = "h" /\ pref[s] # NONE
     /\ cp' = [cp EXCEPT ![m][s] = WithLate(Queued(pref[s]), cp[m][s])]
-    /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, err, errFrom, loops, rl, rerr, xv>>
+    /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, err, errFrom, loops, rl, rerr, xv,
+                   linkvars>>
 
-\* Holding expired without route (reliable.py:480-483): failure (reliable.py:494-515):
+\* Holding expired without route (reliable.py:677-679): failure (reliable.py:691-712):
 \* the origin's own message fails to its application, a relay's makes an error.
 HoldExpire(s, m) ==
     /\ alive[s] /\ cp[m][s].st = "h" /\ pref[s] = NONE
@@ -988,13 +1067,14 @@ HoldExpire(s, m) ==
        THEN err' = [err EXCEPT ![m] = "recv"] /\ UNCHANGED errFrom
        ELSE /\ err' = [err EXCEPT ![m] = IF err[m] = "recv" THEN "recv" ELSE "sent"]
             /\ errFrom' = [errFrom EXCEPT ![m] = s]
-    /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, loops, rl, rerr, xv>>
+    /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, loops, rl, rerr, xv, linkvars>>
 
 \* The error reaches the origin (abstraction: both ends connected to the root).
 ErrorArrives(m) ==
     /\ err[m] = "sent" /\ Connected(errFrom[m]) /\ Connected(Orig(m))
     /\ err' = [err EXCEPT ![m] = "recv"]
-    /\ UNCHANGED <<routing, lost, consec, sub, cp, giver, delivered, errFrom, loops, rl, rerr, xv>>
+    /\ UNCHANGED <<routing, lost, consec, sub, cp, giver, delivered, errFrom, loops, rl, rerr, xv,
+                   linkvars>>
 
 (***************************************************************************)
 (* Specification. Initial state: the formed DODAG (shortest paths, lower   *)
@@ -1026,6 +1106,7 @@ Init ==
     /\ loops = 0 /\ rl = FALSE /\ rerr = FALSE /\ xv = FALSE
     /\ dc = [k \in Nodes |-> [c \in Nodes |-> 0]] /\ rises = 0
     /\ air = InitRank /\ inc = [n \in Nodes |-> FALSE]
+    /\ cut = FALSE /\ cutf = 0
 
 Protocol ==
     \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s) \/ WindowClose(s)
@@ -1041,7 +1122,7 @@ Owed == {k \in Nodes : inc[k]}
 Next ==
     IF IncAdv /\ Owed # {}
     THEN \E k \in Owed : Announce(k)
-    ELSE \/ Protocol \/ Die \/ NewVersion \/ \E m \in Msgs : Submit(m)
+    ELSE \/ Protocol \/ Die \/ CutLink \/ NewVersion \/ \E m \in Msgs : Submit(m)
          \/ \E k, c \in Nodes : CostUp(k, c)
 
 \* The class 1 actions of one copy are enabled in disjoint states of that copy
@@ -1087,11 +1168,13 @@ NoSilentLoss ==
 \* MP5, liveness: delivered, or the origin learns the failure.
 MP5Live == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] = "recv")
 
-\* Late root acknowledgements: no node drops the root after failed attempts.
-\* Every such drop takes three timeouts of one copy towards the root, each after a
+\* Late root acknowledgements, exhausted attempts: no node drops the root after
+\* failed attempts, unless its link to the root died (Cut). With Exhaust = "drop",
+\* every such drop takes three timeouts of one copy towards the root, each after a
 \* lost frame or acknowledgement, unless an acknowledgement on its way is ignored
-\* (LateAck = "ignore"): with MaxLoss < ATTEMPTS it holds otherwise.
-RootKept == \A n \in Nodes : ~dropped[n][Root]
+\* (LateAck = "ignore"): with MaxLoss < ATTEMPTS it holds otherwise; with "keeproot"
+\* or "keeplast", whatever the losses.
+RootKept == \A n \in Nodes : dropped[n][Root] => cut /\ n = CutChild
 
 \* MP11.
 NoCycle == ~Cycle(LiveP(pref))
@@ -1168,6 +1251,12 @@ NoRankError == ~rerr
 \* is still expected (LateAck = "accept").
 NoLateRetry == \A m \in Msgs, n \in Nodes : ~(cp[m][n].late /\ cp[m][n].st = "p")
 AtMostOneLoop == loops <= 1
+\* Exhaust "keeproot", "keeplast": no copy gets fresh attempts towards the root after
+\* exhausting its attempts there.
+NoFreshRoot ==
+    [][\A m \in Msgs, n \in Nodes : ~(/\ cp[m][n].st = "p" /\ cp[m][n].hop = Root
+                                      /\ cp[m][n].att = ATTEMPTS
+                                      /\ cp'[m][n] = Queued(Root))]_vars
 \* Rank following: no node keeps its preferred parent once it hears it, in its version,
 \* at a rank not below its own.
 NoFollow ==

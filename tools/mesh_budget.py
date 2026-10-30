@@ -103,6 +103,11 @@ K_PARENT = SILENCE_LIMIT  # presence periods without any frame from the preferre
 N_TX = 3  # class 1 transmission attempts
 # Class 1 timeout beyond the forwarded frame: forwarding delay 1 + backoff 4 + margin 1.
 RTO_SLOTS = 6
+# Random delay of a class 1 retry after its timeout: [0, 32) slots (§12).
+RETRY_SLOTS = 32
+# Failed samples that make a link with a full acknowledgement window of
+# successes ineligible (ETX 16/3 > 4, §9): the root is left after them.
+INELIG_FAILURES = 13
 DETACH_HOLD = 2  # Imin after poisoning before rejoining
 # Answer window beyond Imin after the solicitation: solicitation 1 + backoff 4
 # + answer 2 + step 1.
@@ -265,7 +270,8 @@ def main():
 
     print(
         f"\nE. Repair times (s), depth {DEPTH}, Trickle Imin {TRICKLE_IMIN} slots k {TRICKLE_K}, "
-        f"{N_TX} class 1 attempts, parent lost after {K_PARENT} silent presence periods"
+        f"{N_TX} class 1 attempts, retry delays at most {RETRY_SLOTS} slots, "
+        f"parent lost after {K_PARENT} silent presence periods"
     )
     print(
         "SF  Imin  RTO    RTO    switch, traffic  switch  detach  global  "
@@ -293,11 +299,21 @@ def main():
         peak = TRICKLE_K * adv / (imin / 2)
         node = n_int * adv * WINDOW / (GLOBAL_REPAIR_MIN * live)
         rejoin = (1 + DETACH_HOLD + 1) * imin + WINDOW_SLOTS * slot
-        # Towards the root, one more root timeout after the last attempt for
-        # its late acknowledgement (§12).
+        delay = RETRY_SLOTS * slot
+        # Through a relay: N_TX timeouts, a retry delay before each attempt
+        # after the first.
+        relay_switch = N_TX * rto_relay + (N_TX - 1) * delay
+        # The root is kept while heard and eligible (§12): left once its link
+        # is ineligible, at the decision of the INELIG_FAILURES-th failed
+        # sample. The attempts of one message go one root timeout and a retry
+        # delay apart, one more root timeout after each round of N_TX (late
+        # acknowledgement); a failure is decided one root timeout after its
+        # timeout. (A root not heard at all is left at the silence limit.)
+        gaps = INELIG_FAILURES - 1
+        root_switch = (gaps + gaps // N_TX + 2) * rto_root + gaps * delay
         print(
-            f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {N_TX * rto_relay:>6.1f}  "
-            f"{(N_TX + 1) * rto_root:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
+            f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {relay_switch:>6.1f}  "
+            f"{root_switch:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
             f"{DEPTH * imin:>6.1f}  {TRICKLE_K * n_int:>6}  {peak:>8.0%}  {node:>28.1f}"
         )
 
@@ -312,7 +328,9 @@ def main():
         rto_relay = toa(MAX_FRAME, sf) + RTO_SLOTS * slot
         ack = toa(OVERHEAD + LAST_HEADER + ACK_PER_FRAME * ACK_ENTRY, sf)
         rto_root = ack / ACK_SHARE + ack + RTO_SLOTS * slot
-        nack = N_TX * rto_root
+        # The time a message retried on the last hop needs: N_TX timeouts and
+        # the retry delays between them.
+        nack = N_TX * rto_root + (N_TX - 1) * RETRY_SLOTS * slot
         # NACK down then message up again, each hop at most one timeout.
         trip = 2 * DEPTH * rto_relay
         # Idle flow: the tail rides on the presence report after one silent
