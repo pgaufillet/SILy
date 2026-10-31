@@ -17,6 +17,11 @@ each with an RSSI and an SNR; `Topology.apply` scripts them on a
   the eligibility margin of a parent link (§9) at any SF from 7, so that
   every Node still routes through the relay (`Topology.hops` counts every
   link: depth 1, routes 2 hops deep);
+- `relay_star_split`: the dimensioning variant of the star: two relays one
+  hop from the root and hearing each other, the other boards split in two
+  halves, each half hearing its own relay and each other, neither the root
+  nor the other half (the load of the star shared by two relays whose
+  subtrees are hidden from each other);
 - `geometric`: random geometric graph in the unit square, the root at its
   centre, two boards linked when closer than a radius chosen for a mean
   degree of about `DEGREE` before border effects; drawn again until
@@ -169,6 +174,29 @@ def relay_star_domain(n):
     return Topology("star-domain", names, links)
 
 
+def relay_star_split(n):
+    """Two relays next to the root and each other, the n - 3 others in two halves (§15, §16).
+
+    Relays ``0x0101`` and ``0x0102``; the others in order, the first half
+    (the larger one when n - 3 is odd) behind ``0x0101``, the second
+    behind ``0x0102``. Links as in `relay_star`.
+    """
+    names = _names(n)
+    links = [
+        (names[0], names[1], -80, 10),
+        (names[0], names[2], -80, 10),
+        (names[1], names[2], -80, 10),
+    ]
+    rest = list(range(3, n))
+    half = (len(rest) + 1) // 2
+    for relay, group in ((1, rest[:half]), (2, rest[half:])):
+        for k, i in enumerate(group):
+            links.append((names[relay], names[i], -80, 10))
+            for j in group[k + 1 :]:
+                links.append((names[i], names[j], -80, 10))
+    return Topology("star2b", names, links)
+
+
 def geometric(n, seed, degree=DEGREE):
     """Random geometric graph of n boards, connected, the root at the centre."""
     rng = XorShift32(seed).derive(_LABEL)
@@ -236,6 +264,7 @@ GENERATORS = {
     "domain": lambda n, seed: single_domain(n),
     "star": lambda n, seed: relay_star(n),
     "star-domain": lambda n, seed: relay_star_domain(n),
+    "star2b": lambda n, seed: relay_star_split(n),
     "geometric": geometric,
     "grid": lambda n, seed: grid(n),
     "course": lambda n, seed: course(n),

@@ -48,7 +48,9 @@ SEED ?= 1
 # topology at 30 nodes on LARGE_SEEDS seeds, plus one 64-node run per
 # scenario, LARGE_JOBS runs at a time; RUN="SCENARIO TOPOLOGY SEED [NODES]"
 # runs one of them alone with its full report (TOPOLOGY: domain, star,
-# star-domain, geometric, or for single runs grid, course: at most 14 nodes).
+# star-domain, star2b, geometric, or for single runs grid, course: at most
+# 14 nodes). The star runs are overload cases: result "overload" when they
+# pass on their recovery criterion.
 LARGE_SEEDS ?= 3
 LARGE_JOBS ?= 4
 RUN ?=

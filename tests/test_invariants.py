@@ -1,11 +1,12 @@
-"""Invariant checks of `sim.invariants`, each shown able to fail (MP5, MP9, MP10, MP11, MP13).
+"""Invariant checks of `sim.invariants`, each shown able to fail (MP5, MP9-11, MP13, recovery).
 
 Small networks of real link engines with their routing (`mesh.routing.Routing`)
 on `sim.net`, SF7 (slot 52 ms, Imin 1.7 s), presence period 10 s. Each check
 runs once on a healthy network (no violation) and once with a defect
 injected into a core (a cycle kept, a node that never selects, a version
 ignored, a message dropped after its acknowledgement, a duty cycle not
-enforced, a table larger than its bound): the check must fire, naming the
+enforced, a table larger than its bound, a node never routed, a rootless
+cycle, a message still queued at the end): the check must fire, naming the
 nodes at fault.
 """
 
@@ -23,8 +24,12 @@ from sim.invariants import (
     Delivery,
     DutyCycle,
     Loops,
+    Recovery,
     Resources,
     VersionWave,
+    Violation,
+    overload,
+    repair_ms,
 )
 from sim.net import Network
 
@@ -71,6 +76,19 @@ def violations(checker, name):
     return [v for v in checker.violations if v.check == name]
 
 
+def keep_cycle(net, a, b):
+    """Make a and b keep each other as their only parent from now on."""
+    for name, other in ((a, b), (b, a)):
+        parents = net.boards[name].routing.parents
+
+        def select(now, parents=parents, other=other):
+            parents._set_members([other])
+            return 0
+
+        parents._select = select
+        select(net.now)
+
+
 class LoopsTest(unittest.TestCase):
     """MP11: a node kept in a cycle beyond the bound is reported."""
 
@@ -79,20 +97,8 @@ class LoopsTest(unittest.TestCase):
         checker = Checker(net, [Loops()])
         checker.start()
 
-        def keep_cycle():
-            # Each of B and C keeps the other as its only parent.
-            for name, other in ((B, C), (C, B)):
-                parents = net.boards[name].routing.parents
-
-                def select(now, parents=parents, other=other):
-                    parents._set_members([other])
-                    return 0
-
-                parents._select = select
-                select(net.now)
-
         if defect:
-            net.at(FORMED, keep_cycle)
+            net.at(FORMED, keep_cycle, net, B, C)
         net.run(FORMED + 30000)
         return checker.finish(), checker
 
@@ -317,6 +323,115 @@ class ResourcesTest(unittest.TestCase):
         found, check = self.run_mesh(True)
         self.assertEqual([v.nodes for v in found], [(D,)])
         self.assertIn("neighbours 5 > bound 4", found[0].detail)
+
+
+class RecoveryTest(unittest.TestCase):
+    """Overload: a board neither routed nor detached at the deadline is reported, so is a
+    message still queued at the end."""
+
+    def run_line(self, names, defect=None, kill=None):
+        # The overload ends at FORMED; the run ends 15 s after the deadline.
+        net = build((ROOT,) + names, line(*names))
+        net.boards[ROOT].listen(APP)
+        check = Recovery(FORMED)
+        checker = Checker(net, [check])
+        if defect == "never":
+            net.boards[names[-1]].routing.parents.candidate_cost = lambda n, now: None
+        checker.start()
+        if kill is not None:
+            net.at(FORMED, checker.switch_off, kill)
+        if defect == "cycle":
+            net.at(FORMED + 1, keep_cycle, net, names[-2], names[-1])
+        deadline = FORMED + check.detect_ms() + repair_ms(checker, len(names))
+        end = deadline + 15000
+        last = net.boards[names[-1]]
+        if defect == "queued":
+            # The last board's links cut just before it submits: its message stays.
+            for a, b in ((names[-2], names[-1]), (names[-1], names[-2])):
+                net.at(end - 6000, net.medium.cut, a, b)
+            net.at(end - 6000, checker.links_changed)
+        if kill is None and defect in (None, "queued"):
+            net.at(end - 5000, last.submit, APP, 1, ROOT, b"punch")
+        net.run(end)
+        checker.finish()
+        return violations(checker, "recovery"), check, net, deadline
+
+    def test_recovered_line(self):
+        found, check, net, deadline = self.run_line((A, B))
+        self.assertEqual(found, [])
+        self.assertEqual(check.deadline, deadline)
+        self.assertTrue(deadline <= check.checked < deadline + 2000)
+        self.assertEqual((check.routed, check.detached, check.copies), (2, 0, 0))
+        self.assertEqual([r[3] for r in net.boards[ROOT].inbox if r[2] == APP], [b"punch"])
+
+    def test_deadline_from_the_design_periods(self):
+        # 3.6 presence periods, then the repair bound of MP10 at the depth seen.
+        found, check, net, deadline = self.run_line((A, B))
+        self.assertEqual(check.detect_ms(), 36000)  # T = 10 s
+        self.assertEqual(check.depth, 2)
+
+    def test_never_routed_reported(self):
+        found, check, net, deadline = self.run_line((A, B), "never")
+        self.assertEqual([v.nodes for v in found], [(B,)])
+        self.assertIn("connected, no route", found[0].detail)
+        self.assertTrue(found[0].time >= deadline)
+        self.assertEqual(check.routed, 1)
+
+    def test_cut_off_detached(self):
+        # A dies: B and C, cut off, detach.
+        found, check, net, deadline = self.run_line((A, B, C), kill=A)
+        self.assertEqual(found, [])
+        self.assertEqual((check.routed, check.detached), (0, 2))
+
+    def test_rootless_cycle_reported(self):
+        found, check, net, deadline = self.run_line((A, B, C), "cycle", kill=A)
+        self.assertEqual(sorted(v.nodes for v in found), [(B,), (C,)])
+        self.assertTrue(all("cut off, rootless (preferred" in v.detail for v in found))
+        self.assertEqual((check.routed, check.detached), (0, 0))
+
+    def test_queued_at_the_end_reported(self):
+        found, check, net, deadline = self.run_line((A, B), "queued")
+        self.assertEqual([v.nodes for v in found], [(B,)])
+        self.assertIn("still queued at the end (ports %d)" % APP, found[0].detail)
+        self.assertEqual(check.copies, 1)
+
+
+class OverloadTest(unittest.TestCase):
+    """The split of an overload run: MP10 within the window accepted, the rest failing."""
+
+    def test_split(self):
+        vs = [
+            Violation(1000, "MP10", (A,), "before the window"),
+            Violation(5000, "MP10", (A,), "in the window"),
+            Violation(6000, "MP11", (B,), "loop in the window"),
+            Violation(7000, "MP5", (B,), "silent"),
+            Violation(9000, "MP10", (C,), "at the deadline"),
+            Violation(9001, "MP10", (C,), "after the deadline"),
+            Violation(9500, "recovery", (C,), "not recovered"),
+        ]
+        outcomes = [
+            (1000, "refused"),
+            (4000, "refused"),
+            (4000, "failed"),
+            (5000, "at_root"),
+            (6000, "partition"),
+            (6000, "delivered"),
+            (6000, "exempt"),
+            (9500, "failed"),
+        ]
+        failing, accepted, refused, failed = overload(vs, 2000, 9000, outcomes)
+        self.assertEqual([v.detail for v in accepted], ["in the window", "at the deadline"])
+        self.assertEqual(
+            [v.detail for v in failing],
+            [
+                "before the window",
+                "loop in the window",
+                "silent",
+                "after the deadline",
+                "not recovered",
+            ],
+        )
+        self.assertEqual((refused, failed), (1, 3))
 
 
 if __name__ == "__main__":

@@ -14,19 +14,37 @@ link engines and routing at SF8 with the SILy *competition* periods
 (§16–§17: presence 30 s, topology 300 s, root beacon every 15 s, Imin 32
 slots = 3.0 s) and a class 1 load following §15, plays the scenario, and
 checks the invariants of `sim.invariants` (MP11, MP10, MP5, MP9, MP13) all
-along. A run passes when no invariant
-fails. ``run -`` prints the full report of one run (the reproduction of a
-failing run); ``plan``, ``run DIR`` and ``summary`` let `make large` run
-the plan in parallel processes, each writing its report into DIR, then
-print the summary: the reports of the failing runs, then one line.
+along. A run passes when no invariant fails, except on an overload
+topology (`OVERLOAD`, below). ``run -`` prints the full report of one run
+(the reproduction of a failing run); ``plan``, ``run DIR`` and ``summary``
+let `make large` run the plan in parallel processes, each writing its
+report into DIR, then print the summary: the reports of the failing runs,
+then one line (runs passed, among them the overload cases, with their
+accepted losses summed).
 
 Plan: every scenario × topology (`SCENARIOS`, `TOPOLOGIES`) at 30 nodes on
 seeds 1 to SEEDS, plus one 64-node run per scenario on the worst-case star
 (the relay's neighbour table holds 64 entries, its full size, the others
 63; every message through one relay: the MP13 bounds), seed 1. The star
-comes in two variants: ``star``, the root hidden from all but the relay,
-and ``star-domain``, the root also heard and hearing every board on links
-too weak to be parent links (one collision domain, §15).
+comes in three variants: ``star``, the root hidden from all but the relay,
+``star-domain``, the root also heard and hearing every board on links too
+weak to be parent links (one collision domain, §15), and ``star2b``, the
+dimensioning case: two relays next to the root, each with its half of the
+Nodes, the halves hidden from each other and from the root.
+
+Overload (``star``, at 30 and 64 nodes): the hidden-root star with a
+single relay is at its capacity limit at the §15 load (hidden
+terminals drown the root's frames at the relay during the burst). Its runs
+pass on a criterion of their own, `sim.invariants.Recovery` and
+`sim.invariants.overload`: required, no silent loss (MP5), the safety
+checks (MP11, MP9, MP13), and the recovery once the overload has ended
+(the burst minute, or the scenario's event if later): by a deadline of
+3.6 presence periods (a parent link left, §9) plus the repair bound of
+MP10 at the network's depth (11.6 periods at 2 hops), every board routed
+or, cut off, detached, and nothing still queued at the end; accepted and
+counted, from the burst to that deadline: MP10 beyond its bounds
+(attachment, version wave), messages refused or failed with an error. Its
+result reads ``overload`` instead of ``ok``.
 ``run`` also takes the other generators of `sim.topologies.GENERATORS`
 (``grid``; ``course``, the nominal orienteering course, at most 14 nodes),
 outside the plan.
@@ -45,7 +63,9 @@ Scenarios (`TIMELINE`: the event at 6 minutes of 15 at 30 nodes, at 4 of
 
 - ``forming``: the boards start together; nothing else happens;
 - ``relay-death``: the relay that forwarded the most messages is switched
-  off for good (on the star, the only relay: the others are cut off);
+  off for good (on the star, the only relay: the others are cut off; on
+  ``star2b``, one of the two: its half is cut off, its messages failed
+  with an error or exempt, MP5);
 - ``global-repair``: the root issues a new DODAG version;
 - ``lossy``: from the start, `LOSSY_SHARE` of the links lose `LOSS` of
   their frames both ways (drawn per link).
@@ -76,7 +96,8 @@ TRAFFIC_LABEL = (1 << 20) + 1  # derive() labels of the suite's own generators
 LOSS_LABEL = (1 << 20) + 2
 
 SCENARIOS = ("forming", "relay-death", "global-repair", "lossy")
-TOPOLOGIES = ("domain", "star", "star-domain", "geometric")
+TOPOLOGIES = ("domain", "star", "star-domain", "star2b", "geometric")
+OVERLOAD = ("star",)  # overload cases: the recovery criterion (`invariants.Recovery`)
 NODES = 30
 LARGE_NODES = 64
 SHOWN = 8  # violations listed per check in a report (``run -`` lists all)
@@ -110,6 +131,12 @@ class Run:
         self.rate = PUNCHES_PER_HOUR  # changed before `build` by diagnostic scripts
         self.burst = BURST
         self.notes = []
+        self.overload = topology in OVERLOAD
+        self.recovery = None
+        # End of the overload: the burst minute, or the scenario's event if later.
+        self.after_ms = self.burst_ms + 60000
+        if scenario in ("relay-death", "global-repair"):
+            self.after_ms = max(self.after_ms, self.event_ms)
 
     @property
     def name(self):
@@ -132,6 +159,9 @@ class Run:
         self.root = net.boards[self.topology.names[0]]
         self.root.listen(APP)
         checks = invariants.standard(APP, self.drain_ms)
+        if self.overload:
+            self.recovery = invariants.Recovery(self.after_ms)
+            checks.append(self.recovery)
         self.delivery = [c for c in checks if isinstance(c, invariants.Delivery)][0]
         self.checker = invariants.Checker(net, checks)
         self.checker.start()
@@ -197,7 +227,28 @@ class Run:
         self.net.run(self.end_ms)
         self.violations = self.checker.finish()
         self.wall_ms = time.ticks_diff(time.ticks_ms(), start)
+        self.judge()
         return self.violations
+
+    def judge(self):
+        """Split the violations into ``failing`` and ``accepted`` (overload cases).
+
+        A full case fails on any violation; an overload case on those
+        `invariants.overload` does not accept in its window (from the burst
+        to the recovery deadline), whose refused and failed messages are
+        counted (``refused``, ``failed``).
+        """
+        self.accepted, self.refused, self.failed = [], 0, 0
+        self.failing = self.violations
+        if not self.overload:
+            return
+        end = self.recovery.deadline
+        if end is None:
+            end = self.end_ms
+        self.window = (self.burst_ms, end)
+        self.failing, self.accepted, self.refused, self.failed = invariants.overload(
+            self.violations, self.burst_ms, end, self.delivery.outcomes
+        )
 
     def report(self, limit=SHOWN):
         """Return the lines of the run's report, the result line last.
@@ -220,21 +271,41 @@ class Run:
             s = c.stats()
             if s:
                 lines.append("   %s %s: %s" % (c.name, type(c).__name__, s))
-        shown = {}
-        for v in self.violations:
-            n = shown.get(v.check, 0)
-            shown[v.check] = n + 1
-            if limit is None or n < limit:
-                lines.append("   VIOLATION %r" % v)
-        for check in sorted(shown):
-            if limit is not None and shown[check] > limit:
-                lines.append("   ... %d more %s violations" % (shown[check] - limit, check))
-        status = "ok" if not self.violations else "FAIL"
+        _listed(lines, "VIOLATION", self.failing, limit)
+        _listed(lines, "ACCEPTED", self.accepted, limit)
+        if self.failing:
+            status = "FAIL"
+        elif self.overload:
+            status = "overload"
+        else:
+            status = "ok"
+        accepted = ""
+        if self.overload:
+            accepted = ", accepted in %.1f-%.1f s: %d MP10, %d refused, %d failed" % (
+                self.window[0] / 1000,
+                self.window[1] / 1000,
+                len(self.accepted),
+                self.refused,
+                self.failed,
+            )
         lines.append(
-            "RESULT %s %s: %d violations, %.1f s"
-            % (status, self.name, len(self.violations), self.wall_ms / 1000)
+            "RESULT %s %s: %d violations%s, %.1f s"
+            % (status, self.name, len(self.failing), accepted, self.wall_ms / 1000)
         )
         return lines
+
+
+def _listed(lines, label, violations, limit):
+    # Append the violations, at most limit per check (None: all).
+    shown = {}
+    for v in violations:
+        n = shown.get(v.check, 0)
+        shown[v.check] = n + 1
+        if limit is None or n < limit:
+            lines.append("   %s %r" % (label, v))
+    for check in sorted(shown):
+        if limit is not None and shown[check] > limit:
+            lines.append("   ... %d more %s %s" % (shown[check] - limit, check, label.lower()))
 
 
 def plan(seeds):
@@ -261,19 +332,39 @@ def _command(name):
     return 'make large RUN="%s"' % name
 
 
+def _accepted(result):
+    # (MP10, refused, failed) accepted in an overload RESULT line.
+    tail = result.split(": ", 2)[-1]
+    words = tail.replace(",", "").split()
+    return int(words[0]), int(words[2]), int(words[4])
+
+
 def summary(reports, seconds=None):
-    """Print the failing reports and the summary line; return the failing run names."""
+    """Print the failing reports and the summary line; return the failing run names.
+
+    The line counts the runs passed, among them the overload cases passed
+    on their criterion, with their accepted capacity losses summed.
+    """
     failed = []
+    overload = [0, 0, 0, 0]  # runs, MP10, refused, failed
     for lines in reports:
         result = lines[-1]
-        if not result.startswith("RESULT ok"):
+        status = result.split(" ", 2)[1]
+        if status == "overload":
+            overload[0] += 1
+            for i, n in enumerate(_accepted(result)):
+                overload[i + 1] += n
+        elif status != "ok":
             for line in lines:
                 print(line)
             name = result.split(" ", 2)[2].split(":")[0]
             print("   reproduce: %s" % _command(name))
             failed.append(name)
     wall = "" if seconds is None else ", %d s" % seconds
-    print("large: %d of %d runs passed%s" % (len(reports) - len(failed), len(reports), wall))
+    print(
+        "large: %d of %d runs passed (%d as overload: accepted %d MP10, %d refused, "
+        "%d failed)%s" % ((len(reports) - len(failed), len(reports)) + tuple(overload) + (wall,))
+    )
     for name in failed:
         print("  failed: %s" % name)
     return failed
@@ -290,7 +381,7 @@ def main(argv):
         if argv[2] == "-":
             for line in lines:
                 print(line)
-            return 1 if r.violations else 0
+            return 1 if r.failing else 0
         name = "%s/%s.txt" % (argv[2], r.name.replace(" ", "_"))
         with open(name, "w") as f:
             f.write("\n".join(lines) + "\n")

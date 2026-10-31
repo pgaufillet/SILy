@@ -28,7 +28,11 @@ of a presence frame, §8), silence limit S = 2.5 T (§9). Checks:
   end of the run, delivered to the root or reported failed to its sender;
 - `DutyCycle` (MP9): no board transmits more than the duty-cycle budget in
   any window, measured from the medium's transmissions;
-- `Resources` (MP13): tables and queues within their configured bounds.
+- `Resources` (MP13): tables and queues within their configured bounds;
+- `Recovery` (overload cases only, not a §2 property): after an overload
+  ends, every board routed or detached by a deadline, nothing left queued
+  at the end; `overload` splits such a run's violations into failing and
+  accepted (MP10 beyond its bounds within the overload window).
 
 Graph notions: a link is **usable** when it is up both ways, delivers at
 least `USABLE` of the frames both ways without collisions (ETX ≤ 2, well
@@ -43,10 +47,11 @@ chain at once, before the node notices).
 
 from mesh.airtime import snr_limit_x10
 from mesh.dodag import DESYNC_SLOTS, HOLD_IMIN, WINDOW_SLOTS
-from mesh.frame import ROOT
+from mesh.frame import RANK_INFINITE, ROOT
 from mesh.link import SENDERS
 from mesh.neighbours import CAPACITY, MARGIN_LOW, silence_ms
 from mesh.parents import SIZE as PARENT_SET
+from mesh.platform import JITTER_PERCENT
 from mesh.ports import ERROR
 from mesh.reliable import ACK_BATCH, DUPLICATES, decode_error
 from mesh.txqueue import SIZE as QUEUE_SIZE
@@ -300,6 +305,13 @@ class Checker:
         return depth
 
 
+def repair_ms(checker, hops):
+    """Repair bound of `Attachment` for a node at hops from the root (ms)."""
+    c = checker
+    hold = HOLD_IMIN * c.imin_ms + 2 * DESYNC_SLOTS * c.slot_ms
+    return c.silence_ms + hold + hops * (c.silence_ms + c.window_ms)
+
+
 # --- MP11 ---------------------------------------------------------------------------------
 
 
@@ -438,11 +450,9 @@ class Attachment(Check):
 
     def bound_ms(self, hops, cause):
         c = self.checker
-        per_hop = c.silence_ms + c.window_ms
         if cause == self.START:
-            return c.imin_ms + hops * per_hop
-        hold = HOLD_IMIN * c.imin_ms + 2 * DESYNC_SLOTS * c.slot_ms
-        return c.silence_ms + hold + hops * per_hop
+            return c.imin_ms + hops * (c.silence_ms + c.window_ms)
+        return repair_ms(c, hops)
 
     def sample(self, now):
         c = self.checker
@@ -622,6 +632,10 @@ class Delivery(Check):
     the failure is explicit, and reaching the sender is the downward step's
     to check.
 
+    ``outcomes`` lists the outcome of each message counted (its submission
+    time and its key in ``counts``), for the accounting of an overload run
+    (`overload`).
+
     For the diagnosis of a violation, the failures of forwarded messages
     by relays are recorded (``relayed``: payload -> (time, relay, reason,
     cut off)),
@@ -641,6 +655,7 @@ class Delivery(Check):
         self.off = set()
         self.counts = {}
         self.relayed = {}
+        self.outcomes = []  # (submission time, outcome key of ``counts``), at the end
 
     def bind(self, checker):
         super().bind(checker)
@@ -724,25 +739,29 @@ class Delivery(Check):
             "late": 0,
             "lost": 0,
         }
+        self.outcomes = []
         for t, name, seq, payload in self.sent:
             if t > now - self.drain_ms:
                 counts["late"] += 1
                 continue
             counts["submitted"] += 1
             if payload in delivered:
-                counts["delivered"] += 1
+                key = "delivered"
             elif seq < 0:
-                counts["refused"] += 1
+                key = "refused"
             elif seq in failed[name]:
-                counts["failed"] += 1
+                key = "failed"
             elif (name, seq) in self.root_errors:
-                counts["at_root"] += 1
+                key = "at_root"
             elif name in self.off or payload in self.lost_with:
-                counts["exempt"] += 1
+                key = "exempt"
             elif payload in self.relayed and self.relayed[payload][3]:
-                counts["partition"] += 1
+                key = "partition"
             else:
-                counts["lost"] += 1
+                key = "lost"
+            counts[key] += 1
+            self.outcomes.append((t, key))
+            if key == "lost":
                 where = "copies at: %s" % (
                     " ".join("%04x" % n for n in self._copies(payload)) or "none"
                 )
@@ -900,6 +919,163 @@ class Resources(Check):
         return "highest " + ", ".join(
             "%s %d/%d" % (k, self.highest[k], self.bounds[k]) for k in sorted(self.bounds)
         )
+
+
+# --- Overload: recovery -----------------------------------------------------------------
+
+
+class Recovery(Check):
+    """Overload criterion: the network has recovered by a deadline after the load peak.
+
+    An overload case (the hidden-root star at the §15 load, beyond its
+    capacity) may lose routes and messages during the burst, but not its
+    recovery once the load is back to the steady rate. after_ms: the end of
+    the overload (the burst minute, or a later scenario event). Deadline:
+    after_ms + D + R, D the time a node takes to leave a parent link whose
+    acknowledgements stopped at after_ms (§9 repair times, "left with
+    traffic, last candidate relay", the longest of them: the silence limit,
+    then the next selection at the latest at the parent's next presence,
+    1.1 T: 3.6 T), R the repair bound of `Attachment` at the largest hop
+    count seen (detach, hold, rejoin hop by hop: the subtree detached when
+    its parent leaves follows). At SF8 (T 30 s) and 2 hops: 108 + 239 s,
+    11.6 T. At the first sample from the deadline, every board switched on
+    must be:
+
+    - connected to the root (usable links): routed (`Checker.chain`), the
+      relays included;
+    - cut off: detached (no preferred parent, rank 255): no rootless
+      structure.
+
+    At the end of the run (``drain`` after the last submission, the suite's
+    5 periods: holding of 2 periods, then the error's, MP15), no class 1 or
+    2 message left in any queue (waiting or held included): nothing still
+    circulating. ``deadline`` is known from the first sample at or after
+    after_ms; a run ending before it is judged at its end.
+    """
+
+    name = "recovery"
+
+    def __init__(self, after_ms):
+        self.after_ms = after_ms
+        self.deadline = None
+        self.depth = 0
+        self.checked = None  # time of the route check
+        self.routed = 0
+        self.detached = 0
+        self.copies = 0
+
+    def detect_ms(self):
+        """D: a parent link left after its last acknowledgement (§9: 3.6 T)."""
+        c = self.checker
+        return c.silence_ms + c.period_ms * (100 + JITTER_PERCENT) // 100
+
+    def sample(self, now):
+        c = self.checker
+        if self.checked is not None:
+            return
+        hops = c.hops()
+        depth = max(hops.values()) if hops else 0
+        if depth > self.depth:
+            self.depth = depth
+        if self.deadline is None and now >= self.after_ms:
+            self.deadline = self.after_ms + self.detect_ms() + repair_ms(c, self.depth)
+        if self.deadline is not None and now >= self.deadline:
+            self._routes(now)
+
+    def _routes(self, now):
+        c = self.checker
+        self.checked = now
+        hops = c.hops()
+        for b in c.nodes():
+            if c.chain(b) is not None:
+                self.routed += 1
+                continue
+            p = c.preferred(b)
+            rank = b.engine.rank
+            connected = b.name in hops
+            if not connected and p is None and rank == RANK_INFINITE:
+                self.detached += 1
+                continue
+            if p is None and rank == RANK_INFINITE:
+                what = "connected, no route"
+            else:
+                what = "rootless (preferred %s, rank %d)" % (_name(p), rank)
+                if not connected:
+                    what = "cut off, " + what
+            self.violate(
+                now,
+                (b.name,),
+                "not recovered at %.1f s, %.1f s after the overload ended at %.1f s: %s"
+                % (now / 1000, (now - self.after_ms) / 1000, self.after_ms / 1000, what),
+            )
+
+    def finish(self, now):
+        if self.checked is None:
+            self._routes(now)
+        c = self.checker
+        for b in c.alive():
+            held = b.engine.queue.select(lambda m: m.cls, True)
+            if held:
+                self.copies += len(held)
+                ports = sorted(set(m.port for _, m in held))
+                self.violate(
+                    now,
+                    (b.name,),
+                    "%d class 1/2 messages still queued at the end (ports %s)"
+                    % (len(held), " ".join(str(p) for p in ports)),
+                )
+
+    def stats(self):
+        if self.deadline is None:
+            return "overload end %.1f s not reached" % (self.after_ms / 1000)
+        return (
+            "overload ended %.1f s, deadline %.1f s (left %.1f s + repair %.1f s at %d hops), "
+            "checked %.1f s: %d routed, %d cut off and detached; %d messages queued at the end"
+            % (
+                self.after_ms / 1000,
+                self.deadline / 1000,
+                self.detect_ms() / 1000,
+                repair_ms(self.checker, self.depth) / 1000,
+                self.depth,
+                self.checked / 1000,
+                self.routed,
+                self.detached,
+                self.copies,
+            )
+        )
+
+
+ACCEPTED = ("MP10",)  # liveness checks whose misses an overload case accepts in its window
+FAILED = ("failed", "at_root", "partition")  # outcomes of `Delivery`: failed with an error
+
+
+def overload(violations, start_ms, end_ms, outcomes=()):
+    """Split an overload run's violations; return (failing, accepted, refused, failed).
+
+    accepted: the violations of the `ACCEPTED` checks (MP10: attachment and
+    version wave beyond their bounds) at a time in [start_ms, end_ms], the
+    overload window (from the burst to the `Recovery` deadline): capacity
+    losses; failing: the others (MP5, MP9, MP11, MP13, recovery; MP10
+    outside the window). refused, failed: the messages submitted in the
+    window refused at submission or failed with an error (outcomes of
+    `Delivery`), counted for the report.
+    """
+    failing = []
+    accepted = []
+    for v in violations:
+        if v.check in ACCEPTED and start_ms <= v.time <= end_ms:
+            accepted.append(v)
+        else:
+            failing.append(v)
+    refused = 0
+    failed = 0
+    for t, key in outcomes:
+        if start_ms <= t <= end_ms:
+            if key == "refused":
+                refused += 1
+            elif key in FAILED:
+                failed += 1
+    return failing, accepted, refused, failed
 
 
 def standard(port, drain_ms):

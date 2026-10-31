@@ -131,7 +131,7 @@ def test(out, target):
 
 
 def large(out, args):
-    """Play one large-suite run, recording; return 0 if no invariant failed."""
+    """Play one large-suite run, recording; return 0 if it passed (`Run.judge`)."""
     sys.path.insert(0, _TESTS)
     import large as suite
 
@@ -148,11 +148,12 @@ def large(out, args):
     r.net.run(r.end_ms)
     r.violations = r.checker.finish()
     r.wall_ms = time.ticks_diff(time.ticks_ms(), start)
+    r.judge()
     rec.close()
     for line in r.report(None):
         print(line)
     _summary(_recorders, r.wall_ms)
-    return 1 if r.violations else 0
+    return 1 if r.failing else 0
 
 
 def main(argv):

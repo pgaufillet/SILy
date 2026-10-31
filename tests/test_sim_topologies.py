@@ -1,4 +1,4 @@
-"""Topologies of large simulated networks: the hand-placed course, the star domain."""
+"""Topologies of large simulated networks: the hand-placed course, the star domain, star2b."""
 
 import unittest
 
@@ -106,6 +106,46 @@ class Course(unittest.TestCase):
     def test_larger_course_refused(self):
         with self.assertRaises(ValueError):
             topologies.course(_BOARDS + 1)
+
+
+class StarSplit(unittest.TestCase):
+    """star2b: two relays next to the root, each with its own half of the Nodes."""
+
+    def setUp(self):
+        self.t = topologies.make("star2b", _STAR + 1, 1)  # the suite's 30 Nodes and the root
+        self.adj = _neighbours(self.t)
+        root, a, b = self.t.names[:3]
+        self.root, self.relays = root, (a, b)
+        self.halves = [set(n for n in self.t.names[3:] if r in self.adj[n]) for r in (a, b)]
+
+    def test_relays_hear_the_root_and_each_other(self):
+        a, b = self.relays
+        self.assertEqual(self.adj[self.root], {a, b})
+        self.assertIn(b, self.adj[a])
+        self.assertEqual(self.t.hops[a], 1)
+        self.assertEqual(self.t.hops[b], 1)
+
+    def test_halves_disjoint_and_cover_the_nodes(self):
+        h1, h2 = self.halves
+        self.assertEqual(h1 & h2, set())
+        self.assertEqual(h1 | h2, set(self.t.names[3:]))
+        self.assertEqual((len(h1), len(h2)), (14, 14))
+        self.assertEqual(sorted(h1), self.t.names[3:17])
+        odd = topologies.relay_star_split(8)  # 5 Nodes: the first half the larger
+        self.assertEqual(len(_neighbours(odd)[odd.names[1]] - {odd.names[0], odd.names[2]}), 3)
+
+    def test_each_node_hears_its_relay_and_its_half_only(self):
+        for relay, half in zip(self.relays, self.halves):
+            for n in half:
+                self.assertEqual(self.adj[n], (half - {n}) | {relay}, hex(n))
+                self.assertEqual(self.t.hops[n], 2, hex(n))
+            self.assertEqual(self.adj[relay], half | {self.root} | (set(self.relays) - {relay}))
+
+    def test_links_like_the_star(self):
+        self.assertTrue(all((rssi, snr) == (-80, 10) for _, _, rssi, snr in self.t.links))
+        pairs = [frozenset((a, b)) for a, b, _, _ in self.t.links]
+        self.assertEqual(len(pairs), len(set(pairs)))
+        self.assertEqual(self.t.depth, 2)
 
 
 class StarDomain(unittest.TestCase):
