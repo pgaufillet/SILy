@@ -235,35 +235,56 @@ class Forwarding(unittest.TestCase):
 
 
 class LocalRepair(unittest.TestCase):
-    def test_attempts_exhausted_on_the_only_parent_poisons_at_once(self):
+    def test_only_relay_parent_kept_after_exhausted_attempts_until_its_link_is_unreachable(self):
+        # R no longer hears N, which still hears R: N's attempts towards R
+        # all fail. R, N's only candidate, is kept while its link is
+        # reachable (§12 upward failure, last candidate): no detach, fresh
+        # attempts; once N's failed samples run 4 in a row and no
+        # acknowledgement of R came for a silence limit (§9), N leaves R,
+        # its ETX still at most 4 (judged by ETX, the link would stay
+        # eligible): the poison at once, the message held.
         line = Line(10)
         n = line.node
+        parents = n.routing.parents
+        entry = n.engine.neighbours.get(R)
+        silence = silence_ms(PERIOD)
+        n.submit(APP, 1, ROOT, b"heard")
+        while len(n.engine.queue):
+            line.run(100)
+        last = entry.answered
+        self.assertTrue(line.net.now - last < 1000)
         reroutes = []
-        original = n.routing.parents.next_parent
+        original = parents.next_parent
 
         def next_parent(hop, now=None):
-            reroutes.append(line.net.now)
-            return original(hop, now)
+            hop = original(hop, now)
+            reroutes.append((hop, entry.eligible(line.net.now, silence, True), line.net.now))
+            return hop
 
-        n.routing.parents.next_parent = next_parent
-        line.net.medium.cut(R, N)  # N no longer hears R: no acknowledgement
-        start = line.net.now
-        adverts = n.routing.dodag.counters.adverts
-        n.submit(APP, 1, ROOT, b"lost")
-        # 3 attempts, the last 2 each after a retry delay (§12): 64, 128 slots.
-        limit = 3000 + 6 * n.engine.reliable.retry_ms
-        while not reroutes and line.net.now - start < limit:
-            line.run(100)
-        line.run(800)  # the desynchronisation delay
-        self.assertEqual(len(reroutes), 1)
-        # Applied in the step of the reroute: rank 255 in the header, the
-        # poison on air within the desynchronisation delay, the message held.
-        self.assertEqual((n.engine.rank, n.routing.parents.preferred), (RANK_INFINITE, None))
+        parents.next_parent = next_parent
+        line.net.medium.cut(N, R)
+        n.submit(APP, 1, ROOT, b"unheard")
+        while not reroutes:
+            line.run(500)
+        self.assertEqual(reroutes[0][:2], (R, True))
+        self.assertEqual((parents.preferred, parents.detaches, parents.drops), (R, 0, 0))
+        rel = n.engine.reliable
+        self.assertEqual((len(n.engine.queue), rel.held()), (1, 0))
         d = n.routing.dodag
-        self.assertEqual(d.counters.poisons, 1)
-        self.assertEqual(d.counters.adverts, adverts + 1)
-        self.assertEqual(n.engine.reliable.held(), 1)
-        self.assertTrue(reroutes[0] - start < limit)
+        poisons = d.counters.poisons
+        while not parents.detaches:
+            line.run(100)
+            if not parents.detaches:
+                self.assertEqual(n.engine.rank, parents.rank)
+        left = line.net.now - last
+        self.assertTrue(silence <= left <= silence + PERIOD, left)
+        self.assertTrue(entry.run >= 4 and entry.etx() <= 4 * 128, (entry.run, entry.etx()))
+        self.assertFalse(entry.eligible(line.net.now, silence, True))
+        self.assertTrue(all(hop == R for hop, eligible, _ in reroutes if eligible), reroutes)
+        line.run(800)  # the desynchronisation delay
+        self.assertEqual((n.engine.rank, parents.preferred), (RANK_INFINITE, None))
+        self.assertEqual(d.counters.poisons, poisons + 1)
+        self.assertEqual((rel.held(), n.engine.counters.unreachable), (1, 0))
 
     def test_detach_holds_waiting_copies(self):
         # N's message waits for R's acknowledgement when R poisons: N

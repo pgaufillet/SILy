@@ -110,8 +110,9 @@ RTO_SLOTS = 6
 RETRY_SLOTS = 32
 RETRY_DOUBLINGS = 3
 # Consecutive failed samples that, with a silence limit since the last
-# acknowledgement of the root, make the link to the root unreachable (§9):
-# the root is left then, not at ETX > 4.
+# acknowledgement of the parent, make the link to the root, or to the
+# preferred parent while it is the last candidate, unreachable (§9): the
+# parent is left then, not at ETX > 4 nor after exhausted attempts.
 UNREACH_RUN = 4
 DETACH_HOLD = 2  # Imin after poisoning before rejoining
 # Answer window beyond Imin after the solicitation: solicitation 1 + backoff 4
@@ -280,14 +281,14 @@ def main():
         f"parent lost after {K_PARENT} silent presence periods"
     )
     print(
-        "SF  Imin  RTO    RTO    switch, traffic  switch  detach  global  "
+        "SF  Imin  RTO    RTO    switch, traffic  left,   switch  detach  global  "
         "Trickle reset, per neighbourhood  node cost at max"
     )
     print(
-        "          relay  root   parent  parent   idle    rejoin  wave    "
+        "          relay  root   parent  parent   traffic idle    rejoin  wave    "
         "frames  first-interval load       global repair rate (s/h)"
     )
-    print("                        relay   root")
+    print("                        relay   root     last relay")
     for sf in SFS:
         slot = toa(frame(1, PRESENCE_FIRST), sf)
         imin = TRICKLE_IMIN * slot
@@ -321,9 +322,18 @@ def main():
         run = (gaps + gaps // N_TX + 2) * rto_root + retry_slots(gaps) * slot
         beacon = (1 + JITTER) * live / BEACONS
         root_switch = max(run, SILENCE_LIMIT * live) + beacon
+        # A relay parent that is the last candidate is kept the same way
+        # (§12): left once its link is unreachable, from its last
+        # acknowledgement: the UNREACH_RUN-th failed sample (decided at its
+        # timeout: N_TX attempts, then fresh ones after the keep, a retry
+        # delay before each but the first) and one silence limit, whichever
+        # comes last, then the next selection (at the latest the relay's
+        # next presence, a period jittered). The node then detaches.
+        last_run = UNREACH_RUN * rto_relay + retry_slots(UNREACH_RUN - 1) * slot
+        last_switch = max(last_run, SILENCE_LIMIT * live) + (1 + JITTER) * live
         print(
             f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {relay_switch:>6.1f}  "
-            f"{root_switch:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
+            f"{root_switch:>6.1f}  {last_switch:>7.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
             f"{DEPTH * imin:>6.1f}  {TRICKLE_K * n_int:>6}  {peak:>8.0%}  {node:>28.1f}"
         )
 

@@ -421,9 +421,11 @@ class RankFollowing(unittest.TestCase):
         self.assertEqual(self.p.rank, RANK_INFINITE)
 
     def test_dropped_preferred_parent_not_followed(self):
+        self.net.hear(C, 23, 50)  # another candidate: A is dropped, not kept
+        self.p.recompute(50)
         self.net.hear(A, 30, 100)
-        self.assertEqual(self.p.next_parent(A, 100), HOLD)
-        self.assertEqual(self.p.rank, RANK_INFINITE)
+        self.assertEqual(self.p.next_parent(A, 100), C)
+        self.assertEqual((self.p.members(), self.p.rank), ((C,), 31))
 
 
 class BelowLowest(unittest.TestCase):
@@ -475,8 +477,16 @@ class BelowLowest(unittest.TestCase):
         self.net.etx(A, 1, 3, 2550)
         self.p.recompute(2550)  # C silent for 2.5 periods since 50
         self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((A,), 40, 24))
-        self.net.etx(A, 0, 1, 2600)  # A no longer eligible: B (28 < 40) refused
-        events = self.p.recompute(2600)
+        # ETX 5, A the last candidate: kept while reachable (acknowledged at
+        # 2550), its cost capped at 32.
+        self.net.etx(A, 0, 1, 2600)
+        self.p.recompute(2600)
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((A,), 48, 24))
+        # Unreachable a silence limit after its last acknowledgement: B
+        # (28 < 48) refused.
+        self.net.hear(B, 28, 5000)
+        self.net.hear(A, 16, 5000)
+        events = self.p.recompute(2550 + 5 * _PERIOD // 2)
         self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
         self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((), RANK_INFINITE, None))
 
@@ -579,7 +589,10 @@ class NextParent(unittest.TestCase):
     def test_empty_set_holds_and_detaches(self):
         self.p.next_parent(A, 100)
         self.p.next_parent(B, 100)
-        self.assertEqual(self.p.next_parent(C, 100), HOLD)
+        # C, the last candidate, is kept while it is one apart from drops
+        # (KeepLast); silent, it is dropped.
+        self.assertEqual(self.p.next_parent(C, 100), C)
+        self.assertEqual(self.p.next_parent(C, 5 * _PERIOD // 2), HOLD)
         self.assertEqual(self.p.rank, RANK_INFINITE)
         self.assertEqual(self.p.members(), ())
         self.assertTrue(self.p.events() & DETACHED)
@@ -712,15 +725,179 @@ class KeepRoot(unittest.TestCase):
         self.net.hear(ROOT, 0, 50, version=1)  # not behind: not a candidate
         self._left(self.p.next_parent(ROOT, 100))
 
-    def test_relay_parent_still_dropped(self):
-        # Only the root is kept: a relay parent, even the last candidate, is
-        # dropped (the node detaches).
+    def test_relay_parent_with_another_candidate_still_dropped(self):
+        # A relay parent is kept only as the last candidate (KeepLast).
         net = Net()
         net.hear(A, 8, 0)
+        net.hear(B, 10, 0)
         p = Parents(net.table)
         p.recompute(0)
-        self.assertEqual(p.next_parent(A, 100), HOLD)
+        self.assertEqual(p.next_parent(A, 100), B)
+        self.assertEqual((p.members(), p.drops, p.rank), ((B,), 1, 18))
+
+
+class KeepLast(unittest.TestCase):
+    """§12 upward failure, §9 eligibility: the preferred parent that is the
+    node's last candidate is kept after exhausted attempts, and its link is
+    judged by reachability, not ETX <= 4 (TLA+ `DODAG`, Exhaust =
+    "keepboth"; the reachability limited to the last candidate, MP12)."""
+
+    def setUp(self):
+        # A hop-2 node: relay A (rank 8, ETX 1) its only candidate; rank 16,
+        # L 16, bound 72.
+        net = self.net = Net()
+        net.hear(A, 8, 0)
+        self.now = 0
+        p = self.p = Parents(net.table, clock=lambda: self.now)
+        p.recompute(0)
+        p.events()
+        self.assertEqual((p.members(), p.rank, p.bound()), ((A,), 16, 72))
+
+    def _kept(self, hop):
+        p = self.p
+        self.assertEqual(hop, A)
+        self.assertEqual((p.members(), p.drops, p.detaches), ((A,), 0, 0))
+        self.assertTrue(self.net.table.get(A).parent)
+
+    def test_last_candidate_kept_after_exhausted_attempts(self):
+        self.now = 100
+        self._kept(self.p.next_parent(A))
+        self.assertEqual((self.p.rank, self.p.events()), (16, 0))
+        self.now = 2 * _PERIOD  # again, while it stays a candidate
+        self._kept(self.p.next_parent(A))
+
+    def test_decided_at_each_exhaustion(self):
+        # Kept, then B appears (rank 10, path cost 18, a gain below the switch
+        # threshold): the next exhaustion drops A, the message goes to B.
+        p = self.p
+        self._kept(p.next_parent(A, 100))
+        self.net.hear(B, 10, 300)
+        p.recompute(300)
+        self.assertEqual(p.members(), (A, B))
+        self.assertEqual(p.next_parent(A, 400), B)
+        self.assertEqual((p.members(), p.drops, p.rank), ((B,), 1, 18))
+        # B, now the last candidate (A dropped until heard again): kept.
+        self.assertEqual(p.next_parent(B, 500), B)
+        self.assertEqual((p.members(), p.drops), ((B,), 1))
+
+    def _failing(self, until):
+        # A heard every 500 ms up to until; the node's frames to it fail from
+        # 100 on, one failed sample per interval, after its last
+        # acknowledgement at 50: ETX above 4 from the 4th failure.
+        net = self.net
+        net.table.acked(A, True, 50)
+        t = 100
+        while t <= until:
+            net.hear(A, 8, t)
+            net.table.acked(A, False, t)
+            t += 500
+
+    def test_eligible_above_etx_4_while_it_answers(self):
+        # ETX 5 by 1600, 4 consecutive failed samples: kept, at a link cost
+        # capped at 32, until a silence limit since its last acknowledgement.
+        p = self.p
+        silence = 5 * _PERIOD // 2
+        self._failing(2100)
+        n = self.net.table.get(A)
+        self.assertEqual((n.etx(), n.run), (6 * 128, 4))
+        p.recompute(50 + silence - 1)
+        self.assertEqual((p.members(), p.rank, p.cost), ((A,), 40, 40))
+        self._kept(p.next_parent(A, 50 + silence - 1))
+        events = p.recompute(50 + silence)
+        self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((p.members(), p.drops), ((), 0))
+
+    def test_last_candidate_judged_by_reachability_not_etx(self):
+        # ETX 2 but unreachable: left (a dead uplink is left without waiting
+        # for its ETX to pass 4); with another candidate, judged by ETX: kept.
+        p = self.p
+        silence = 5 * _PERIOD // 2
+        self.net.etx(A, 1, 1, 40)
+        self._failing(2100)
+        n = self.net.table.get(A)
+        self.assertEqual((n.etx(), n.run), (2 * 128, 4))
+        p.recompute(50 + silence - 1)
+        self.assertEqual((p.members(), p.rank), ((A,), 24))
+        self.assertTrue(p.recompute(50 + silence) & DETACHED)
+        net = Net()
+        net.hear(A, 8, 0)
+        net.hear(B, 10, 0)
+        q = Parents(net.table)
+        q.recompute(0)
+        net.etx(A, 1, 1, 40)
+        net.table.acked(A, True, 50)
+        for t in (100, 600, 1100, 1600, 2100):
+            net.hear(A, 8, t)
+            net.hear(B, 10, t)
+            net.table.acked(A, False, t)
+        q.recompute(50 + silence)
+        self.assertEqual((q.members(), q.detaches), ((A, B), 0))
+
+    def test_parent_taken_again_restarts_its_reachability(self):
+        # A left unreachable at ETX 2; heard after the poison, taken again by
+        # ETX <= 4: its probes restart (as a new entry), so the next
+        # selection, A the last candidate, does not leave it at once.
+        p = self.p
+        silence = 5 * _PERIOD // 2
+        self.net.etx(A, 1, 1, 40)
+        self._failing(2100)
+        self.assertTrue(p.recompute(50 + silence) & DETACHED)
+        self.net.hear(A, 8, 2560)
+        self.assertTrue(p.recompute(2560) & ATTACHED)
+        n = self.net.table.get(A)
+        self.assertEqual((p.members(), n.run, n.answered), ((A,), 0, 2560))
+        self.net.hear(A, 8, 2570)
+        self.assertEqual((p.recompute(2570), p.members(), p.detaches), (0, (A,), 1))
+
+    def test_unreachable_last_candidate_dropped_at_an_exhaustion(self):
+        p = self.p
+        self._failing(2100)
+        self.now = 50 + 5 * _PERIOD // 2
+        self.assertEqual(p.next_parent(A), HOLD)
         self.assertEqual((p.members(), p.drops, p.rank), ((), 1, RANK_INFINITE))
+
+    def test_reachable_last_candidate_kept_above_etx_4_its_cost_capped(self):
+        # ETX 9, acknowledged within the silence limit: link cost 32 (path
+        # cost 40), not 72 (path cost 80, beyond the bound 72).
+        p = self.p
+        self.net.etx(A, 1, 9, 200)
+        self.net.hear(A, 8, 300)
+        self.assertEqual(self.net.table.get(A).etx(), 9 * 128)
+        events = p.recompute(300)
+        self.assertEqual((p.members(), p.rank, p.cost, p.lowest), ((A,), 40, 40, 16))
+        self.assertEqual(events, RANK_CHANGED | RANK_INCREASED)
+
+    def test_relay_with_another_candidate_ineligible_above_etx_4(self):
+        # MP12: B (path cost 18, ETX 1) a candidate: A's link at ETX 5 is
+        # judged by ETX: A leaves, even if reachable.
+        p = self.p
+        self.net.hear(B, 10, 50)
+        p.recompute(50)
+        self.assertEqual(p.members(), (A, B))
+        self.net.etx(A, 1, 5, 100)
+        self.assertTrue(self.net.table.get(A).reachable(100, 5 * _PERIOD // 2))
+        events = p.recompute(100)
+        self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((p.members(), p.rank), ((B,), 18))
+
+    def test_old_parent_back_only_at_etx_4(self):
+        # Once the node switched away from A (ETX 5), A is no longer the
+        # preferred parent: B gone, A (reachable) is no candidate, the node
+        # detaches; at ETX <= 4 it is one again.
+        p = self.p
+        self.net.hear(B, 10, 50)
+        p.recompute(50)
+        self.net.etx(A, 1, 5, 100)
+        p.recompute(100)
+        self.assertEqual(p.members(), (B,))
+        # B silent since 50; A heard before its failures age out (at 2600).
+        self.net.hear(A, 8, 2560)
+        self.assertTrue(p.recompute(2560) & DETACHED)
+        self.net.hear(A, 8, 2570)  # heard after the poison
+        self.assertIsNone(p.candidate_cost(self.net.table.get(A), 2570))
+        for _ in range(16):
+            self.net.table.acked(A, True, 2570)
+        self.assertEqual(p.candidate_cost(self.net.table.get(A), 2570), 16)
 
 
 class Detach(unittest.TestCase):
@@ -969,7 +1146,11 @@ class Behind(unittest.TestCase):
         self.assertIsNone(self.cost(A, 100))
         self.net.hear(A, 16, 200, version=2)
         self.assertIsNone(self.cost(A, 200 + 5 * _PERIOD // 2))
-        self.assertEqual(self.p.next_parent(A, 300), HOLD)
+        self.assertEqual(self.p.next_parent(A, 300), A)  # the last candidate: kept
+        self.net.hear(C, 20, 300, version=1)
+        self.assertEqual(self.p.next_parent(A, 300), C)  # another one: dropped
+        self.assertIsNone(self.cost(A, 300))
+        self.assertEqual(self.p.next_parent(C, 300 + 5 * _PERIOD // 2), HOLD)  # silent
         self.assertEqual(self.p.rank, RANK_INFINITE)
         self.assertFalse(self.p.behind)  # cleared by the detach
 
@@ -1035,27 +1216,44 @@ def _reference(p, now):
     table.expire(now)
     bound = 254 if p.lowest is None else min(254, p.lowest + p.max_increase)
     low = RANK_INFINITE if p.lowest is None else p.lowest
-    cands = []
-    for n in table.entries():
-        if n.address == ROOT:
-            # Reachable: fewer than 4 failed samples in a row, or an
-            # acknowledgement within the silence limit (§9).
+
+    def candidate(n, by_reach):
+        # By reachability: fewer than 4 failed samples in a row, or an
+        # acknowledgement within the silence limit (§9), its ETX capped at
+        # 4; otherwise ETX <= 4.
+        if by_reach:
             reach = n.run < 4 or now - n.answered < 5 * _PERIOD // 2
             eligible = n.margin_ok and n.m_count > 0 and reach
         else:
             eligible = n.margin_ok and n.m_count > 0 and n.etx() <= 4 * 128
         if n.version != p.version or not eligible:
-            continue
+            return None
         if n.rank >= low and n.address != p.preferred:
-            continue
+            return None
         if now - n.heard >= 5 * _PERIOD // 2:
-            continue
+            return None
         if p.poisoned_at is not None and n.heard <= p.poisoned_at:
-            continue
-        etx = min(n.etx(), 4 * 128) if n.address == ROOT else n.etx()
+            return None
+        etx = min(n.etx(), 4 * 128) if by_reach else n.etx()
         cost = n.rank + max(8, int(8 * etx / 128 + 0.5))
-        if cost <= bound:
-            cands.append((cost, -n.margin(), n.address, n.rank))
+        return (cost, -n.margin(), n.address, n.rank) if cost <= bound else None
+
+    # The others first (the root by reachability, the rest by ETX), then the
+    # preferred parent, by reachability if it is the root or no other is a
+    # candidate.
+    cands = []
+    preferred = None
+    for n in table.entries():
+        if n.address == p.preferred:
+            preferred = n
+            continue
+        key = candidate(n, n.address == ROOT)
+        if key is not None:
+            cands.append(key)
+    if preferred is not None:
+        key = candidate(preferred, preferred.address == ROOT or not cands)
+        if key is not None:
+            cands.append(key)
     cands.sort()
     top = cands[:3]
     if not top:

@@ -725,6 +725,89 @@ class RootRun(_RootCase):
         self.assertEqual(entry.run, 1)
 
 
+class RelayRun(unittest.TestCase):
+    """§9 reachability of a relay link (the preferred parent as the last
+    candidate): every acknowledgement of the relay ends the run of failed
+    samples, explicit or passive, with a sample or without."""
+
+    def _to_r(self, *groups):
+        # N, with R in its table, sends one frame to R per group of class 1
+        # messages; R answers only when told. Returns n, r, the frames and
+        # their ends.
+        n = _engine(N, R)
+        r = _engine(R, ROOT, seed=2)
+        r.reliable.acknowledge(X, 0, 0)  # any frame of R: R in N's table
+        (hello,), self.rt = _run(r, 0)  # R's own clock
+        _rx(n, 0, hello)
+        frames = []
+        now = 100
+        for group in groups:
+            for i in group:
+                n.submit(20 + i, 1, ROOT, b"m%d" % i)
+            (f,), now = _run(n, now)
+            self.assertEqual(len(_messages(_KEY, f)[1]), len(group))
+            frames.append((f, now))
+        return n, r, frames
+
+    def _forward(self, r, f, count=None):
+        # R's frame forwarding the first count messages of N's frame f.
+        msgs = _messages(_KEY, f)[1][:count]
+        for m in msgs:
+            r.send(Message(UPWARD, m.cls, m.port, bytes(m.payload), origin=N, seq=m.seq), ROOT)
+        (fwd,), self.rt = _run(r, self.rt)
+        return fwd
+
+    def test_passive_acknowledgement_ends_the_run(self):
+        n, r, ((f, end),) = self._to_r([0])
+        _run(n, end, end + n.reliable.timeout_ms(R))  # timed out: a failed sample
+        entry = n.neighbours.get(R)
+        self.assertEqual(entry.run, 1)
+        now = end + n.reliable.timeout_ms(R) + 1
+        _rx(n, now, self._forward(r, f))  # R's late forward, overheard
+        self.assertEqual((entry.run, entry.answered, n.counters.acks_passive), (0, now, 1))
+
+    def test_passive_acknowledgement_without_sample_ends_the_run(self):
+        # F0 (m0), then F1 (m1, m2). R's forward of m1 gives F1's sample; F0
+        # then times out; R's forward of m2, F1 sampled already, gives no
+        # sample but ends the run.
+        n, r, ((f0, end0), (f1, end1)) = self._to_r([0], [1, 2])
+        fwd1 = self._forward(r, f1, 1)
+        fwd2 = self._forward(r, f1)  # m2 again with m1: m1 no longer waits
+        timeout = n.reliable.timeout_ms(R)
+        _rx(n, end1, fwd1)
+        entry = n.neighbours.get(R)
+        self.assertEqual((entry.ack_count, entry.acknowledged(), len(n.queue)), (1, 1, 2))
+        _run(n, end1, end0 + timeout)
+        self.assertEqual((entry.ack_count, entry.acknowledged(), entry.run), (2, 1, 1))
+        self.assertTrue(end0 + timeout < end1 + timeout)  # F1 still waiting
+        _rx(n, end0 + timeout + 1, fwd2)
+        self.assertEqual(n.counters.acks_passive, 2)
+        self.assertEqual((entry.ack_count, entry.run, entry.answered), (2, 0, end0 + timeout + 1))
+
+    def test_explicit_acknowledgement_after_the_timeout_ends_the_run(self):
+        # R's explicit acknowledgement comes after N's timeout (no sample:
+        # the frame failed already): it ends the run.
+        n, r, ((f, end),) = self._to_r([0])
+        timeout = n.reliable.timeout_ms(R)
+        _run(n, end, end + timeout)
+        entry = n.neighbours.get(R)
+        self.assertEqual(entry.run, 1)
+        r.reliable.acknowledge(N, frame.decode_header(f, len(f)).counter, self.rt)
+        (ack,), _ = _run(r, self.rt)
+        _rx(n, end + timeout + 1, ack)
+        self.assertEqual((entry.run, entry.answered), (0, end + timeout + 1))
+        self.assertEqual((entry.ack_count, entry.acknowledged()), (1, 0))
+
+    def test_acknowledgement_of_another_node_does_not_end_the_run(self):
+        n, r, ((f, end),) = self._to_r([0])
+        timeout = n.reliable.timeout_ms(R)
+        _run(n, end, end + timeout)
+        r.reliable.acknowledge(X, 7, self.rt)
+        (ack,), _ = _run(r, self.rt)
+        _rx(n, end + timeout + 1, ack)
+        self.assertEqual(n.neighbours.get(R).run, 1)
+
+
 class KeptNextHop(_RootCase):
     """§12 upward failure: "next hop after failure" returning the same hop
     (routing keeps the root) gives the message fresh attempts towards it."""

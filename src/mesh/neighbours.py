@@ -32,33 +32,39 @@ link destination (the channel is shared, §9). Per neighbour:
   tenths of dB, averaged over its last 8 frames (fewer before 8). The link
   SNR is the packet SNR, or RSSI minus the noise floor at SNR >= +5 dB when
   a noise floor is known (``noise_floor``), since the SX1262 SNR saturates;
-- **eligibility** as a parent link: margin >= 3 dB and ETX <= 4 (the
-  link to the root: reachable, below). The margin has a hysteresis
+- **eligibility** as a parent link: margin >= 3 dB and ETX <= 4, except
+  the links judged by their reachability instead (below): the link to the
+  root, and the preferred parent's while it is the node's last candidate
+  (``reach``, decided by `mesh.parents`). The margin has a hysteresis
   (MP12): once below 3 dB, it must reach 6 dB again. A new neighbour
   starts on the eligible side;
-- **reachability of the root** (RPL neighbour unreachability detection
-  style): the link to the root (address `ROOT`) is not tested against
-  ETX <= 4 but is ineligible while **unreachable**: its last
-  `UNREACH_RUN` (4) failed samples are consecutive (``run``: failed
-  samples since the last acknowledgement, the samples of the
-  acknowledgement window, so that one lost batch of the root counts once)
-  and no acknowledgement of the root came for one silence limit
-  (``answered``: time of the last one, or of the entry's creation). Any
-  acknowledgement of the root ends the run: a success sample, or one that
-  gives no sample (`NeighbourTable.answered`: an explicit entry of the
-  root for a frame already sampled, a late one); beacons and other frames
-  do not. The node's class 1 transmissions towards the root are the
+- **reachability** (RPL neighbour unreachability detection style): a link
+  judged by it is not tested against ETX <= 4 but is ineligible while
+  **unreachable**: its last `UNREACH_RUN` (4) failed samples are
+  consecutive (``run``: failed samples since the last acknowledgement, the
+  samples of the acknowledgement window, so that one lost batch of the
+  root counts once) and no acknowledgement of the neighbour came for one
+  silence limit (``answered``: time of the last one, or of the entry's
+  creation). Any acknowledgement of the neighbour ends the run: a success
+  sample (explicit, or passive: the node overhears the neighbour forward
+  its message), or one that gives no sample (`NeighbourTable.answered`: an
+  explicit entry for a frame already sampled, a late one of the root, a
+  passive one of a frame already sampled); beacons and other frames do
+  not. The node's class 1 transmissions towards the neighbour are the
   probes. Failure ageing ends the run too (its failures left the window:
   the link gets `UNREACH_RUN` more failed samples), ``answered`` stays: a
-  node that stopped sending to the root reads it eligible again a silence
-  limit after its last failure, as under the ETX rule. Reachability is
-  read at selection time (`eligible` with the time and the silence limit).
-  The silence limit makes a root that answers now and then, under
-  collisions of its batches (hidden terminals), stay eligible whatever
-  its ETX; the run makes a root heard without fresh attempts towards it
-  stay eligible. **Cost cap**: the ETX of the link to the root used for
-  its link cost (`link_etx`) is at most 4, so that a reachable root above
-  ETX 4 keeps a link cost of 32, within the bound L + 56;
+  node that stopped sending to the neighbour reads it reachable again a
+  silence limit after its last failure, as under the ETX rule.
+  Reachability is read at selection time (`eligible` with the time and the
+  silence limit); it restarts, as at the entry's creation, when routing
+  takes a relay as its preferred parent (`restart_reach`). The silence
+  limit makes a parent that answers now and then, under collisions of its
+  acknowledgements or of the node's frames (hidden terminals), stay
+  eligible whatever its ETX; the run makes a parent heard without fresh
+  attempts towards it stay eligible. **Cost cap**: the ETX of a link
+  judged by reachability used for its link cost (`link_etx`) is at most 4,
+  so that a reachable parent above ETX 4 keeps a link cost of 32, within
+  the bound L + 56;
 - **parent flag**, set by routing: a parent is never evicted.
 
 Bounds (MP13): the entries are allocated at construction and reused. A new
@@ -93,8 +99,8 @@ EXPIRY_PERIODS = 4  # presence periods without a frame before removal
 SILENCE_HALVES = 5  # silence limit in half presence periods (2.5 periods, §9)
 ACK_MIN = 4  # acknowledgement samples before p_ack replaces d_in (then latched)
 ETX_ONE = 128  # fixed-point unit of the ETX
-ETX_MAX = 4 * ETX_ONE  # eligibility limit (ETX <= 4); cost cap of the root link
-UNREACH_RUN = 4  # consecutive failed samples of an unreachable root link (with a silence limit)
+ETX_MAX = 4 * ETX_ONE  # eligibility limit (ETX <= 4); cost cap of a link judged by reachability
+UNREACH_RUN = 4  # consecutive failed samples of an unreachable link (with a silence limit)
 MARGIN_LOW = 30  # tenths of dB: an eligible link becomes ineligible below
 MARGIN_HIGH = 60  # tenths of dB: an ineligible link becomes eligible again at
 SNR_SATURATION = 5  # dB: above, the packet SNR saturates (§5)
@@ -283,10 +289,11 @@ class Neighbour:
         elif average >= MARGIN_HIGH:
             self.margin_ok = True
 
-    def link_etx(self):
-        """Return the ETX of the link cost (units of 1/ETX_ONE): capped at 4 towards the root."""
+    def link_etx(self, reach=False):
+        """Return the ETX of the link cost (units of 1/ETX_ONE): capped at 4 on a link
+        judged by reachability (the root's, or reach: see `eligible`)."""
         etx = self.etx()
-        if self.address == ROOT and etx > ETX_MAX:
+        if (reach or self.address == ROOT) and etx > ETX_MAX:
             return ETX_MAX
         return etx
 
@@ -295,16 +302,18 @@ class Neighbour:
         and no acknowledgement came for silence ms (the silence limit, strict)."""
         return self.run < UNREACH_RUN or now - self.answered < silence
 
-    def eligible(self, now=None, silence=None):
+    def eligible(self, now=None, silence=None, reach=False):
         """Return True if the link is eligible as a parent link (§9, MP12).
 
-        Margin, and ETX <= 4, or for the link to the root its reachability
-        at now (ms) with the silence limit silence (ms); without now, the
-        root link is judged by its run alone (the silence taken as passed).
+        Margin, and ETX <= 4, or for a link judged by reachability (the
+        root's, or with reach: the preferred parent's while it is the
+        node's last candidate, `mesh.parents`) its reachability at now (ms)
+        with the silence limit silence (ms); without now, such a link is
+        judged by its run alone (the silence taken as passed).
         """
         if not (self.margin_ok and self.m_count > 0):
             return False
-        if self.address != ROOT:
+        if not reach and self.address != ROOT:
             return self.etx() <= ETX_MAX
         if now is None:
             return self.run < UNREACH_RUN
@@ -401,13 +410,28 @@ class NeighbourTable:
     def answered(self, address, now):
         """Record an acknowledgement of address at now that gives no sample.
 
-        It ends the link's run of failed samples (reachability of the root).
+        It ends the link's run of failed samples (reachability).
         Returns False if address is not in the table.
         """
         n = self.get(address)
         if n is None:
             return False
         n._answered(now)
+        return True
+
+    def restart_reach(self, address, now):
+        """Restart the reachability of address at now, as at the entry's creation.
+
+        Routing calls it when it takes address as its preferred parent
+        (`mesh.parents`): the link then gets `UNREACH_RUN` failed samples
+        and a silence limit of probes before it is unreachable. Returns
+        False if address is not in the table.
+        """
+        n = self.get(address)
+        if n is None:
+            return False
+        n.run = 0
+        n.answered = now
         return True
 
     def heard(self, address, counter, rank, version, rssi, snr, now):

@@ -50,8 +50,10 @@ and its two-version safety configurations on the diamond (≈ 8 and 3
 minutes; with the answer window and its ghost variables ≈ 15 minutes on 4
 cores), plus about 1.5 hours for the link cost rise configurations
 (`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 35 minutes each),
-and about 35 minutes for the link death configurations (`DODAG_*_cutlive`:
-1.5 to 9 minutes each).
+and about 65 minutes for the link death configurations (`DODAG_*_cutlive`:
+1.5 to 17 minutes each; `DODAG_diamond_reachall_cutlive` 17, its
+liveness check slow for its 24 000 states, `DODAG_line_reachall_cutlive`
+12), plus 10 minutes for `DODAG_diamond_reachall_nocycle`.
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
@@ -261,8 +263,10 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   back on 2 at rank 3, the rank of its child 4, whose only neighbour it
   is); `rejoin` 0-1, 1-2, 2-3, 2-4 and costly links 0-3 (ETX 2), 0-4 (ETX
   3) (relay 1 dies: 2 detaches and rejoins through 3, path cost 3, or 4,
-  path cost 4, a gain below the switch threshold). `Victim = 0`: no node
-  dies.
+  path cost 4, a gain below the switch threshold); `switch` 0-1, 0-2, 1-3
+  and a costly 2-3 (ETX 3) (no death: 3 drops 1, falls back on 2, keeps
+  it as its last candidate, then hears 1 again, 2 hops cheaper: the
+  keep followed by a switch). `Victim = 0`: no node dies.
 - **Ranks** in whole hops (MIN_HOP 8 = 1): the hysteresis of 4 never holds a
   change back, the switch threshold 12 is a gain of 2 hops; 254 and
   MaxRankIncrease 56 scaled to `MaxRank` = 6 and `MaxInc` = 3. Links always
@@ -349,13 +353,22 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   instead; only the silence limit or the link's ineligibility removes the
   root. `"keeplast"`: the
   same for the preferred parent, root or not, when it is the node's last
-  candidate (dropping it would detach the node); otherwise the drop. The
-  random retry delay that goes with it in the code is timing only,
-  outside this untimed model.
+  candidate (dropping it would detach the node); otherwise the drop.
+  `"keepboth"` (remedy A extended to relays): the root as `"keeproot"`
+  (kept even with other candidates), and the preferred parent as
+  `"keeplast"` when it is the node's last candidate. The keep is decided
+  at each exhaustion from the state of that moment, never remembered: a
+  candidate heard since takes the kept parent's place by the switch
+  threshold at the next selection, or otherwise makes the next exhaustion
+  drop it, the copy going to the new parent with fresh attempts
+  (`KeepOnlyLast`). The random retry delay that goes with it in the code
+  is timing only, outside this untimed model.
 - **Link death** (`Cut`, with `Acks = "frame"`): `"none"` (every
   configuration before this option); `"both"`: the link 0 – 1 dies once,
   at any moment, both ways; `"up"`: only 1 → 0 dies (the root no longer
-  hears node 1, node 1 still hears the root). A dead link loses every
+  hears node 1, node 1 still hears the root); `"relayup"`: only the
+  uplink of a hop-2 node to relay 1 dies (2 → 1 on the line, 3 → 1 on the
+  diamond). A dead link loses every
   frame and acknowledgement, outside the loss bounds, and carries no route
   (`MP10Live`, `CutOffLive` and error delivery read the graph of live
   links). The silence limit removes a neighbour no longer heard (`Expire`,
@@ -394,7 +407,21 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   the node) and the frames in between (root beacons, the node's
   presences) reset the per-link counts. Hence `UNREACH` = `MaxLoss` + 1,
   at least `INELIG` (4 with ≤ 3 losses, as `"none"` on the dead link).
-  The root's link cost is unchanged (fixed, `Rise = 0`).
+  The root's link cost is unchanged (fixed, `Rise = 0`). `"reachetx"`
+  (the code of A): the root link as `"reach"`, every other link as
+  `"etx"` (each failed sample towards a relay counts, `INELIG` of them
+  make the link ineligible). `"reachall"` (A extended to relays): every
+  link as the root's under `"reach"`, ETX ≤ 4 no longer an eligibility
+  test; the failed samples are counted per link (`rfail[k][c]`), and every
+  acknowledgement of c heard by k ends the run: explicit, late (root
+  only), or passive (k overhears c's forward of its message). The same
+  arithmetic: a failed sample towards a live relay over a live link costs
+  one loss (k's frame lost at c, c's explicit acknowledgement or its
+  forward lost at k; c's holding expires only after the acknowledgements
+  it owes, and a dying relay holds no message), so `UNREACH` = `MaxLoss`
+  + 1 again keeps every live link reachable. The code's cap of the link
+  cost at ETX 4 (cost 32) on the links it judges by reachability (the
+  root's, the last candidate's) is outside the model (fixed costs).
 - **Class 1**: one message per origin in `Origins`; per node a copy queued,
   waiting (passively acknowledged by the next hop's forward, overheard, not
   when the forward is addressed to the waiting node itself — as the code —
@@ -428,7 +455,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   parent to be of the node's version.
 - **KeepParent** (MP10, MP12, action property): a node detaches (finite rank
   to 255, in its version) only when its preferred parent is lost — gone
-  silent, heard at rank 255, or dropped after failed attempts — or, when
+  silent, heard at rank 255, dropped after failed attempts, or its link
+  made ineligible while that parent or the link is dead — or, when
   that parent is of its version, when the path cost through it exceeds the
   bound L + MaxInc. A node whose preferred parent stays attached within the
   bound never detaches.
@@ -448,7 +476,22 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   acknowledgement on its way is ignored: with `MaxLoss` < 3 it must hold;
   with `"keeproot"` or `"keeplast"`, whatever the losses.
 - **RootReachable** (`Elig`): no node's link to the root is made
-  ineligible, unless that link died (`Cut`).
+  ineligible, unless that link died (`Cut`). **LinksReachable**: the same
+  for every link, unless the neighbour or the link died.
+- **LastKept** (`Exhaust = "keepboth"`, action property): a node detaches
+  while its preferred parent, root or relay, is alive over a live link
+  and heard at a finite rank of its version only beyond the bound; unlike
+  `KeepParent`, a drop after failed attempts or an ineligible link is no
+  excuse: collisions alone never detach a node from its last candidate.
+- **KeepOnlyLast** (action property): a copy gets fresh attempts towards
+  a relay after its last attempt only while no other neighbour is a
+  candidate (the keep is not sticky).
+- **MP5Decided** (MP5 under partition): every submitted message ends
+  delivered or failed by some node (its error may not reach an origin cut
+  off with it): no copy is retried for ever. **CutOffLiveTraffic**:
+  `CutOffLive` once the cut child has a message queued after the death
+  (its transmissions are the only probes of a one-way dead uplink it
+  still hears).
 - Witnesses: loops form (`NoCycle` violated), messages are delivered
   (`NeverDelivered`), errors reach origins (`NeverError`), data-path
   validation fires (`NoRankError`); a node keeps its parent heard at a rank
@@ -459,8 +502,10 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   (`NoWindowRejoin`), a copy is retried while the root's acknowledgement
   of an earlier transmission is still expected (`NoLateRetry`), a copy
   gets fresh attempts towards the root after its last attempt
-  (`NoFreshRoot`), a run of `MaxLoss` consecutive failed samples towards
-  the root (`ShortFailRuns`).
+  (`NoFreshRoot`), or towards a relay (`NoFreshRelay`), a run of `MaxLoss`
+  consecutive failed samples towards the root (`ShortFailRuns`), or towards
+  a relay (`ShortRelayRuns`), a node switches away from the relay it kept
+  as its last candidate (`NoSwitchAfterKeep`, ghost `kp` with `Ghosts`).
 
 ## Fixes modelled
 
@@ -532,14 +577,18 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   code, with a random retry delay against lockstep retries): the root is
   not dropped while it is heard and its link eligible; the copy gets fresh
   attempts towards it. `"keeplast"` (variant): the preferred parent, root
-  or not, is kept while it is the last candidate. `"drop"`: the code
+  or not, is kept while it is the last candidate. `"keepboth"` (remedy A
+  extended to relays, the code): both. `"drop"`: the code
   before.
 - **Root link unreachability** (`Elig = "reach"`, remedy A of D28, the
   code): the link to the root leaves the candidates only after a
   run of consecutive failed samples with no acknowledgement of the root
   (and, in the code, a silence limit without one), instead of ETX > 4
   (`"etx"`, the code before). `"none"`: the earlier model, ineligible only after
-  the link's death.
+  the link's death. `"reachetx"`: the code of A, relay links still by
+  ETX ≤ 4. `"reachall"` (A extended to relays): every link by
+  reachability; the code limits it to the preferred parent while it is
+  the last candidate (open points).
 
 ## Results
 
@@ -627,6 +676,21 @@ Eligibility of the link to the root, on the code since the root kept
 | Tightness of `UNREACH` | line, no death, ≤ 3 losses, ≤ 1 consecutive per link: a run of 3 consecutive failed samples on a live link (a frame of 1 lost at the root, then the root's acknowledgement lost at 1, then again): `MaxConsec` bounds no run, `MaxLoss` + 1 is the smallest safe `UNREACH` | `DODAG_line_reach_witness_run` |
 | Non-vacuity | a copy gets fresh attempts towards the root after its last attempt: after 3 losses (line), or with no loss over the dead link 1 → 0 (diamond) | `DODAG_line_reach_witness_fresh`, `DODAG_diamond_reach_witness_cutfresh` |
 | Earlier configurations | given `Elig = "none"`, the earlier model (state counts unchanged where compared with one worker: `DODAG_line_drop_rootloss` 727, `DODAG_line_lateignore_drop` 13; with all workers: `DODAG_line_lateack_witness_retry` 10, `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413, `DODAG_line_keeproot_MP5` 18 669, `DODAG_line_keeproot_live` 1 987, `DODAG_diamond_keeproot_cutuplive` 4 457, `DODAG_line_custody_MP5` 19 706) | the 97 other `DODAG_*` |
+
+Remedy A extended to relays (`Exhaust = "keepboth"`, `Elig =
+"reachall"`), on the code of A (`LateAck = "accept"`):
+
+| Item | Result | Configurations |
+|---|---|---|
+| Relay dropped after collisions, the code of A (`"keeproot"`, `"reachetx"`) | no death, no dead link, line, 3 losses: 3's three transmissions to relay 2 lost there; 3 drops 2, its only candidate under L, and detaches although 2 is alive, heard, its link live (`LastKept`, 462 states, 3 s): the start of the star collapse in the large-network suite | `DODAG_line_reachetx_relaydrop` |
+| Last candidate kept, relay links by ETX (`"keepboth"`, `"reachetx"`) | line, ≤ 4 losses, ≤ 1 consecutive per link: 3's frames lost at 2 and 2's acknowledgements lost at 3, alternately; after 4 failed samples 3's link to 2 is ineligible and 3 detaches, with no drop (`LastKept`, 35 944 states, 69 s): keeping the relay is not enough while its link is judged by ETX | `DODAG_line_keepbothetx_detach` |
+| Last candidate kept, relay links always eligible (`"keepboth"`, `"reach"`) | line, the link 2 → 1 dead, 2 still hearing 1, no loss: nothing removes 1, 2 retries 3's message towards it for ever (`MP5Decided`, 40 states, 2 s): keeping the last candidate needs a test that a dead uplink fails | `DODAG_line_keepboth_relaycut` |
+| A extended to relays (`"keepboth"`, `"reachall"`) | the budget of the ETX witness (line, ≤ 4 losses, ≤ 1 consecutive): no link unreachable, the root never dropped, `LastKept`, `KeepParent`, `KeepOnlyLast`, no silent loss (36 381 states, 88 s); ≤ 3 losses in any pattern, relay 1 dies: no silent loss, the root never dropped, no live link unreachable, `LastKept`, `KeepOnlyLast` (line: 51 114 states, 22 s; diamond, a message of 4: 19 386 states, 63 s); ≤ 3 losses, ≤ 1 consecutive, relay 1 dies: no loop, no rejoin loop, `KeepParent`, `LastKept`, no live link unreachable (line: 206 281 states, 86 s; diamond, a message of 4: 250 804 states, 10 min, the diamond no-cycle check `"keeplast"` lacked); MP5Live, LoopsEnd, RanksSettle, MP10Live (line, no death, ≤ 3 losses: 1 178 states, 14 s) | `DODAG_line_reachall_relayloss`, `DODAG_*_reachall_MP5`, `DODAG_*_reachall_nocycle`, `DODAG_line_reachall_live` |
+| A extended, dead links | link 0 – 1 dead both ways: line, ≤ 2 losses: LoopsEnd, RanksSettle, CutOffLive, no silent loss (370 379 states, 12 min); diamond, a message of 4, ≤ 1 loss: also MP5Live, MP10Live (23 913 states, 17 min). Link 1 → 0 dead: diamond, ≤ 1 loss: MP5Live, LoopsEnd, RanksSettle (4 897 states, 61 s). Relay uplink dead, the relay still heard: line, 2 → 1, ≤ 1 loss: the message delivered or failed (`MP5Decided`; the partition keeps its error from 3), LoopsEnd, RanksSettle, `CutOffLiveTraffic`, `LastKept` (3 675 states, 34 s); diamond, 3 → 1, a message of 4, ≤ 1 loss: MP5Live, LoopsEnd, RanksSettle, `LastKept` (1 035 states, 19 s). A link unreachable only over the dead link (`LinksReachable`) | `DODAG_*_reachall_cutlive`, `DODAG_diamond_reachall_cutuplive`, `DODAG_*_reachall_relaycut` |
+| Keep not sticky | `switch` graph, 6 losses: 3 drops 1 after 3 failed attempts and falls back on 2 (path cost 4), keeps 2 after 3 more as its last candidate, then hears 1 again (no longer dropped) and switches to it, 2 hops cheaper; the kept copy follows with fresh attempts (`NoSwitchAfterKeep`, 9 655 states, 29 s). Without a cheaper path the next exhaustion drops the kept parent instead (`KeepOnlyLast`, checked above) | `DODAG_switch_reachall_witness_switch` |
+| Tightness of `UNREACH` on relay links | line, ≤ 3 losses, ≤ 1 consecutive: a run of 3 consecutive failed samples towards relay 2 on a live link (4 313 states, 6 s) | `DODAG_line_reachall_witness_run` |
+| Non-vacuity | a copy gets fresh attempts towards a relay after its last attempt: after 3 losses (line, 478 states), or with no loss over the dead uplink 2 → 1 (42 states) | `DODAG_line_reachall_witness_fresh`, `DODAG_line_reachall_witness_relaycutfresh` |
+| Earlier configurations | given `"none"`, `"etx"`, `"reach"` and no relay cut, the earlier model (`rfail` indexed by link, only the root column moves; `KeepParent`'s exception for a link made ineligible over a dead link is reached only with `"reachall"`): state counts unchanged where compared (`DODAG_line_drop_rootloss` 727 and `DODAG_line_lateignore_drop` 13 with one worker; `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413, `DODAG_line_keeproot_MP5` 18 669, `DODAG_line_keeproot_live` 1 987, `DODAG_diamond_keeproot_cutuplive` 4 457, `DODAG_line_custody_MP5` 19 706, `DODAG_line_reach_MP5` 18 674, `DODAG_line_reach_live` 1 992, `DODAG_diamond_reach_cutuplive` 4 269, `DODAG_line_keeplast_MP5` 7 361, `DODAG_diamond_keeplast_MP5` 12 593, `DODAG_line_reach_nocycle` 84 131, `DODAG_line_reach_rootloss` 52 708); outcomes unchanged for `DODAG_line_etx_detach`, `DODAG_line_etx_rootloss`, `DODAG_line_reach_witness_run`, `DODAG_diamond_reach_witness_cutfresh` | the 111 other `DODAG_*` |
 
 **Why L.** Every rank a node puts on air since it attached is at least
 L; a child's rank is the rank it heard from its parent plus a link cost
@@ -834,8 +898,42 @@ How each fix is implemented, what it costs, and the limits accepted.
   more. MESH_DESIGN §12 (retry delay, retry backoff, upward failure)
   describes it; host tests `KeepRoot` (tests/test_parents.py),
   `RetryDelay`, `RetryBackoff`, `KeptNextHop` (tests/test_reliable.py), and
-  `LocalRepair.test_root_kept_after_exhausted_attempts_until_its_link_is_ineligible`
+  `LocalRepair.test_root_kept_after_exhausted_attempts_until_its_link_is_unreachable`
   (tests/test_routing.py).
+- **Code changes for A on relays** (`Exhaust = "keepboth"`, `Elig =
+  "reachall"`, implemented with reachability limited to the last
+  candidate): `Parents.next_parent` (parents.py) also returns the
+  preferred parent instead of dropping it when it is still a candidate
+  apart from the drop and no other neighbour is a candidate
+  (`Parents.last`: `LastCand`), decided at each exhaustion, never
+  remembered (`KeepOnlyLast`, `DODAG_switch_reachall_witness_switch`);
+  `Reliable._exhausted` then gives fresh attempts as for the root.
+  `Parents.candidate_cost` judges the preferred parent's link by
+  reachability alone, without ETX ≤ 4, while it is the last candidate
+  (the other candidates first, by the ordinary rule), its link cost
+  capped at 32 (`Neighbour.link_etx`). Taking a relay as the preferred
+  parent restarts its reachability (`NeighbourTable.restart_reach`, run
+  and acknowledgement time as at the entry's creation), outside the model
+  (no time there): a link back after a cut, or left unreachable at
+  ETX ≤ 4, would otherwise be taken by the ETX rule at the rejoin and
+  left at the next selection, before its first probe is acknowledged
+  (`make seeds`: `AdoptionDuringTheHold` on 4 of 24 shifts; requiring
+  reachability on every link instead fails `AdoptionDuringTheHold` and
+  `LoopCustody` on 6). The run and the acknowledgement time
+  were already kept per neighbour; every acknowledgement of a neighbour
+  ends its run: a success sample (explicit or passive), an explicit entry
+  from any neighbour whatever the frame (`Reliable.on_ack`), a passive
+  one whose frame was sampled already (`Reliable._acknowledged`).
+  Without reachability on relay links a relay kept as the last candidate
+  over a one-way dead uplink is retried for ever
+  (`DODAG_line_keepboth_relaycut`); with relay links still by ETX ≤ 4,
+  collisions make them ineligible and detach the node
+  (`DODAG_line_keepbothetx_detach`). Host tests `KeepLast`
+  (tests/test_parents.py), `RelayReachability` (tests/test_neighbours.py),
+  `RelayRun` (tests/test_reliable.py),
+  `LocalRepair.test_only_relay_parent_kept_after_exhausted_attempts_until_its_link_is_unreachable`
+  (tests/test_routing.py), `PresenceAcknowledgement`
+  (tests/test_reports.py).
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
@@ -871,6 +969,41 @@ How each fix is implemented, what it costs, and the limits accepted.
   Nodes had begun detaching at 273 s (their relay parent dropped). A
   keeps a root that answers now and then, not one drowned at the root
   child: the star collapse remains (rootless DODAG, remedy C).
+- **A extended to relays in the code** (`Exhaust = "keepboth"`, `Elig =
+  "reachall"` limited to the last candidate): the MP12 question of the
+  model is decided by the limit. With ETX ≤ 4 no longer an eligibility
+  test on any link and every cost capped at 32, a link of ETX 10 would
+  cost as one of ETX 4 and stay a candidate; it would lose preference only
+  to a candidate cheaper by the switch threshold (12), so a preferred
+  parent at ETX 10 would be kept over an alternative one hop deeper at
+  ETX 2 (gain 8), and a fresh selection could pick it. The code waives
+  ETX ≤ 4 only for the root and for the preferred parent while it is the
+  node's last candidate (the other links still by ETX ≤ 4, so not
+  circular), which keeps the star's case (the hop-2 Nodes have no other
+  candidate under L) and MP12's quality preference elsewhere. Between
+  `"reachetx"` and `"reachall"`: the root and the last candidate as under
+  `"reachall"`, the other links as under `"reachetx"`; the model does not
+  tell them apart (fixed costs; one candidate on the line). Measured on
+  `forming star 1` (`make large`): no hop-2 Node detaches at 273 s any
+  more (their relay 0101 kept). 0101's queue fills from 280 s (64/64,
+  refusing, so unacknowledged) and it hears no root frame from 270 s (the
+  root's frames collide at 0101 with the Nodes' retries; the root hears
+  0101 throughout); the hop-2 Nodes leave 0101 unreachable from 330 s (no
+  acknowledgement of it for a silence limit) and 0101 the root at 345 s
+  (silent for a silence limit); its poison detaches every Node at 350 s.
+  The same again at 453 s. Each time the network re-forms through 0101
+  within 35 s, without loop: every message delivered (283 of 289, 6
+  refused), the run passes, where the code of A lost 25 messages
+  silently (rootless DODAG, 4 loops). The collapse still starts (the root
+  drowned at the hidden root child), remedy C (rootless DODAG) stays open
+  for the other seeds. Cost measured on `relay-death star-domain` (3 of 3
+  seeds fail, all passed on the code of A): after the relay's death the
+  Nodes, cut off from the root, form a rootless DODAG where two Nodes
+  are each other's preferred parent and last candidate; kept after their
+  exhausted attempts (full queues refusing), the loop lasts until the
+  bound L + 56 ends it, 27 to 43 s against the 26 s of MP11, and 1 to 3
+  messages still circulate at the end; the drops after 3 attempts broke
+  these loops sooner. Remedy C again.
 - **Views older than an attach** (residual of the cost rise fix): the test against L
   assumes no node holds a view of an ancestor older than that ancestor's
   last attach (rank 255 heard since). Fix 5 ensures it with at most one

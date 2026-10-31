@@ -5,10 +5,10 @@ Integer arithmetic; ranks are the 1-byte header values (0 = root, 255 =
 infinite: no route or poisoned).
 
 - **Link cost** = round(8 × ETX) (`MIN_HOP` = 8 per hop of ETX 1, RPL
-  MinHopRankIncrease), 8 to 32 on an eligible link (towards the root, the
-  ETX capped at 4, `Neighbour.link_etx`: its link is eligible by
-  reachability, not ETX <= 4, `mesh.neighbours`); **path cost** through a
-  neighbour = its rank + link cost; above 254 the neighbour is not usable.
+  MinHopRankIncrease), 8 to 32 on an eligible link (on a link judged by
+  reachability rather than ETX <= 4, below, the ETX capped at 4,
+  `Neighbour.link_etx`); **path cost** through a neighbour = its rank +
+  link cost; above 254 the neighbour is not usable.
 - **Candidates**: neighbours of the node's DODAG version, of rank strictly
   lower than **L**, the lowest rank the node has advertised since it
   attached or adopted its version (never above its advertised rank; any
@@ -16,7 +16,17 @@ infinite: no route or poisoned).
   following**, RPL: the node follows its preferred parent's rank increase
   within the bound below), heard within the silence limit
   (`mesh.neighbours.silence_ms`: 2.5 presence periods, strict), through an
-  eligible link (`Neighbour.eligible`), whose path cost is at most the
+  eligible link (`Neighbour.eligible`: margin, and ETX <= 4, or instead
+  reachability for the link to the root and for the preferred parent's
+  while it is the **last candidate**, no other neighbour being a
+  candidate, drops included: the other candidates do not depend on the
+  preferred parent, so they are found first with the ordinary rule; once
+  the node has switched away from it, the old parent needs ETX <= 4
+  again; a relay taken as the preferred parent has its reachability
+  restarted, `NeighbourTable.restart_reach`, so that a link taken again by
+  ETX <= 4 after it was left unreachable, a link back after a cut
+  included, gets its probes before it is judged), whose path cost is at
+  most the
   **bound** min(254, L + max_increase), max_increase 56 by default
   (MaxRankIncrease, carried by the DODAG information, §9). Testing against
   L rather than the advertised rank keeps out a neighbour between L and a
@@ -25,17 +35,22 @@ infinite: no route or poisoned).
   A neighbour dropped after failed attempts (`next_parent`) is no
   candidate until a new frame of it is heard; after a detach, only
   neighbours heard after the solicitation that ends its hold are.
-- **Root kept** (`next_parent`, §12): the root is not dropped after failed
-  attempts while it is a candidate apart from drops (heard within the
-  silence limit, eligible link, of the node's version, within the bound):
-  the message gets fresh attempts towards it. Under the test against L the
-  root is a root child's only candidate, so a drop would be a detach, its
-  subtree following, after mere collisions at the root (hidden
-  terminals); only the silence limit or the link's ineligibility (margin,
+- **Kept after exhausted attempts** (`next_parent`, §12): the root, and
+  the preferred parent when it is the node's last candidate, are not
+  dropped after failed attempts while they are candidates apart from
+  drops (heard within the silence limit, eligible link, of the node's
+  version, within the bound): the message gets fresh attempts towards
+  them. Under the test against L the root is a root child's only
+  candidate, and a relay often a hop-2 node's: a drop would be a detach,
+  its subtree following, after mere collisions at the parent (hidden
+  terminals). Only the silence limit or the link's ineligibility (margin,
   or unreachable: `UNREACH_RUN` consecutive failed samples and a silence
-  limit without acknowledgement of the root, `mesh.neighbours`) removes
-  the root (TLA+ `DODAG`, Exhaust = "keeproot", Elig = "reach"). Any
-  other parent is dropped.
+  limit without acknowledgement of the parent, `mesh.neighbours`) removes
+  them (TLA+ `DODAG`, Exhaust = "keepboth", Elig = "reachall", which
+  judges every link by reachability; the code limits it to the last
+  candidate, MESH_DESIGN §9, MP12). The keep is decided at each
+  exhaustion, never remembered: a relay parent with another candidate
+  is dropped, as is any other hop.
 - **Behind a newer version** (``behind``, set by the Trickle step when a
   frame of a newer version is heard; cleared by `on_new_version` and the
   detach): the preferred parent stays a candidate once it has moved to a
@@ -213,30 +228,49 @@ class Parents:
         within the bound), the others below L (any finite rank without
         route). While the node is behind, the preferred parent moved to a
         newer version is one at the node's own rank. drops: False to ignore
-        a drop after failed attempts (`next_parent`).
+        a drop of n after failed attempts (`next_parent`; the other
+        neighbours' drops still count). The preferred parent's link is
+        judged by reachability alone, without ETX <= 4, when it is the last
+        candidate (`last`).
         """
         lowest = RANK_INFINITE if self.lowest is None else self.lowest
+        address = n.address
         across = n.version != self.version
         if across:
-            if not (self.behind and n.address == self.preferred and n.rank != RANK_INFINITE):
+            if not (self.behind and address == self.preferred and n.rank != RANK_INFINITE):
                 return None
             if not 0 < (n.version - self.version) & VERSION_MASK < _HALF:
                 return None  # not newer
-        elif n.rank >= lowest and n.address != self.preferred:
+        elif n.rank >= lowest and address != self.preferred:
             return None
         silence = silence_ms(self.table.period_ms)
         if now - n.heard >= silence:
             return None
         if self.poisoned_at is not None and n.heard <= self.poisoned_at:
             return None
-        if drops and self._dropped.get(n.address, -1) == n.counter:
+        if drops and self._dropped.get(address, -1) == n.counter:
             return None
-        if not n.eligible(now, silence):
+        eligible = n.eligible(now, silence)
+        reach = False
+        if address == self.preferred and address != ROOT:
+            # The last candidate's link is judged by reachability instead of
+            # ETX <= 4 (the others looked up only when the two disagree).
+            if n.eligible(now, silence, True) != eligible and self.last(address, now):
+                eligible = not eligible
+                reach = True
+        if not eligible:
             return None
         if across:
             return self.rank
-        cost = n.rank + link_cost(n.link_etx())
+        cost = n.rank + link_cost(n.link_etx(reach))
         return cost if cost <= self.bound() else None
+
+    def last(self, address, now):
+        """Return True if no neighbour but address is a candidate at now (drops included)."""
+        for m in self.table.entries():
+            if m.address != address and self.candidate_cost(m, now) is not None:
+                return False
+        return True
 
     # --- Entry points --------------------------------------------------------------
 
@@ -315,20 +349,23 @@ class Parents:
     def next_parent(self, hop, now=None):
         """Drop hop after exhausted attempts; return the new preferred parent, `HOLD` or hop.
 
-        The root is kept (returned, unchanged set: fresh attempts) while it
-        is a candidate apart from drops (module docstring). Any other hop is
-        dropped: it stays out of the candidates until a new frame of it is
-        heard, and the set is selected again at now (default: ``clock()``,
-        else the time of the last `recompute`), which may detach the node.
+        The root, and the preferred parent when it is the last candidate,
+        are kept (returned, unchanged set: fresh attempts) while they are
+        candidates apart from drops (module docstring); decided now, never
+        remembered. Any other hop is dropped: it stays out of the
+        candidates until a new frame of it is heard, and the set is selected
+        again at now (default: ``clock()``, else the time of the last
+        `recompute`), which may detach the node.
         """
         if self.root:
             return None
         if now is None:
             now = self.clock() if self.clock is not None else self.now
         n = self.table.get(hop)
-        if hop == ROOT and n is not None and now is not None:
+        if n is not None and now is not None and (hop == ROOT or hop == self.preferred):
             if self.candidate_cost(n, now, False) is not None:
-                return hop
+                if hop == ROOT or self.last(hop, now):
+                    return hop
         if n is not None:
             self._dropped[hop] = n.counter
             self.drops += 1
@@ -388,6 +425,10 @@ class Parents:
             if old_pref is not None:
                 self.switches += 1
             self.rank = cost
+            if chosen[2] != ROOT:
+                # Taken by ETX <= 4, it may be the last candidate at the next
+                # selection, judged by reachability: its probes start now.
+                table.restart_reach(chosen[2], now)
         elif cost - old_rank >= RANK_HYSTERESIS or old_rank - cost >= RANK_HYSTERESIS:
             self.rank = cost
         rank = self.rank

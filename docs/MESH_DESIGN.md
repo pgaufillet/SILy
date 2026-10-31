@@ -163,7 +163,7 @@ measurement recorded).
 | MP9 | Duty-cycle compliance guaranteed whatever the applications do; mesh control traffic bounded, its budget known per SF | designed | §6; budget §16 (SILy) |
 | MP10 | Self-forming, self-healing: no configuration beyond network key and radio parameters; repair within a bounded time stated per SF | designed | §9: local repair by parent set, detach and rejoin, global repair by DODAG version; repair times per SF (§9 table) |
 | MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, data-path validation with duplicate cache; no hop limit needed. No loop with at most one consecutive loss per link (TLA+ `DODAG`); beyond, a loop ends by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.6 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
-| MP12 | Stability: hysteresis, no route flapping; link quality (margin, delivery ratio) preferred over hop count; asymmetric links detected | designed | §9: ETX over 16-frame windows, margin eligibility with 3/6 dB hysteresis, parent switch threshold, rank hysteresis; asymmetric links flagged by the root |
+| MP12 | Stability: hysteresis, no route flapping; link quality (margin, delivery ratio) preferred over hop count; asymmetric links detected | designed | §9: ETX over 16-frame windows, margin eligibility with 3/6 dB hysteresis, ETX ≤ 4 eligibility (waived, for reachability alone, only on the link to the root and the last candidate's), parent switch threshold, rank hysteresis; asymmetric links flagged by the root |
 | MP13 | Bounded resources: sized tables (default 64 nodes, depth 8), bounded queues and buffers, documented degradation beyond | designed | §12 (resource table and degradation), §9 (neighbour table), §10 (graph, depth) |
 | MP14 | Reboot tolerance: a rebooted node or root rejoins without operator action; no persistent state required except security counters and the duty-cycle window (§6) | designed | §9: a node solicits at boot and rejoins; the root listens one presence period and issues the next DODAG version (no persistent routing state); persistent state limited to the frame counter and class 2 sequences in NVS, replay table and duty-cycle window in RTC memory (§6, §14) |
 | MP15 | Partition tolerance: an isolated node stays audible, is reported as soon as a neighbour hears it and rejoins automatically; class 1 holds messages during repair; no long-term store-and-forward (application journals do that) | designed | §9: a node without route solicits once per presence period and appears in its neighbours' topology reports; §12: class 1 and 2 held 2 presence periods |
@@ -550,8 +550,9 @@ acknowledgement window and the time of its newest failure.
   perfect link (4 is the smallest count that ensures it, 3 keeps it below
   rank + 8), and a bad link becomes ineligible after 4 consecutive failures
   on a fresh window, 13 whatever its history (13 lost presences, i.e. 13
-  periods, when presence is the only traffic). The link to the root is
-  judged by its reachability instead (below).
+  periods, when presence is the only traffic). The link to the root, and
+  the preferred parent's while it is the node's last candidate, are judged
+  by their reachability instead (below).
 - **Silence limit**: a neighbour not heard for **2.5 presence periods** is
   silent (strict: heard less than 2.5 periods ago, it is not). Every node
   sends at least one frame per period jittered by ±10 % (§7: presence), so
@@ -564,37 +565,76 @@ acknowledgement window and the time of its newest failure.
   traffic).
 - **Margin**: SNR margin above the demodulation limit of the SF (§5),
   averaged over the last 8 frames. A link is **eligible** as a parent link if
-  its margin is ≥ 3 dB and its ETX ≤ 4 (the link to the root: reachable,
-  below); once below 3 dB, it becomes eligible again at 6 dB (hysteresis,
-  MP12). Among equal path costs, the larger margin wins.
-- **Reachability of the root** (RPL neighbour unreachability detection
-  style): the link to the root is not tested against ETX ≤ 4 but is
-  ineligible while **unreachable**: the node's last **4** failed samples
-  towards the root are consecutive (the samples of the acknowledgement
-  window, one per batching delay: one lost batch counts once) **and** no
-  acknowledgement of the root came for one silence limit, measured from the
-  last one (an explicit entry of the root for the node, whatever the frame,
-  or a late one, §12), or from the entry's creation. Any acknowledgement of
-  the root ends the run and makes the link reachable again; beacons and
-  other frames do not. The probes are the node's own class 1 transmissions
-  towards the root (fresh attempts while the root is kept, §12): no extra
-  frame. Under hidden terminals the root's batches collide at a root child
-  (D28): its ETX to the root climbs above 4 while the root still answers
-  now and then, and ETX alone would remove the root, the root child's only
-  candidate under L, detaching its subtree. Reachability is read at each
-  selection (the root's beacons give one every half period). Failure
-  ageing ends the run with the failures it removes (the link then gets 4
-  more before it is left), the time of the last acknowledgement stays: a
-  node that stops sending to the root (it left it) sees it eligible again
-  a silence limit after its last failure, as with ETX. A dead uplink to a
-  root still heard is left about one silence limit after the last
-  acknowledgement (§9 repair times). The ETX of the root link used for its
-  **link cost is capped at 4** (cost 32): a reachable root at ETX above 8
-  would otherwise cost more than L + 56 and leave the candidates through
-  the bound (TLA+ `DODAG`, `Elig = "reach"`).
+  its margin is ≥ 3 dB and its ETX ≤ 4, except that the link to the root
+  and the preferred parent's while it is the node's **last candidate** are
+  judged by reachability instead of ETX (below); once
+  below 3 dB, it becomes eligible again at 6 dB (hysteresis, MP12). Among
+  equal path costs, the larger margin wins.
+- **Reachability** (RPL neighbour unreachability detection style): a link
+  judged by it is ineligible while **unreachable**: the node's last **4**
+  failed samples
+  towards the neighbour are consecutive (the samples of the acknowledgement
+  window; towards the root one per batching delay: one lost batch counts
+  once) **and** no acknowledgement of the neighbour came for one silence
+  limit, measured from the last one (an explicit entry of the neighbour
+  for the node, whatever the frame; a late one of the root, §12; a passive
+  one, the node overhearing the neighbour forward its message, with or
+  without a sample), or from the entry's creation. Any acknowledgement of
+  the neighbour ends the run and makes the link reachable again; beacons
+  and other frames do not. The probes are the node's own class 1
+  transmissions towards the neighbour (fresh attempts while it is kept,
+  §12) and its presence reports to a relay parent: no extra frame.
+  Reachability is read at each selection (the root's beacons give one
+  every half period, a relay's presence one every period). Failure ageing
+  ends the run with the failures it removes (the link then gets 4 more
+  before it is left), the time of the last acknowledgement stays: a node
+  that stops sending to the neighbour (it left it) sees it eligible again
+  a silence limit after its last failure, as with ETX. Taking a relay as
+  the preferred parent restarts its reachability, as at the entry's
+  creation (below).
+  - **The root and the last candidate**: the link to the root, and the
+    preferred parent's while no other neighbour is a candidate (drops
+    included; the other candidates do not depend on the preferred parent,
+    so they are found first, with the ordinary rule), are not tested
+    against ETX ≤ 4: reachability alone. Under hidden terminals the root's
+    batches collide at a root child (D28): its ETX to the root climbs
+    above 4 while the root still answers now and then, and ETX alone
+    would remove the root, the root child's only candidate under L,
+    detaching its subtree. The same holds for a relay that is a hop-2
+    node's only candidate (the 30-node star, D28: the Nodes behind the
+    one relay drop it after collisions at it and detach). A dead uplink
+    to such a parent, still heard, is left about one silence limit after
+    its last acknowledgement (§9 repair times), at any ETX. The ETX used
+    for the **link cost** of such a link **is capped at 4** (cost 32): a
+    reachable parent at ETX above 8 would otherwise cost more than L + 56
+    and leave the candidates through the bound. Decided at each
+    selection, never remembered: once the node has switched away from it,
+    the old parent needs ETX ≤ 4 again (TLA+ `DODAG`, `Elig = "reach"`;
+    relays: `Exhaust = "keepboth"`, `Elig = "reachall"`).
+  - **Why only the last candidate** (MP12): waiving ETX ≤ 4 on every link,
+    with every cost capped at 32, would make a link of ETX 10 cost as one
+    of ETX 4 and stay a candidate; it would lose preference only to a
+    candidate cheaper by the switch threshold (12), so a preferred parent
+    at ETX 10 would be kept over an alternative one hop deeper at ETX 2
+    (gain 8), and a fresh selection could pick it. While the node has
+    another candidate, the ETX rule moves it there instead; it costs a
+    detach only when there is none, which is where reachability replaces
+    it.
+  - **Restart at a parent change**: a relay taken as the preferred parent
+    (by ETX ≤ 4, or as the first one) gets 4 failed samples and a silence
+    limit of probes before it is judged unreachable, its run and the time
+    of its last acknowledgement restarted. Otherwise a link back after a
+    cut, or a last candidate left unreachable while its ETX was still ≤ 4
+    (a dead uplink is left before its ETX passes 4), would be taken at the
+    rejoin and left at the next selection, before its first probe (the
+    presence sent at once after the change) is acknowledged. Over a dead
+    uplink the node still leaves and takes the relay again, once per
+    silence limit and rejoin, until its ETX passes 4 or the relay is no
+    longer heard; before, a drop after 3 attempts did so at every message.
 - **Asymmetric links** (MP12): locally, a parent heard well (high `d_in`) but
-  forwarding poorly (low `p_ack`) loses preference through its ETX; at the
-  root, both directions of a link come from the two ends' topology reports
+  forwarding poorly (low `p_ack`) loses preference through its ETX (as the
+  node's last candidate it is kept while reachable: no better link is
+  there); at the root, both directions of a link come from the two ends' topology reports
   (each reports its inbound ratio), and links whose ratios differ by more than
   30 points are flagged on the map.
 
@@ -602,8 +642,8 @@ acknowledgement window and the time of its newest failure.
 
 - **Rank** (1 byte): 0 = root, 255 = infinite (no route, or poisoned). One
   hop of ETX 1 costs 8 (RPL MinHopRankIncrease); **link cost** = round(8 ×
-  ETX), from 8 to 32 (towards the root, the ETX capped at 4: its link is
-  eligible by reachability, above). **Path cost** through a neighbour m = rank(m) + link
+  ETX), from 8 to 32 (on a link judged by reachability alone, the root's
+  or the last candidate's, the ETX capped at 4, above). **Path cost** through a neighbour m = rank(m) + link
   cost(m); above 254, m is not usable. The depth limit (8, MP13) is enforced
   by the root (§10); with ETX ≤ 3.9 per hop, 8 hops fit in the rank byte.
 - **Candidates**: neighbours with the same DODAG version, a rank **strictly
@@ -637,7 +677,8 @@ acknowledgement window and the time of its newest failure.
   preferred parent not below L leave the set, so that it never holds a
   member the next selection would refuse; a parent
   dropped after failed attempts stays out until a new frame of it is heard
-  (the root is not dropped while it is a candidate apart from drops, §12);
+  (the root, and the preferred parent while it is the last candidate, are
+  not dropped while they are candidates apart from drops, §12);
   equal cost and margin go to the lower address.
 
 ### Loop freedom (MP11)
@@ -861,22 +902,23 @@ acknowledgement window and the time of its newest failure.
 
 ### Repair times per SF (MP10)
 
-| SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
-|---|---|---|---|---|---|---|---|---|
-| 7 | 1.6 | 12.0 | 92 | 75 | 7.0 | 13 | 12 | 11 |
-| 8 | 3.0 | 21.6 | 92 | 75 | 12.6 | 24 | 10 | 17 |
-| 9 | 5.3 | 38.4 | 183 | 150 | 22.4 | 42 | 10 | 15 |
-| 10 | 10.6 | 76.1 | 366 | 300 | 44.8 | 84 | 10 | 14 |
-| 11 | 21.1 | 153.5 | 915 | 750 | 89.7 | 169 | 10 | 12 |
-| 12 | 42.2 | 304.0 | 1830 | 1500 | 179.4 | 338 | 10 | 11 |
+| SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | left with traffic, last candidate relay | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
+|---|---|---|---|---|---|---|---|---|---|
+| 7 | 1.6 | 12.0 | 92 | 108 | 75 | 7.0 | 13 | 12 | 11 |
+| 8 | 3.0 | 21.6 | 92 | 108 | 75 | 12.6 | 24 | 10 | 17 |
+| 9 | 5.3 | 38.4 | 183 | 216 | 150 | 22.4 | 42 | 10 | 15 |
+| 10 | 10.6 | 76.1 | 366 | 432 | 300 | 44.8 | 84 | 10 | 14 |
+| 11 | 21.1 | 153.5 | 915 | 1080 | 750 | 89.7 | 169 | 10 | 12 |
+| 12 | 42.2 | 304.0 | 1830 | 2160 | 1500 | 179.4 | 338 | 10 | 11 |
 
-(Times in seconds, from section E of `mesh_budget.py`; the "switch with
+(Times in seconds, from section E of `mesh_budget.py`; the "with
 traffic" columns are upper bounds, retry delays at their maximum from the
 first timeout after an acknowledgement; "switch, idle" is the silence
 limit, 2.5 presence periods; "global repair wave" assumes no frame of the
 exchange lost on any hop, see below.)
 
-- **Switch with traffic, parent relay**: the preferred parent is dropped
+- **Switch with traffic, parent relay**: a relay preferred parent, when
+  the node has another candidate, is dropped
   after 3 class 1 attempts without acknowledgement (§12), the last two
   after retry delays of up to 64 then 128 slots (3.3 then 6.7 s at SF7,
   10.6 then 21.1 s at SF9; up to 256 slots each when other frames of the
@@ -906,6 +948,21 @@ exchange lost on any hop, see below.)
   its only candidate under L (TLA+ `DODAG`, Exhaust = "keeproot", Elig =
   "reach"). Before reachability (ETX ≤ 4), 13 failed samples from a full
   window: 331 s at SF8.
+- **Left with traffic, last candidate relay**: a relay preferred parent
+  that is the node's last candidate is kept the same way (§12): left once
+  its link is unreachable, or at the silence limit if it is not heard at
+  all. From its last acknowledgement: the decision of the 4th failed
+  sample (at its timeout: 3 attempts, then a fresh one after the keep, 4
+  relay timeouts and 3 retry delays, 64, 128 then 256 slots, 26 s at SF7,
+  47 s at SF8) or the silence limit, whichever comes last: the silence
+  limit at every SF; then the next selection, at the latest the relay's
+  next presence (1.1 period): 3.6 presence periods, then the detach and
+  rejoin (no other candidate). Before (a drop after 3 attempts, as
+  "switch with traffic, parent relay"), the node detached after mere
+  collisions at the relay (hidden terminals: the 30-node star, D28)
+  (TLA+ `DODAG`, Exhaust = "keepboth", Elig = "reachall"). A node with
+  presence reports only probes the relay once per period: 4 failed
+  presences and a silence limit, 4.4 periods at most, then the selection.
 - **Switch, idle**: no frame from the preferred parent for 2.5 presence
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
@@ -946,7 +1003,8 @@ Findings:
    kept while heard and eligible: a failed link to it is left within 92 s
    at SF7–8, 183 s at SF9, about one silence limit after the root's last
    acknowledgement (unreachability, or the silence limit if the root is
-   not heard).
+   not heard). A relay that is the node's last candidate is kept the same
+   way: left within 108 s at SF7–8, 216 s at SF9, then the detach.
 2. **Idle, local repair is bounded by the silence limit**, 2.5 presence
    periods (75 s at SF7–8, 150 s at SF9), and costs no airtime. The children
    of a failed relay re-attach and send their presence before the root
@@ -1332,22 +1390,31 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
 - **Upward failure**: after 3 attempts a relay parent is dropped (§9) and
   the message goes to the next parent with fresh attempts. **The root is
   kept** while it is a candidate apart from the drop (heard within the
-  silence limit, link eligible, of the node's version, within the bound):
-  one root timeout after the last attempt (late acknowledgement, above),
-  the message gets fresh attempts towards it, after a retry delay: these
-  transmissions are the probes of the root's reachability. Only the
-  silence limit or the link's ineligibility (its margin, or unreachable: 4
-  consecutive failed samples and a silence limit without acknowledgement
-  of the root, §9; not ETX above 4) removes the root. Under the test
-  against L the root is a root child's only candidate: a drop would be a
-  detach, its subtree following, after mere collisions at the root (TLA+
-  `DODAG_line_drop_rootloss`; kept: `DODAG_*_keeproot_*`, no silent loss
-  and the root never dropped with up to 3 losses in any pattern, left over
-  a dead link), and so would the root link's ETX above 4 after the root's
-  batches collide at the root child (D28, `DODAG_line_etx_detach`;
-  reachability: `DODAG_*_reach_*`). Cost: a failed link to the root is
-  left later, about one silence limit after the root's last
-  acknowledgement (§9 repair table).
+  silence limit, link eligible, of the node's version, within the bound),
+  and so is **the preferred parent when it is the node's last candidate**
+  (no other candidate: dropping it would detach the node): one root
+  timeout after the last attempt towards the root (late acknowledgement,
+  above), after the last timeout towards a relay, the message gets fresh
+  attempts towards it, after a retry delay: these transmissions are the
+  probes of the parent's reachability. Only the silence limit or the
+  link's ineligibility (its margin, or unreachable: 4 consecutive failed
+  samples and a silence limit without acknowledgement of the parent, §9;
+  not ETX above 4) removes it. The keep is decided at each exhaustion,
+  never remembered: a candidate heard since (a dropped neighbour heard
+  again, a neighbour whose rank fell below L) makes the next exhaustion
+  drop the kept relay, unless it takes its place by the switch threshold
+  first. Under the test against L the root is a root child's only
+  candidate, and a relay often a hop-2 node's: a drop would be a detach,
+  its subtree following, after mere collisions at the parent (TLA+
+  `DODAG_line_drop_rootloss`, `DODAG_line_reachetx_relaydrop`; kept:
+  `DODAG_*_keeproot_*`, `DODAG_*_reachall_*`, no silent loss and the root
+  never dropped with up to 3 losses in any pattern, left over a dead
+  link), and so would the parent link's ETX above 4 after the parent's
+  acknowledgements collide at the node (D28, `DODAG_line_etx_detach`,
+  `DODAG_line_keepbothetx_detach`; reachability: `DODAG_*_reach_*`,
+  `DODAG_*_reachall_*`). Cost: a failed link to such a parent is left
+  later, about one silence limit after its last acknowledgement (§9
+  repair table).
 - **Downward failure** (source route): error to the root (port 4, reason 1 or
   2); the root reroutes (§10) and sends the message again, being its origin
   (or, for P2P, the origin of the downward half).

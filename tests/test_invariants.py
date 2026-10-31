@@ -223,7 +223,9 @@ class DeliveryTest(unittest.TestCase):
             # (retries) when it is switched off.
             net.at(FORMED - 1, net.medium.cut, A, ROOT)
             net.at(FORMED + 4500, checker.switch_off, A)
-        net.run(FORMED + 40000)
+        # After A's death B keeps A, its last candidate, until A is silent
+        # (2.5 periods), then holds what it still has (2 periods).
+        net.run(FORMED + (60000 if kill else 40000))
         checker.finish()
         return violations(checker, "MP5"), check
 

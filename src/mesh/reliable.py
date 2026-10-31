@@ -64,16 +64,20 @@ slot: a slot times out at most once per root timeout), then subject to
 the batching delay rule; the root's acknowledgement of that frame arriving
 before cancels it and counts as a success. After the last attempt the
 message waits one more root timeout (`_LATE`) before the reroute below.
-Every root acknowledgement frame with an entry for this node, whatever
-the frame acknowledged (sampled already, late, or not kept), is the root's
-answer (`NeighbourTable.answered`): it ends the run of failed samples that
-makes the link to the root unreachable (§9, `mesh.neighbours`).
+Every acknowledgement frame with an entry for this node, from the root or
+a relay, whatever the frame acknowledged (sampled already, late, or not
+kept), is that neighbour's answer (`NeighbourTable.answered`), as is a
+passive acknowledgement that gives no sample (its frame sampled already):
+it ends the run of failed samples that makes a link judged by
+reachability unreachable (the root's, or the preferred parent's while it
+is the last candidate; §9, `mesh.neighbours`).
 
 After `ATTEMPTS` (3) transmissions to one next hop, the injected
 ``engine.reroute(msg, hop)`` ("next hop after failure"; routing's parent
 set later) returns another next hop (fresh attempts), hop itself (kept:
-fresh attempts towards it, after a retry delay; routing keeps the root
-while it is a candidate apart from drops, `mesh.parents`), `HOLD` (no
+fresh attempts towards it, after a retry delay; routing keeps the root,
+and the preferred parent when it is the last candidate, while they are
+candidates apart from drops, `mesh.parents`), `HOLD` (no
 route for now: held) or None (no alternative: the message fails, reason
 1).
 
@@ -527,13 +531,12 @@ class Reliable:
             return
         own = self.engine.address
         queue = self.queue
-        if origin == ROOT:
-            for source, _ in entries:
-                if source == own:
-                    # The root answers: its link is reachable (§9), whatever
-                    # the frames acknowledged.
-                    self.engine.neighbours.answered(ROOT, self.engine.now)
-                    break
+        for source, _ in entries:
+            if source == own:
+                # The neighbour answers: its link is reachable (§9), whatever
+                # the frames acknowledged.
+                self.engine.neighbours.answered(origin, self.engine.now)
+                break
         for source, c16 in entries:
             if source != own:
                 continue
@@ -584,6 +587,10 @@ class Reliable:
             self.engine.neighbours.acked(hop, True, self.engine.now)
             for i in self._same_frame(slot):
                 self._sampled[i] = 1
+        elif passive:
+            # No sample (its frame sampled already): still the next hop's
+            # answer (§9 reachability; explicit ones: `on_ack`).
+            self.engine.neighbours.answered(hop, self.engine.now)
         self.queue.remove(slot, msg)
         self._clear(slot)
 
@@ -638,8 +645,9 @@ class Reliable:
             self.counters.unreachable += 1
             self.fail(slot, msg, UNREACHABLE, hop, now)
         elif alt == hop:
-            # hop kept (routing: the root while it is a candidate apart from
-            # drops): fresh attempts towards it, after a delay as any retry.
+            # hop kept (routing: the root, or the last candidate, while it is
+            # a candidate apart from drops): fresh attempts towards it, after
+            # a delay as any retry.
             self._retry(slot, msg, True, now)
         else:
             self.counters.reroutes += 1

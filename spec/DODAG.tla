@@ -139,14 +139,24 @@
 (* removes the root. "keeplast": the same for the preferred parent, root   *)
 (* or not, when it is the node's last candidate (no other candidate apart  *)
 (* from drops: dropping it would detach the node); otherwise the drop.   *)
+(* "keepboth" (remedy A extended to relays): the root as "keeproot", and   *)
+(* the preferred parent as "keeplast" when it is the node's last           *)
+(* candidate. The keep is decided at each exhaustion from the state of     *)
+(* that moment, never remembered: a candidate heard since (a dropped       *)
+(* neighbour heard again, a neighbour whose rank fell below L) takes the   *)
+(* preferred parent by the switch threshold at the next selection, and     *)
+(* otherwise makes the next exhaustion drop the kept parent, the copy      *)
+(* going to the new preferred parent with fresh attempts (KeepOnlyLast).   *)
 (*                                                                         *)
-(* Death of the link 0 - 1 (Cut, Acks = "frame"): "none" (every earlier    *)
-(* configuration); "both": once, at any moment, the link dies both ways;   *)
-(* "up": only 1 -> 0 dies (the root never hears node 1, node 1 still hears *)
-(* the root). A dead link loses every frame, outside the loss bounds. The *)
-(* silence limit removes the root from node 1's table once the root is not *)
-(* heard ("both"; Expire); node 1's failed samples towards the root make   *)
-(* the link ineligible (Elig below).                                       *)
+(* Death of a link (Cut, Acks = "frame"): "none" (every earlier            *)
+(* configuration); "both": once, at any moment, the link 0 - 1 dies both  *)
+(* ways; "up": only 1 -> 0 dies (the root never hears node 1, node 1 still *)
+(* hears the root); "relayup": only the uplink of a hop-2 node to relay 1  *)
+(* dies (2 -> 1 on the line, 3 -> 1 on the diamond; 1 is still heard).     *)
+(* CutChild - CutParent is the link. A dead link loses every frame,        *)
+(* outside the loss bounds. The silence limit removes CutParent from      *)
+(* CutChild's table once it is not heard ("both"; Expire); CutChild's     *)
+(* failed samples towards CutParent make the link ineligible (Elig below). *)
 (*                                                                         *)
 (* Eligibility of the link to the root (Elig, Acks = "frame"): rfail[k]   *)
 (* counts k's failed samples towards the root, i.e. its transmissions to  *)
@@ -154,8 +164,10 @@
 (* acknowledgement on its way (the frame lost at the root, or its         *)
 (* acknowledgement lost at k; with LateAck = "ignore" also one ignored),   *)
 (* or a late acknowledgement lost (LateAck = "accept": the failure is     *)
-(* decided once the late one is out, reliable.py _defer, _decide). The     *)
-(* other links stay eligible (their ETX is CostUp's, Rise).                *)
+(* decided once the late one is out, reliable.py _defer, _decide). Under  *)
+(* "none", "etx", "reach" the other links stay eligible (their ETX is      *)
+(* CostUp's, Rise); "reachetx", "reachall" judge them too (below): rfail is *)
+(* indexed by the link, rfail[k][c] (only rfail[k][Root] moves otherwise). *)
 (* - "none" (every configuration before this option): only node 1's       *)
 (*   timeouts towards the root after the cut count, INELIG of them make   *)
 (*   the link ineligible (13 from a full acknowledgement window,          *)
@@ -205,6 +217,32 @@
 (*   CostUp only (Rise = 0 in the "reach" configurations: cost 1), so a    *)
 (*   reachable root link whose ETX exceeds 4 (cost above 32 in the code,   *)
 (*   up to the bound L + 56 and beyond) is outside the model.              *)
+(* - "reachetx" (remedy A at the root, the other links by ETX <= 4, the    *)
+(*   code of A): the root link as "reach", every other link as "etx": each *)
+(*   failed sample of k towards relay c counts, INELIG of them make the   *)
+(*   link ineligible, nothing removes them.                                *)
+(* - "reachall" (remedy A extended to relays): every link as the root's    *)
+(*   under "reach": ETX <= 4 is no eligibility test, the link of k to c is *)
+(*   unreachable once UNREACH failed samples of k towards c were           *)
+(*   consecutive; every acknowledgement of c heard by k ends the run:      *)
+(*   explicit (AckFrame), late (the root only) or passive (k overhears c's *)
+(*   forward of k's message, SendData). The same timer abstraction (the    *)
+(*   silence limit without acknowledgement of c only makes the code's rule *)
+(*   stricter) and the same arithmetic: a failed sample towards a live     *)
+(*   relay over a live link costs one loss within the bounds (k's frame    *)
+(*   lost at c, c's explicit acknowledgement lost at k, or c's forward     *)
+(*   lost at k: k's copy waiting for a passive acknowledgement then times  *)
+(*   out); a copy waiting for c is never released otherwise without its    *)
+(*   acknowledgement (c's holding expires only after the acknowledgements *)
+(*   it owes, HoldExpire; a dying relay holds no message, Die), and the    *)
+(*   frames in between reset MaxConsec, so UNREACH = MaxLoss + 1 makes a   *)
+(*   live relay link never unreachable (LinksReachable), and the run of    *)
+(*   MaxLoss failures is reached (ShortRelayRuns). A dead relay or a dead  *)
+(*   link never acknowledges: the run passes UNREACH while the node keeps   *)
+(*   sampling it ("keepboth"). Every link cost is capped at ETX 4 in the   *)
+(*   code (cost 32); costs move by CostUp only in the model (Rise = 0:     *)
+(*   cost ETX 1, or the costly links of the graph), so the cap is outside *)
+(*   the model, as for the root.                                           *)
 (*                                                                         *)
 (* The relay Victim may die once, at a moment it holds no message (a      *)
 (* relay dying with a message it acknowledged is MP5's accepted exception, *)
@@ -268,7 +306,7 @@
 EXTENDS Integers, FiniteSets, TLC
 
 CONSTANTS
-    Graph,      \* "chain", "line", "diamond", "subtree", "follow", "rejoin" (see Edges)
+    Graph,      \* "chain", "line", "diamond", "subtree", "follow", "rejoin", "switch" (see Edges)
     Victim,     \* the relay that may die once (the root: none)
     Origins,    \* origins of the class 1 messages, one message each (named by its origin)
     MaxLoss,    \* frame and acknowledgement losses overall
@@ -289,9 +327,10 @@ CONSTANTS
     Thr,        \* rank test of the other candidates: "rank" (the code before the fix), "air", "minair" or "low" (the code)
     IncAdv,     \* BOOLEAN: a rank increase goes on air in the very next step (idealised)
     LateAck,    \* root acknowledgement later than the timeout: "none", "ignore" or "accept" (the code)
-    Exhaust,    \* after the last attempt: "drop", "keeproot" (the code) or "keeplast"
-    Cut,        \* death of the link 0 - 1: "none", "both" or "up" (1 -> 0 only)
-    Elig        \* link to the root ineligible: "none" (after the cut only), "etx" (the code before A) or "reach" (remedy A, the code)
+    Exhaust,    \* after the last attempt: "drop", "keeproot" (the code), "keeplast" or "keepboth"
+    Cut,        \* link death: "none", "both" or "up" (0 - 1; 1 -> 0 only), "relayup" (2 -> 1 or 3 -> 1)
+    Elig        \* link ineligible: "none" (after the cut only), "etx" (the code before A), "reach" (remedy A, the code),
+                \* "reachetx" (the same, relay links by ETX) or "reachall" (every link by reachability)
 
 NONE == -1
 Root == 0
@@ -299,12 +338,23 @@ INF  == MaxRank + 1        \* rank 255: no route, or poisoned
 SwitchThr == 2             \* 12 / 8 = 1.5 hops: a gain of 2 whole hops (parents.py:297)
 ATTEMPTS == 3              \* reliable.py:107
 LoopCap == 2               \* saturation of the loop formation counter
-CutChild == 1              \* the link that may die: CutChild - Root
+\* The link that may die (Cut): CutChild - CutParent, 1 - 0, or a hop-2 node's link to
+\* its preferred parent, relay 1 ("relayup": 2 on the line, 3 on the diamond).
+CutChild == IF Cut = "relayup" THEN (IF Graph = "line" THEN 2 ELSE 3) ELSE 1
+CutParent == IF Cut = "relayup" THEN 1 ELSE Root
 INELIG == 4                \* failed samples making the link ineligible (scaled; Elig "none", "etx")
-\* Consecutive failed samples making the link to the root unreachable (Elig "reach"):
-\* beyond the loss budget, at least INELIG.
+\* Consecutive failed samples making a link unreachable (Elig "reach", "reachetx",
+\* "reachall"): beyond the loss budget, at least INELIG.
 UNREACH == IF MaxLoss + 1 > INELIG THEN MaxLoss + 1 ELSE INELIG
-Lim == IF Elig = "reach" THEN UNREACH ELSE INELIG
+\* The link to the root is judged by its reachability (remedy A).
+RootReach == Elig \in {"reach", "reachetx", "reachall"}
+\* The link of a node to c is judged by its reachability (a run reset by every
+\* acknowledgement of c, UNREACH failures); otherwise by its failed samples (INELIG).
+ByReach(c) == Elig = "reachall" \/ (RootReach /\ c = Root)
+\* The failed samples towards c are counted ("none": filtered in Timeout).
+Counted(c) == Elig \in {"none", "reachetx", "reachall"} \/ c = Root
+LimOf(c) == IF ByReach(c) THEN UNREACH ELSE INELIG
+Lim == IF RootReach THEN UNREACH ELSE INELIG    \* the largest LimOf
 
 (***************************************************************************)
 (* Graphs: edges <<a, b, cost>>, cost in hops (ETX).                       *)
@@ -318,6 +368,9 @@ Lim == IF Elig = "reach" THEN UNREACH ELSE INELIG
 (* - follow: the diamond with a costly link 2 - 3 (ETX 2); relay 1 dies:  *)
 (*   3 falls back on 2 at a higher rank (2 -> 3), reaching the rank of its *)
 (*   child 4 (3), whose only neighbour it is.                              *)
+(* - switch: 0 - 1, 0 - 2, 1 - 3 and a costly link 2 - 3 (ETX 3): 3 drops  *)
+(*   1 and falls back on 2 (path cost 4), then keeps 2 as its last         *)
+(*   candidate; 1 heard again is a candidate 2 hops cheaper (a switch).     *)
 (* - rejoin: 0 - 1 - 2, 2 - 3, 2 - 4, 3 and 4 children of the root through *)
 (*   costly links (0 - 3 ETX 2, 0 - 4 ETX 3); relay 1 dies: 2 (rank 2)     *)
 (*   detaches (3 at rank 2, 4 at rank 3 are not below it) and rejoins      *)
@@ -331,6 +384,7 @@ Edges ==
       [] Graph = "subtree" -> {<<0, 1, 1>>, <<1, 2, 1>>, <<1, 3, 1>>, <<2, 3, 1>>, <<3, 4, 1>>,
                                <<0, 4, 3>>}
       [] Graph = "follow"  -> {<<0, 1, 1>>, <<0, 2, 1>>, <<1, 3, 1>>, <<2, 3, 2>>, <<3, 4, 1>>}
+      [] Graph = "switch"  -> {<<0, 1, 1>>, <<0, 2, 1>>, <<1, 3, 1>>, <<2, 3, 3>>}
       [] Graph = "rejoin"  -> {<<0, 1, 1>>, <<1, 2, 1>>, <<0, 3, 2>>, <<2, 3, 1>>, <<0, 4, 3>>,
                                <<2, 4, 1>>}
 
@@ -359,9 +413,10 @@ ASSUME Rejoin \in {"first", "window", "window_rejoin"} /\ Best \in BOOLEAN
 ASSUME (Rejoin # "first" \/ Best) => Fix5 = "solicit"
 ASSUME Rise \in Nat /\ Thr \in {"rank", "air", "minair", "low"} /\ IncAdv \in BOOLEAN
 ASSUME LateAck \in {"none", "ignore", "accept"} /\ (LateAck # "none" => Acks = "frame")
-ASSUME Exhaust \in {"drop", "keeproot", "keeplast"}
-ASSUME Cut \in {"none", "both", "up"} /\ (Cut # "none" => Acks = "frame" /\ CutChild \in Nbr(Root))
-ASSUME Elig \in {"none", "etx", "reach"} /\ (Elig # "none" => Acks = "frame")
+ASSUME Exhaust \in {"drop", "keeproot", "keeplast", "keepboth"}
+ASSUME Cut \in {"none", "both", "up", "relayup"} /\ (Cut = "relayup" => Graph \in {"line", "diamond"})
+ASSUME Cut # "none" => Acks = "frame" /\ CutChild \in Nbr(CutParent)
+ASSUME Elig \in {"none", "etx", "reach", "reachetx", "reachall"} /\ (Elig # "none" => Acks = "frame")
 
 \* The rank of the last frame is tracked (otherwise constant).
 TrackAir == Thr \in {"air", "minair"}
@@ -420,14 +475,15 @@ VARIABLES
     rises,     \* link cost rises so far
     air,       \* air[k]: rank carried by k's last frame (TrackAir; otherwise constant)
     inc,       \* inc[k]: k's rank rose since its last frame (IncAdv; otherwise FALSE)
-    cut,       \* the link CutChild - Root is dead (Cut)
-    rfail      \* rfail[k]: k's failed samples towards the root (Elig), saturated at Lim
+    cut,       \* the link CutChild - CutParent is dead (Cut)
+    rfail,     \* rfail[k][c]: k's failed samples towards c (Elig), saturated at LimOf(c)
+    kp         \* kp[k]: the relay k last kept as its last candidate (ghost, Ghosts; NONE: none)
 
 routing0 == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
               ver, vview, behind, sol, owe, win, wh, rj>>
 routing == <<routing0, dc, rises, air, inc>>
 msgvars == <<sub, cp, giver, delivered, err, errFrom>>
-linkvars == <<cut, rfail>>
+linkvars == <<cut, rfail, kp>>
 vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv, linkvars>>
 
 \* Link cost of k to c, as k currently estimates it.
@@ -460,7 +516,8 @@ TypeOK ==
     /\ loops \in 0..LoopCap /\ rl \in BOOLEAN /\ rerr \in BOOLEAN /\ xv \in BOOLEAN
     /\ dc \in [Nodes -> [Nodes -> 0..Rise]] /\ rises \in 0..Rise
     /\ air \in [Nodes -> 0..INF] /\ inc \in [Nodes -> BOOLEAN]
-    /\ cut \in BOOLEAN /\ rfail \in [Nodes -> 0..Lim]
+    /\ cut \in BOOLEAN /\ rfail \in [Nodes -> [Nodes -> 0..Lim]]
+    /\ kp \in [Nodes -> Nodes \cup {NONE}]
 
 (***************************************************************************)
 (* Chains of preferred parents (dead nodes have none).                     *)
@@ -474,21 +531,25 @@ InCycle(n, P) == \E k \in 1..Cardinality(Nodes) : Climb(n, P, k) = n
 Cycle(P) == \E n \in Nodes : P[n] # NONE /\ InCycle(n, P)
 
 (***************************************************************************)
-(* Death of the link CutChild - Root (Cut): a frame of s is not heard by k *)
-(* (Severed), outside the loss bounds; the dead link carries no route      *)
-(* either way (LinkUp). After Lim failed samples of k towards the root     *)
-(* (Elig: after the cut, of CutChild only, for "none"; consecutive for     *)
-(* "reach"), k's link to the root is ineligible (Inel).                    *)
+(* Death of the link CutChild - CutParent (Cut): a frame of s is not      *)
+(* heard by k (Severed), outside the loss bounds; the dead link carries no *)
+(* route either way (LinkUp). After LimOf(c) failed samples of k towards c *)
+(* (Elig: after the cut, of CutChild towards CutParent only, for "none";   *)
+(* consecutive where judged by reachability), k's link to c is ineligible  *)
+(* (Inel).                                                                 *)
 (***************************************************************************)
-CutPair(a, b) == {a, b} = {CutChild, Root}
-Severed(s, k) == cut /\ IF Cut = "up" THEN s = CutChild /\ k = Root ELSE CutPair(s, k)
+CutPair(a, b) == {a, b} = {CutChild, CutParent}
+Severed(s, k) == cut /\ IF Cut \in {"up", "relayup"} THEN s = CutChild /\ k = CutParent
+                        ELSE CutPair(s, k)
 LinkUp(a, b) == b \in Nbr(a) /\ ~(cut /\ CutPair(a, b))
-Inel(k, c) == c = Root /\ rfail[k] >= Lim
+Inel(k, c) == rfail[k][c] >= LimOf(c)
+\* The node c or k's link to it is dead.
+LinkDead(k, c) == ~alive[c] \/ (cut /\ CutPair(k, c))
 
-\* A failed sample of k towards the root (saturated); an acknowledgement of the root
-\* heard by k ("reach": the run of consecutive failures ends; otherwise nothing).
-RootFail(k) == IF rfail[k] < Lim THEN [rfail EXCEPT ![k] = rfail[k] + 1] ELSE rfail
-RootAcked(k) == IF Elig = "reach" THEN [rfail EXCEPT ![k] = 0] ELSE rfail
+\* A failed sample of k towards c (saturated); an acknowledgement of c heard by k
+\* (judged by reachability: the run of consecutive failures ends; otherwise nothing).
+Fail(k, c) == IF rfail[k][c] < LimOf(c) THEN [rfail EXCEPT ![k][c] = rfail[k][c] + 1] ELSE rfail
+Acked(k, c) == IF ByReach(c) THEN [rfail EXCEPT ![k][c] = 0] ELSE rfail
 
 \* n is attached through a chain of preferred parents to the root, over live links.
 RECURSIVE ToRoot(_, _)
@@ -875,11 +936,11 @@ Die ==
                    ver, vview, behind, sol, owe, win, wh, rj, lost, consec, msgvars, loops, rl,
                    rerr, xv, dc, rises, air, inc, linkvars>>
 
-\* The link CutChild - Root dies (Cut), once, at any moment.
+\* The link CutChild - CutParent dies (Cut), once, at any moment.
 CutLink ==
     /\ Cut # "none" /\ ~cut
     /\ cut' = TRUE
-    /\ UNCHANGED <<routing, lost, consec, msgvars, loops, rl, rerr, xv, rfail>>
+    /\ UNCHANGED <<routing, lost, consec, msgvars, loops, rl, rerr, xv, rfail, kp>>
 
 (***************************************************************************)
 (* Link cost rise (Rise): k's estimate of its link to c rises by one       *)
@@ -940,6 +1001,9 @@ Submit(m) ==
 (* frame of d ("exp", AckFrame), which may come before or after other     *)
 (* frames of d, or be lost. Passive ("pas") for a message queued by a     *)
 (* relay that had a route (link.py:532).                                  *)
+(* Elig "reachall": a passive acknowledgement heard by k ends k's run of  *)
+(* failed samples towards s (the forward is an acknowledgement of s); a    *)
+(* lost one is a failed sample at k's timeout.                             *)
 (***************************************************************************)
 Dup(m, d, s) ==
     CASE Fix3 = "none"    -> giver[m][d] # NONE
@@ -1001,7 +1065,10 @@ SendData(s, m) ==
              /\ delivered' = IF got /\ d = Root THEN [delivered EXCEPT ![m] = TRUE] ELSE delivered
              /\ rerr' = (rerr \/ (Ghosts /\ incons))
              /\ xv' = (xv \/ (Ghosts /\ got /\ ver[s] # ver[d]))
-             /\ UNCHANGED <<alive, sub, err, errFrom, linkvars>>
+             /\ rfail' = IF ~ByReach(s) THEN rfail
+                         ELSE [k \in Nodes |-> IF k # s /\ k # d /\ k \in H /\ waits(k)
+                                               THEN [rfail[k] EXCEPT ![s] = 0] ELSE rfail[k]]
+             /\ UNCHANGED <<alive, sub, err, errFrom, cut, kp>>
 
 \* An acknowledgement frame of h to k about m (Acks = "frame"): lost by k (k's
 \* copy becomes NC), or heard (the copy goes; k selects again). On a dead link
@@ -1032,8 +1099,10 @@ AckOnAir(h, k, m, lostIt, NC) ==
 (* they carry no rank. Acks "frame": the acknowledgement is a frame of h   *)
 (* heard by k: it updates k's entry of h (rank 255 if h is detached; its  *)
 (* version) and k selects again (other neighbours overhearing it are not  *)
-(* modelled). Elig: an acknowledgement of the root heard ends k's run of   *)
-(* failed samples ("reach"); a lost one is a failed sample at the timeout. *)
+(* modelled). Elig: an acknowledgement of h heard ends k's run of failed   *)
+(* samples towards h where that link is judged by reachability (the root  *)
+(* for "reach", "reachetx"; any h for "reachall"); a lost one is a failed  *)
+(* sample at the timeout.                                                  *)
 (***************************************************************************)
 AckFrame(k, m) ==
     /\ alive[k] /\ cp[m][k].st = "p"
@@ -1043,7 +1112,7 @@ AckFrame(k, m) ==
            /\ \/ c.acc = "exp"
               \/ c.acc = "pas" /\ cp[m][h].st \in {"q", "h"}
            /\ \E lostIt \in AckLost(h, k) :
-                /\ rfail' = IF h = Root /\ ~lostIt THEN RootAcked(k) ELSE rfail
+                /\ rfail' = IF ~lostIt THEN Acked(k, h) ELSE rfail
                 /\ IF Acks = "atomic"
                    THEN IF lostIt
                         THEN /\ lost < MaxLoss /\ lost' = lost + 1 /\ UNCHANGED <<consec, air, inc>>
@@ -1052,7 +1121,7 @@ AckFrame(k, m) ==
                         ELSE /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
                              /\ UNCHANGED <<routing, lost, consec, loops, rl>>
                    ELSE AckOnAir(h, k, m, lostIt, [c EXCEPT !.acc = "no"])
-    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut>>
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, kp>>
 
 (***************************************************************************)
 (* Late root acknowledgement (LateAck = "accept", Reliable.on_ack): the    *)
@@ -1065,10 +1134,10 @@ AckFrame(k, m) ==
 LateAckFrame(k, m) ==
     /\ LateAck = "accept" /\ alive[k] /\ cp[m][k].late
     /\ \E lostIt \in AckLost(Root, k) :
-         /\ rfail' = IF ~lostIt THEN RootAcked(k)
-                     ELSE IF Elig = "none" THEN rfail ELSE RootFail(k)
+         /\ rfail' = IF ~lostIt THEN Acked(k, Root)
+                     ELSE IF Elig = "none" THEN rfail ELSE Fail(k, Root)
          /\ AckOnAir(Root, k, m, lostIt, [cp[m][k] EXCEPT !.late = FALSE])
-    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut>>
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, kp>>
 
 (***************************************************************************)
 (* Timeout (Reliable._timeout, reliable.py:534-564): fewer than 3          *)
@@ -1082,21 +1151,31 @@ LateAckFrame(k, m) ==
 (* also while it is on its way before the last attempt (it becomes late),  *)
 (* never while a late one is expected (it comes within one root timeout),  *)
 (* and the drop only once the last attempt's acknowledgement is out.       *)
-(* Exhaust "keeproot", "keeplast": no drop while the hop is kept (KeepHop),*)
-(* the copy is queued towards it again with fresh attempts. Elig "none":   *)
-(* after a dead link (Cut), each timeout of CutChild towards the root is a *)
-(* failed sample (rfail); "etx", "reach": each timeout towards the root    *)
-(* with no acknowledgement on its way (one becoming late is decided by     *)
-(* LateAckFrame; LateAck = "ignore": an ignored one too).                  *)
+(* Exhaust "keeproot", "keeplast", "keepboth": no drop while the hop is   *)
+(* kept (KeepHop), the copy is queued towards it again with fresh          *)
+(* attempts. The keep is decided at each exhaustion, from the state of    *)
+(* that moment: a candidate heard since makes the next exhaustion drop the *)
+(* hop. Elig "none": after a dead link (Cut), each timeout of CutChild     *)
+(* towards CutParent is a failed sample (rfail); "etx", "reach": each      *)
+(* timeout towards the root with no acknowledgement on its way (one        *)
+(* becoming late is decided by LateAckFrame; LateAck = "ignore": an        *)
+(* ignored one too); "reachetx", "reachall": the same towards any hop.     *)
 (***************************************************************************)
 \* h is still a candidate of s apart from drops (heard, eligible, of s's version or
 \* its kept parent behind a version, within the bound).
 Usable(s, h) == CandCost(s, h, view, vview, [dropped EXCEPT ![s][h] = FALSE], fresh, Rec(s)) # NONE
 
+\* h is s's preferred parent, still a candidate apart from drops, and its last
+\* candidate: no other neighbour is a candidate (drops included), the drop of h
+\* would detach s.
+LastCand(s, h) ==
+    /\ h = pref[s] /\ Usable(s, h)
+    /\ \A c \in Nbr(s) \ {h} : CandCost(s, c, view, vview, dropped, fresh, Rec(s)) = NONE
+
 KeepHop(s, h) ==
     CASE Exhaust = "keeproot" -> h = Root /\ Usable(s, h)
-      [] Exhaust = "keeplast" -> /\ h = pref[s] /\ Usable(s, h)
-                                 /\ \A c \in Nbr(s) \ {h} : CandCost(s, c, view, vview, dropped, fresh, Rec(s)) = NONE
+      [] Exhaust = "keeplast" -> LastCand(s, h)
+      [] Exhaust = "keepboth" -> (h = Root /\ Usable(s, h)) \/ LastCand(s, h)
       [] OTHER                -> FALSE
 
 Timeout(s, m) ==
@@ -1108,21 +1187,23 @@ Timeout(s, m) ==
               \/ LateAck = "ignore" /\ inflight
               \/ LateAck = "accept" /\ inflight /\ c.att < ATTEMPTS
            /\ ~c.late
-           /\ LET failed == IF Elig = "none" THEN cut /\ s = CutChild
-                            ELSE c.acc = "no" \/ (LateAck = "ignore" /\ inflight)
-              IN  rfail' = IF h = Root /\ failed THEN RootFail(s) ELSE rfail
+           /\ LET failed == IF Elig = "none" THEN cut /\ s = CutChild /\ h = CutParent
+                            ELSE Counted(h) /\ (c.acc = "no" \/ (LateAck = "ignore" /\ inflight))
+              IN  rfail' = IF failed THEN Fail(s, h) ELSE rfail
            /\ IF c.att < ATTEMPTS
               THEN /\ cp' = [cp EXCEPT ![m][s] = [c EXCEPT !.st = "q", !.acc = "no",
                                                           !.late = (LateAck = "accept" /\ inflight)]]
-                   /\ UNCHANGED <<routing, loops, rl>>
+                   /\ UNCHANGED <<routing, loops, rl, kp>>
               ELSE IF KeepHop(s, h)
               THEN /\ cp' = [cp EXCEPT ![m][s] = Queued(h)]
+                   /\ kp' = IF Ghosts /\ h # Root THEN [kp EXCEPT ![s] = h] ELSE kp
                    /\ UNCHANGED <<routing, loops, rl>>
               ELSE LET Dr == [dropped EXCEPT ![s][h] = TRUE]
                        S  == [x \in Nodes |-> IF x = s THEN SelDrop(s, view, vview, Dr, fresh, Rec(s))
                                               ELSE Keep(x)]
                        p  == S[s].pref
                    IN  /\ Commit(S, view, vview, Dr, fresh, OwKeep(S), SoKeep(S))
+                       /\ UNCHANGED kp
                        /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![s] =
                                    IF mm = m THEN (IF p = NONE \/ p = h THEN Held ELSE Queued(p))
                                    ELSE Reshape(cp[mm][s], S[s])]]
@@ -1185,7 +1266,8 @@ Init ==
     /\ loops = 0 /\ rl = FALSE /\ rerr = FALSE /\ xv = FALSE
     /\ dc = [k \in Nodes |-> [c \in Nodes |-> 0]] /\ rises = 0
     /\ air = InitRank /\ inc = [n \in Nodes |-> FALSE]
-    /\ cut = FALSE /\ rfail = [n \in Nodes |-> 0]
+    /\ cut = FALSE /\ rfail = [k \in Nodes |-> [c \in Nodes |-> 0]]
+    /\ kp = [n \in Nodes |-> NONE]
 
 Protocol ==
     \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s) \/ WindowClose(s)
@@ -1252,14 +1334,19 @@ MP5Live == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] = "recv")
 \* every such drop takes three timeouts of one copy towards the root, each after a
 \* lost frame or acknowledgement, unless an acknowledgement on its way is ignored
 \* (LateAck = "ignore"): with MaxLoss < ATTEMPTS it holds otherwise; with "keeproot"
-\* or "keeplast", whatever the losses.
-RootKept == \A n \in Nodes : dropped[n][Root] => cut /\ n = CutChild
+\* "keeplast" or "keepboth", whatever the losses.
+RootKept == \A n \in Nodes : dropped[n][Root] => cut /\ CutPair(n, Root)
 
 \* Eligibility of the root link (Elig): no node's link to the root is made
 \* ineligible, unless that link died (Cut). With "etx", every failed sample counts:
 \* with MaxLoss >= INELIG collisions on a live link suffice; with "reach", a run of
 \* consecutive failed samples beyond the loss budget (UNREACH) is needed.
-RootReachable == \A n \in Nodes : Inel(n, Root) => cut /\ n = CutChild
+RootReachable == \A n \in Nodes : Inel(n, Root) => cut /\ CutPair(n, Root)
+
+\* Eligibility of every link (Elig "reachetx", "reachall"): no node's link to a live
+\* neighbour over a live link is made ineligible. With "reachetx" collisions on a
+\* relay link suffice (MaxLoss >= INELIG); with "reachall" a run beyond the budget.
+LinksReachable == \A n, c \in Nodes : Inel(n, c) => LinkDead(n, c)
 
 \* MP11.
 NoCycle == ~Cycle(LiveP(pref))
@@ -1279,6 +1366,15 @@ AllAttached == \A n \in Nodes : (alive[n] /\ GraphConnected(n)) => Connected(n)
 CutOffDetached == \A n \in Nodes : (alive[n] /\ ~GraphConnected(n)) => rank[n] = INF
 MP10Live == <>[]AllAttached
 CutOffLive == <>[]CutOffDetached
+\* Link death without traffic is not probed (an idle node stays attached over a dead
+\* uplink it still hears: DODAG_diamond_reach_cutup_idle): once CutChild has a message
+\* queued after the link died (its transmissions are the probes), every node cut off
+\* ends detached.
+CutOffLiveTraffic == <>(cut /\ \E m \in Msgs : cp[m][CutChild].st = "q") => CutOffLive
+\* MP5, partition: every submitted message ends delivered or failed by some node (its
+\* error may not reach an origin cut off with it, DODAG_line_partition_MP5Live): no
+\* copy is retried for ever.
+MP5Decided == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] # "none")
 \* Global repair: every node connected to the root ends in the root's version.
 AllInVersion == \A n \in Nodes : (alive[n] /\ GraphConnected(n)) => ver[n] = ver[Root]
 VersionSettle == <>[]AllInVersion
@@ -1294,7 +1390,9 @@ Live == MP5Live /\ LoopsEnd /\ RanksSettle /\ MP10Live /\ CutOffLive
 (* is lost. Detaches(n): n goes from a finite rank to 255 in its version   *)
 (* (a detach at an adoption, without parent of the new version, is left   *)
 (* out). PLost(n): its preferred parent is gone (silent: entry removed),  *)
-(* advertises 255, or was dropped after failed attempts.                   *)
+(* advertises 255, was dropped after failed attempts, or its link was made *)
+(* ineligible while that parent or the link is dead (Elig "reachall": a    *)
+(* dead relay left at its unreachability, before the silence limit).       *)
 (* - KeepParent (rank following): a node whose preferred parent is not   *)
 (*   lost and is of its version detaches only when the path cost through   *)
 (*   it exceeds the bound L + MaxInc.                                      *)
@@ -1303,11 +1401,33 @@ Live == MP5Live /\ LoopsEnd /\ RanksSettle /\ MP10Live /\ CutOffLive
 (*   connected node detaches during a global repair).                     *)
 (***************************************************************************)
 Detaches(n) == n # Root /\ rank[n] # INF /\ rank'[n] = INF /\ ver'[n] = ver[n]
-PLost(n) == pref[n] = NONE \/ view'[n][pref[n]] \in {NONE, INF} \/ dropped'[n][pref[n]]
+PLost(n) == \/ pref[n] = NONE \/ view'[n][pref[n]] \in {NONE, INF} \/ dropped'[n][pref[n]]
+            \/ rfail'[n][pref[n]] >= LimOf(pref[n]) /\ LinkDead(n, pref[n])
 OverBound(n) == view'[n][pref[n]] + LCost(n, pref[n]) > Bound(n)
 
 KeepParent ==
     [][\A n \in Nodes : (Detaches(n) /\ ~PLost(n) /\ vview'[n][pref[n]] = ver[n]) => OverBound(n)]_vars
+
+\* Last candidate kept (Exhaust "keepboth", Elig "reachall"): a node detaches while
+\* its preferred parent, root or relay, is alive over a live link and heard at a
+\* finite rank of its version only beyond the bound; unlike KeepParent, a drop after
+\* failed attempts or an ineligible link is no excuse. Collisions alone never detach
+\* a node from its last candidate.
+LastKept ==
+    [][\A n \in Nodes : (/\ Detaches(n) /\ pref[n] # NONE /\ ~LinkDead(n, pref[n])
+                         /\ view'[n][pref[n]] \notin {NONE, INF} /\ vview'[n][pref[n]] = ver[n])
+                        => OverBound(n)]_vars
+
+\* The keep is not sticky: a copy gets fresh attempts towards a relay after its last
+\* attempt only while that relay is the node's last candidate: no other neighbour is
+\* then a candidate (heard, of its version, under the rank threshold, not dropped,
+\* eligible, within the bound). The step changes that copy only (the keep).
+KeepOnlyLast ==
+    [][\A m \in Msgs, n \in Nodes :
+         LET h == cp[m][n].hop IN
+         (/\ cp[m][n].st = "p" /\ h \notin {Root, NONE} /\ cp[m][n].att = ATTEMPTS
+          /\ cp'[m][n] = Queued(h) /\ \A k \in Nodes \ {n} : cp'[m][k] = cp[m][k])
+         => \A c \in Nbr(n) \ {h} : CandCost(n, c, view, vview, dropped, fresh, Rec(n)) = NONE]_vars
 NoLagDetach ==
     [][\A n \in Nodes : (Detaches(n) /\ ~PLost(n)) => vview'[n][pref[n]] = ver[n]]_vars
 
@@ -1342,9 +1462,21 @@ NoFreshRoot ==
     [][\A m \in Msgs, n \in Nodes : ~(/\ cp[m][n].st = "p" /\ cp[m][n].hop = Root
                                       /\ cp[m][n].att = ATTEMPTS
                                       /\ cp'[m][n] = Queued(Root))]_vars
+\* Exhaust "keeplast", "keepboth": no copy gets fresh attempts towards a relay after
+\* exhausting its attempts there.
+NoFreshRelay ==
+    [][\A m \in Msgs, n \in Nodes : ~(/\ cp[m][n].st = "p" /\ cp[m][n].hop \notin {Root, NONE}
+                                      /\ cp[m][n].att = ATTEMPTS
+                                      /\ cp'[m][n] = Queued(cp[m][n].hop))]_vars
+\* No node whose preferred parent is the relay it kept as its last candidate (kp,
+\* Ghosts) switches to another parent: a keep followed by a switch is reached.
+NoSwitchAfterKeep ==
+    [][\A n \in Nodes : ~(kp[n] # NONE /\ pref[n] = kp[n] /\ pref'[n] \notin {NONE, kp[n]})]_vars
 \* Elig = "reach": no run of MaxLoss consecutive failed samples towards the root (a
 \* run reaching the loss budget: UNREACH = MaxLoss + 1 is tight, with MaxConsec = 1).
-ShortFailRuns == \A n \in Nodes : rfail[n] < MaxLoss
+ShortFailRuns == \A n \in Nodes : rfail[n][Root] < MaxLoss
+\* Elig = "reachall": the same towards a relay.
+ShortRelayRuns == \A n, c \in Nodes : c # Root => rfail[n][c] < MaxLoss
 \* Rank following: no node keeps its preferred parent once it hears it, in its version,
 \* at a rank not below its own.
 NoFollow ==

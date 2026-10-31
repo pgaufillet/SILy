@@ -433,8 +433,9 @@ class PresenceAcknowledgement(unittest.TestCase):
 
     def test_parent_that_does_not_hear_the_node_is_left(self):
         # N hears R at 100 % but R no longer hears N, without class 1
-        # traffic: the lost presence forwards make R's ETX exceed 4 (MP12),
-        # and N leaves it (its only parent: it detaches).
+        # traffic: 4 lost presence forwards in a row and no acknowledgement
+        # of R for a silence limit make R unreachable (§9), and N leaves it
+        # (its only parent: it detaches), its ETX still at most 4.
         line = Line(16)
         line.formed()
         entry = line.node.engine.neighbours.get(R)
@@ -442,20 +443,20 @@ class PresenceAcknowledgement(unittest.TestCase):
         self.assertTrue(samples >= 1 and entry.acknowledged() == samples)
         cut = line.net.now
         line.net.medium.cut(N, R)  # N -> R only
+        rep = line.node.routing.reporter.counters
         log = []
 
         def watch():
             if not log and not line.node.routing.attached:
-                log.append(line.net.now)
+                log.append((line.net.now, rep.presence_unacked, entry.etx(), entry.d_in()))
             line.net.at(line.net.now + 50, watch)
 
         line.net.at(cut, watch)
-        # 3 failures per success leave ETX 4 (eligible); one more is needed,
-        # one per presence period (+10 % jitter).
-        line.net.run(cut + (3 * samples + 2) * 11 * PERIOD // 10 + 2000)
+        # 4 presences, one per period (+10 % jitter), then a selection.
+        line.net.run(cut + 5 * 11 * PERIOD // 10 + 2000)
         self.assertTrue(log, (entry.ack_count, entry.acknowledged()))
-        self.assertTrue(line.node.routing.reporter.counters.presence_unacked >= 3 * samples + 1)
-        self.assertEqual(entry.d_in(), 100)
+        self.assertEqual(log[0][1:], (4, log[0][2], 100))
+        self.assertTrue(log[0][2] <= 4 * 128, log)
 
 
 class Topologies(unittest.TestCase):

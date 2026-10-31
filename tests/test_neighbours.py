@@ -537,6 +537,74 @@ class RootReachability(unittest.TestCase):
         self.assertEqual(n.etx(), (15 * ETX_ONE + 5) // 11)
 
 
+class RelayReachability(unittest.TestCase):
+    """§9: a relay link judged by reachability (reach: the preferred parent
+    as the node's last candidate, decided by routing) follows the root's
+    rule; without reach a relay link keeps ETX <= 4 (MP12)."""
+
+    def _relay(self, t, now=0):
+        n = _hear(t, A, range(16), now=now)
+        # 1 of 5 acknowledged at now: ETX 5 > 4, the last 4 failed in a row.
+        for ok in (True, False, False, False, False):
+            t.acked(A, ok, now)
+        return n
+
+    def test_eligible_above_etx_4_while_reachable_only_with_reach(self):
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = self._relay(t, now=100)
+        self.assertEqual((n.etx(), n.run, n.answered), (5 * ETX_ONE, 4, 100))
+        self.assertFalse(n.eligible(100, silence))
+        self.assertTrue(n.eligible(100, silence, True))
+        self.assertTrue(n.eligible(100 + silence - 1, silence, True))
+        self.assertFalse(n.eligible(100 + silence, silence, True))
+        self.assertFalse(n.eligible(None, None, True))  # without the time: the run alone
+
+    def test_the_run_and_the_silence_both_needed(self):
+        # The silence alone (test above: the run alone) does not suffice.
+        silence = silence_ms(_PERIOD)
+        t = _table()
+        n = _hear(t, A, range(16))
+        # ETX 10, 3 consecutive failed samples after the success at 0.
+        for ok in [False] * 6 + [True] + [False] * 3:
+            t.acked(A, ok, 0)
+        self.assertEqual((n.etx(), n.run, n.answered), (10 * ETX_ONE, 3, 0))
+        self.assertTrue(n.eligible(silence + 10, silence, True))
+        t.acked(A, False, silence + 10)  # the 4th
+        self.assertFalse(n.eligible(silence + 10, silence, True))
+
+    def test_any_acknowledgement_makes_it_reachable_again(self):
+        silence = silence_ms(_PERIOD)
+        for sample in (True, False):
+            t = _table()
+            n = self._relay(t)
+            self.assertFalse(n.eligible(silence, silence, True))
+            if sample:
+                t.acked(A, True, silence)  # explicit or passive, with a sample
+            else:
+                self.assertTrue(t.answered(A, silence))  # one that gives no sample
+            self.assertEqual((n.run, n.answered), (0, silence))
+            self.assertTrue(n.eligible(silence, silence, True))
+
+    def test_restart_reach_as_a_new_entry(self):
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = self._relay(t)
+        self.assertFalse(n.eligible(silence, silence, True))
+        self.assertTrue(t.restart_reach(A, silence))
+        self.assertEqual((n.run, n.answered, n.etx()), (0, silence, 5 * ETX_ONE))
+        self.assertTrue(n.eligible(2 * silence, silence, True))  # the run restarted
+        self.assertFalse(t.restart_reach(B, 0))
+
+    def test_link_etx_capped_at_4_with_reach_only(self):
+        t = _table()
+        n = self._relay(t)
+        self.assertEqual((n.link_etx(), n.link_etx(True)), (5 * ETX_ONE, ETX_MAX))
+        for _ in range(10):
+            t.acked(A, True, 0)
+        self.assertEqual(n.link_etx(True), n.etx())  # at ETX <= 4, the ETX itself
+
+
 class Expiry(unittest.TestCase):
     def test_removed_after_4_periods(self):
         t = _table()
