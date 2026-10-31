@@ -109,9 +109,10 @@ RTO_SLOTS = 6
 # period at every SF (§12).
 RETRY_SLOTS = 32
 RETRY_DOUBLINGS = 3
-# Failed samples that make a link with a full acknowledgement window of
-# successes ineligible (ETX 16/3 > 4, §9): the root is left after them.
-INELIG_FAILURES = 13
+# Consecutive failed samples that, with a silence limit since the last
+# acknowledgement of the root, make the link to the root unreachable (§9):
+# the root is left then, not at ETX > 4.
+UNREACH_RUN = 4
 DETACH_HOLD = 2  # Imin after poisoning before rejoining
 # Answer window beyond Imin after the solicitation: solicitation 1 + backoff 4
 # + answer 2 + step 1.
@@ -308,13 +309,18 @@ def main():
         # after the first.
         relay_switch = N_TX * rto_relay + retry_slots(N_TX - 1) * slot
         # The root is kept while heard and eligible (§12): left once its link
-        # is ineligible, at the decision of the INELIG_FAILURES-th failed
-        # sample. The attempts of one message go one root timeout and a retry
-        # delay apart, one more root timeout after each round of N_TX (late
+        # is unreachable, from the last acknowledgement of the root: the
+        # decision of the UNREACH_RUN-th consecutive failed sample and one
+        # silence limit, whichever comes last, then the next selection (at
+        # the latest the root's next beacon, half a period jittered). The
+        # attempts of one message go one root timeout and a retry delay
+        # apart, one more root timeout after each round of N_TX (late
         # acknowledgement); a failure is decided one root timeout after its
         # timeout. (A root not heard at all is left at the silence limit.)
-        gaps = INELIG_FAILURES - 1
-        root_switch = (gaps + gaps // N_TX + 2) * rto_root + retry_slots(gaps) * slot
+        gaps = UNREACH_RUN - 1
+        run = (gaps + gaps // N_TX + 2) * rto_root + retry_slots(gaps) * slot
+        beacon = (1 + JITTER) * live / BEACONS
+        root_switch = max(run, SILENCE_LIMIT * live) + beacon
         print(
             f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {relay_switch:>6.1f}  "
             f"{root_switch:>6.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "

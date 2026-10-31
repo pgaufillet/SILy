@@ -64,6 +64,10 @@ slot: a slot times out at most once per root timeout), then subject to
 the batching delay rule; the root's acknowledgement of that frame arriving
 before cancels it and counts as a success. After the last attempt the
 message waits one more root timeout (`_LATE`) before the reroute below.
+Every root acknowledgement frame with an entry for this node, whatever
+the frame acknowledged (sampled already, late, or not kept), is the root's
+answer (`NeighbourTable.answered`): it ends the run of failed samples that
+makes the link to the root unreachable (§9, `mesh.neighbours`).
 
 After `ATTEMPTS` (3) transmissions to one next hop, the injected
 ``engine.reroute(msg, hop)`` ("next hop after failure"; routing's parent
@@ -523,6 +527,13 @@ class Reliable:
             return
         own = self.engine.address
         queue = self.queue
+        if origin == ROOT:
+            for source, _ in entries:
+                if source == own:
+                    # The root answers: its link is reachable (§9), whatever
+                    # the frames acknowledged.
+                    self.engine.neighbours.answered(ROOT, self.engine.now)
+                    break
         for source, c16 in entries:
             if source != own:
                 continue

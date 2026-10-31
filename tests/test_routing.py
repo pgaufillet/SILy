@@ -10,6 +10,7 @@ import unittest
 from mesh.dodag import DodagInfo
 from mesh.frame import FIRST_HOP, RANK_INFINITE, ROOT, UPWARD, Header, Message
 from mesh.link import NOT_TAKEN, QUEUED
+from mesh.neighbours import silence_ms
 from mesh.ports import PRESENCE, TOPOLOGY
 from mesh.profile import EU_869
 from mesh.reports import RANK_ERRORS
@@ -281,22 +282,30 @@ class LocalRepair(unittest.TestCase):
         self.assertEqual(n.engine.rank, RANK_INFINITE)
         self.assertEqual((rel.pending(), rel.held(), n.engine.counters.retries), (0, 1, 0))
 
-    def test_root_kept_after_exhausted_attempts_until_its_link_is_ineligible(self):
+    def test_root_kept_after_exhausted_attempts_until_its_link_is_unreachable(self):
         # The root no longer hears R, which still hears its beacons: R's
-        # attempts towards the root all fail. While the link is eligible the
-        # root, R's only candidate, is kept (§12 upward failure): no detach,
-        # fresh attempts; the failed samples then make the link ineligible
-        # and R leaves the root.
+        # attempts towards the root all fail. While the link is reachable
+        # the root, R's only candidate, is kept (§12 upward failure): no
+        # detach, fresh attempts; once R's failed samples run 4 in a row
+        # and no acknowledgement of the root came for a silence limit (§9),
+        # the link is unreachable and R leaves the root, at the next
+        # selection (a beacon every half period, or the attempts' end).
         line = Line(13)
         r = line.relay
         parents = r.routing.parents
+        entry = r.engine.neighbours.get(ROOT)
+        silence = silence_ms(PERIOD)
+        r.submit(APP, 1, ROOT, b"heard")
+        while len(r.engine.queue):
+            line.run(100)
+        last = entry.answered
+        self.assertTrue(line.net.now - last < 1000)
         reroutes = []
         original = parents.next_parent
 
         def next_parent(hop, now=None):
             hop = original(hop, now)
-            entry = r.engine.neighbours.get(ROOT)
-            reroutes.append((hop, entry is not None and entry.eligible()))
+            reroutes.append((hop, entry.eligible(line.net.now, silence), line.net.now))
             return hop
 
         parents.next_parent = next_parent
@@ -304,13 +313,17 @@ class LocalRepair(unittest.TestCase):
         r.submit(APP, 1, ROOT, b"unheard")
         while not reroutes:
             line.run(500)
-        self.assertEqual(reroutes, [(ROOT, True)])
+        self.assertEqual(reroutes[0][:2], (ROOT, True))
         self.assertEqual((parents.preferred, parents.detaches, parents.drops), (ROOT, 0, 0))
         rel = r.engine.reliable
         self.assertEqual((len(r.engine.queue), rel.held()), (1, 0))
-        # Left once the link is ineligible: a detach (no other candidate).
+        # Left once the link is unreachable: a detach (no other candidate),
+        # about one silence limit after the last acknowledgement.
         while not parents.detaches:
             line.run(100)
-        self.assertFalse(r.engine.neighbours.get(ROOT).eligible())
-        self.assertTrue(all(hop == ROOT for hop, eligible in reroutes if eligible), reroutes)
+        left = line.net.now - last
+        self.assertTrue(silence <= left <= silence + PERIOD, left)
+        self.assertTrue(entry.run >= 4)
+        self.assertFalse(entry.eligible(line.net.now, silence))
+        self.assertTrue(all(hop == ROOT for hop, eligible, _ in reroutes if eligible), reroutes)
         self.assertEqual((rel.held(), r.engine.counters.unreachable), (1, 0))

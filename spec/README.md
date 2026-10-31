@@ -50,7 +50,7 @@ and its two-version safety configurations on the diamond (≈ 8 and 3
 minutes; with the answer window and its ghost variables ≈ 15 minutes on 4
 cores), plus about 1.5 hours for the link cost rise configurations
 (`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 35 minutes each),
-and about 20 minutes for the link death configurations (`DODAG_*_cutlive`:
+and about 35 minutes for the link death configurations (`DODAG_*_cutlive`:
 1.5 to 9 minutes each).
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
@@ -266,8 +266,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 - **Ranks** in whole hops (MIN_HOP 8 = 1): the hysteresis of 4 never holds a
   change back, the switch threshold 12 is a gain of 2 hops; 254 and
   MaxRankIncrease 56 scaled to `MaxRank` = 6 and `MaxInc` = 3. Links always
-  eligible (no ETX estimation: `AckWindow`/`LinkCut` cover it), except a
-  dead link (`Cut`, below). Parent sets
+  eligible (no ETX estimation: `AckWindow`/`LinkCut` cover it), except the
+  link to the root (`Cut`, `Elig`, below). Parent sets
   not truncated to 3 (degree ≤ 3). Link costs are fixed (`Rise = 0`, a
   rank then rises only by a local repair after a relay death, `follow`
   graph) or rise (`Rise` > 0, below): the environment raises a node's
@@ -359,11 +359,42 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   frame and acknowledgement, outside the loss bounds, and carries no route
   (`MP10Live`, `CutOffLive` and error delivery read the graph of live
   links). The silence limit removes a neighbour no longer heard (`Expire`,
-  as for a dead relay). Node 1's timeouts towards the root after the death
-  are failed samples, and `INELIG` = 4 of them make the link ineligible
-  (13 from a full window, `AckWindow`; scaled to 4, more than one round of
-  attempts, so that `"keeproot"` gives fresh attempts at least once).
-  Failure ageing is not modelled: the dead link stays ineligible.
+  as for a dead relay). Node 1's failed samples towards the root make the
+  link ineligible (`Elig`, below).
+- **Eligibility of the link to the root** (`Elig`, with `Acks =
+  "frame"`): a node's failed samples towards the root (`rfail`) are its
+  transmissions to the root whose acknowledgement never comes: a timeout
+  with no acknowledgement on its way (frame lost at the root, or its
+  acknowledgement lost at the node), or a late acknowledgement lost (the
+  failure decided once it is out). Other links stay eligible.
+  `"none"` (every configuration before this option): only node 1's
+  timeouts towards the root after the death count, and `INELIG` = 4 of
+  them make the link ineligible (13 from a full window, `AckWindow`;
+  scaled to 4, more than one round of attempts, so that `"keeproot"`
+  gives fresh attempts at least once); failure ageing is not modelled, the
+  dead link stays ineligible; collisions on a live link never make it
+  ineligible. `"etx"` (the code before remedy A, ETX ≤ 4): every failed sample of any node
+  towards the root counts, live link included, and `INELIG` of them make
+  it ineligible; neither successes (a failure leaves the 16-sample window
+  only 16 samples later) nor ageing (a silence limit after the newest
+  failure, not reached under sustained load) remove them: slightly
+  pessimistic, enough for a witness of D28's mechanism. `"reach"`
+  (remedy A of D28, RPL neighbour unreachability detection style, the
+  node's class 1 transmissions to the root as probes): the link to the
+  root is unreachable (ineligible) once the node's last U failed samples
+  were consecutive and no acknowledgement of the root came for one silence
+  limit; any acknowledgement of the root (late included) makes it
+  reachable again. Modelled as a run of consecutive failed samples, reset
+  by every acknowledgement of the root the node hears, `UNREACH` of them
+  making the link unreachable; the silence limit only makes the code's
+  rule stricter (a dead link never acknowledges, so it always passes). Each
+  failed sample on a live link costs a loss, and a run is bounded by
+  `MaxLoss` only, not by `MaxConsec`: the losses alternate between the two
+  directions (a frame lost at the root, then an acknowledgement lost at
+  the node) and the frames in between (root beacons, the node's
+  presences) reset the per-link counts. Hence `UNREACH` = `MaxLoss` + 1,
+  at least `INELIG` (4 with ≤ 3 losses, as `"none"` on the dead link).
+  The root's link cost is unchanged (fixed, `Rise = 0`).
 - **Class 1**: one message per origin in `Origins`; per node a copy queued,
   waiting (passively acknowledged by the next hop's forward, overheard, not
   when the forward is addressed to the waiting node itself — as the code —
@@ -416,6 +447,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   root, each after a lost frame or acknowledgement, unless an
   acknowledgement on its way is ignored: with `MaxLoss` < 3 it must hold;
   with `"keeproot"` or `"keeplast"`, whatever the losses.
+- **RootReachable** (`Elig`): no node's link to the root is made
+  ineligible, unless that link died (`Cut`).
 - Witnesses: loops form (`NoCycle` violated), messages are delivered
   (`NeverDelivered`), errors reach origins (`NeverError`), data-path
   validation fires (`NoRankError`); a node keeps its parent heard at a rank
@@ -426,7 +459,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   (`NoWindowRejoin`), a copy is retried while the root's acknowledgement
   of an earlier transmission is still expected (`NoLateRetry`), a copy
   gets fresh attempts towards the root after its last attempt
-  (`NoFreshRoot`).
+  (`NoFreshRoot`), a run of `MaxLoss` consecutive failed samples towards
+  the root (`ShortFailRuns`).
 
 ## Fixes modelled
 
@@ -500,6 +534,12 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   attempts towards it. `"keeplast"` (variant): the preferred parent, root
   or not, is kept while it is the last candidate. `"drop"`: the code
   before.
+- **Root link unreachability** (`Elig = "reach"`, remedy A of D28, the
+  code): the link to the root leaves the candidates only after a
+  run of consecutive failed samples with no acknowledgement of the root
+  (and, in the code, a silence limit without one), instead of ETX > 4
+  (`"etx"`, the code before). `"none"`: the earlier model, ineligible only after
+  the link's death.
 
 ## Results
 
@@ -574,6 +614,19 @@ acknowledgements (`LateAck = "accept"`):
 | Last candidate kept (`"keeplast"`) | the same results on the line (MP5: 7 361 states, 8 s; nocycle: 47 324, 37 s; live: 1 157, 17 s; dead link, ≤ 1 loss: 43 997, 82 s) and on the diamond (MP5: 12 593 states, 42 s; dead link both ways: 20 765, 4 min) | `DODAG_*_keeplast_*` |
 | Non-vacuity | a copy gets fresh attempts towards the root after its last attempt: after 3 losses (line), or with no loss over the dead link 1 → 0 (diamond) | `DODAG_line_keeproot_witness_fresh`, `DODAG_diamond_keeproot_witness_cutfresh` |
 | Earlier configurations | given `Exhaust = "drop"`, `Cut = "none"`, the earlier model (state counts unchanged where compared: `DODAG_line_lateignore_drop` 13, `DODAG_line_lateack_witness_retry` 10, `DODAG_chain_low_nocycle` 12 790, `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413) | the 80 other `DODAG_*` |
+
+Eligibility of the link to the root, on the code since the root kept
+(`Exhaust = "keeproot"`, `LateAck = "accept"`):
+
+| Item | Result | Configurations |
+|---|---|---|
+| Root link ineligible after collisions, the code before remedy A (`Elig = "etx"`, D28) | no death, no dead link, line, ≤ 4 losses, ≤ 1 consecutive per link: 1's frames to the root lost there and the root's acknowledgements lost at 1, alternately; after 4 failed samples (`INELIG`) 1's link to the root is ineligible (36 683 states, 58 s), and 1 detaches although the root is heard, not dropped and within the bound, its subtree following (`KeepParent`, 44 619 states, 74 s) | `DODAG_line_etx_rootloss`, `DODAG_line_etx_detach` |
+| Root link unreachable, remedy A (`"reach"`) | the same budget (line, ≤ 4 losses, ≤ 1 consecutive): the link never unreachable, the root never dropped, KeepParent, no silent loss (52 708 states, 2 min); ≤ 3 losses in any pattern: no silent loss, the root never dropped, its link never unreachable (line, relay 1 dies: 18 674 states, 10 s; diamond, relay 1 dies, a message of 4: 20 481 states, 51 s); ≤ 3 losses, ≤ 1 consecutive: no loop, no rejoin loop, KeepParent (line, relay 1 dies: 84 131 states, 41 s); MP5Live, LoopsEnd, RanksSettle, MP10Live (line, no death, ≤ 3 losses: 1 992 states, 13 s) | `DODAG_line_reach_rootloss`, `DODAG_*_reach_MP5`, `DODAG_line_reach_nocycle`, `DODAG_line_reach_live` |
+| Remedy A, dead link | the dead link is still left: link 0 – 1 dead both ways, line, ≤ 2 losses: LoopsEnd, RanksSettle, CutOffLive, no silent loss (262 475 states, 7 min); diamond, a message of 4, ≤ 1 loss: also MP5Live and MP10Live, 1 rejoining through 3 (20 517 states, 4 min). Link 1 → 0 dead, 1 still hearing the root's beacons but no acknowledgement: the run of failed samples makes the link unreachable; diamond, ≤ 1 loss: MP5Live, LoopsEnd, RanksSettle, no silent loss (4 269 states, 42 s). Root dropped and link unreachable only over the dead link (`RootKept`, `RootReachable`) | `DODAG_*_reach_cutlive`, `DODAG_diamond_reach_cutuplive` |
+| Limit, not of A (the same with `"none"`) | link 1 → 0 dead and no class 1 traffic through 1: no probe, 1 stays attached over it and MP10Live fails | `DODAG_diamond_reach_cutup_idle` |
+| Tightness of `UNREACH` | line, no death, ≤ 3 losses, ≤ 1 consecutive per link: a run of 3 consecutive failed samples on a live link (a frame of 1 lost at the root, then the root's acknowledgement lost at 1, then again): `MaxConsec` bounds no run, `MaxLoss` + 1 is the smallest safe `UNREACH` | `DODAG_line_reach_witness_run` |
+| Non-vacuity | a copy gets fresh attempts towards the root after its last attempt: after 3 losses (line), or with no loss over the dead link 1 → 0 (diamond) | `DODAG_line_reach_witness_fresh`, `DODAG_diamond_reach_witness_cutfresh` |
+| Earlier configurations | given `Elig = "none"`, the earlier model (state counts unchanged where compared with one worker: `DODAG_line_drop_rootloss` 727, `DODAG_line_lateignore_drop` 13; with all workers: `DODAG_line_lateack_witness_retry` 10, `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413, `DODAG_line_keeproot_MP5` 18 669, `DODAG_line_keeproot_live` 1 987, `DODAG_diamond_keeproot_cutuplive` 4 457, `DODAG_line_custody_MP5` 19 706) | the 97 other `DODAG_*` |
 
 **Why L.** Every rank a node puts on air since it attached is at least
 L; a child's rank is the rank it heard from its parent plus a link cost
@@ -796,6 +849,28 @@ How each fix is implemented, what it costs, and the limits accepted.
 
 ## Open points
 
+- **Remedy A of D28 in the code** (`Elig = "reach"`): implemented
+  (`neighbours.py` `Neighbour.reachable`, `eligible`, `link_etx`,
+  `NeighbourTable.answered`; `reliable.py` `on_ack`; `parents.py`
+  `candidate_cost`): the link to the root unreachable after U = 4
+  consecutive failed samples (the acknowledgement window's, one per
+  batching delay towards the root) and one silence limit since the last
+  acknowledgement of the root (any explicit entry of the root for the
+  node, late included; the entry's creation), read at selection time; any
+  acknowledgement ends the run, failure ageing too; the root's link cost
+  capped at 32 (ETX 4). The model shows that no per-link bound on
+  consecutive losses bounds a run (`DODAG_line_reach_witness_run`): the
+  silence limit without acknowledgement, not U, carries the argument that
+  a live root is kept; the code's cost cap is not in the model (whole-hop
+  fixed costs). Measured on `forming star 1` (`make large`): at the hidden
+  root child 0101 the root's acknowledgements arrive at most 34 s apart
+  until 309 s, then none at all (the root acknowledges 117 of its frames
+  between 240 and 390 s, 3 batches reach it; root frames, beacons
+  included, 0 to 2 per 30 s): the root is left at 384 s, one silence
+  limit after the last one, instead of 348 s under ETX ≤ 4; the hidden
+  Nodes had begun detaching at 273 s (their relay parent dropped). A
+  keeps a root that answers now and then, not one drowned at the root
+  child: the star collapse remains (rootless DODAG, remedy C).
 - **Views older than an attach** (residual of the cost rise fix): the test against L
   assumes no node holds a view of an ancestor older than that ancestor's
   last attach (rank 255 heard since). Fix 5 ensures it with at most one

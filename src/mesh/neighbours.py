@@ -32,9 +32,33 @@ link destination (the channel is shared, §9). Per neighbour:
   tenths of dB, averaged over its last 8 frames (fewer before 8). The link
   SNR is the packet SNR, or RSSI minus the noise floor at SNR >= +5 dB when
   a noise floor is known (``noise_floor``), since the SX1262 SNR saturates;
-- **eligibility** as a parent link: margin >= 3 dB and ETX <= 4. The
-  margin has a hysteresis (MP12): once below 3 dB, it must reach 6 dB again.
-  A new neighbour starts on the eligible side;
+- **eligibility** as a parent link: margin >= 3 dB and ETX <= 4 (the
+  link to the root: reachable, below). The margin has a hysteresis
+  (MP12): once below 3 dB, it must reach 6 dB again. A new neighbour
+  starts on the eligible side;
+- **reachability of the root** (RPL neighbour unreachability detection
+  style): the link to the root (address `ROOT`) is not tested against
+  ETX <= 4 but is ineligible while **unreachable**: its last
+  `UNREACH_RUN` (4) failed samples are consecutive (``run``: failed
+  samples since the last acknowledgement, the samples of the
+  acknowledgement window, so that one lost batch of the root counts once)
+  and no acknowledgement of the root came for one silence limit
+  (``answered``: time of the last one, or of the entry's creation). Any
+  acknowledgement of the root ends the run: a success sample, or one that
+  gives no sample (`NeighbourTable.answered`: an explicit entry of the
+  root for a frame already sampled, a late one); beacons and other frames
+  do not. The node's class 1 transmissions towards the root are the
+  probes. Failure ageing ends the run too (its failures left the window:
+  the link gets `UNREACH_RUN` more failed samples), ``answered`` stays: a
+  node that stopped sending to the root reads it eligible again a silence
+  limit after its last failure, as under the ETX rule. Reachability is
+  read at selection time (`eligible` with the time and the silence limit).
+  The silence limit makes a root that answers now and then, under
+  collisions of its batches (hidden terminals), stay eligible whatever
+  its ETX; the run makes a root heard without fresh attempts towards it
+  stay eligible. **Cost cap**: the ETX of the link to the root used for
+  its link cost (`link_etx`) is at most 4, so that a reachable root above
+  ETX 4 keeps a link cost of 32, within the bound L + 56;
 - **parent flag**, set by routing: a parent is never evicted.
 
 Bounds (MP13): the entries are allocated at construction and reused. A new
@@ -60,6 +84,7 @@ Integer arithmetic only; the presence period is injected (``period_ms``,
 from array import array
 
 from mesh.airtime import SF_MIN, snr_limit_x10
+from mesh.frame import ROOT
 
 CAPACITY = 64  # entries (MP13)
 WINDOW = 16  # counter values of the reception window, messages of p_ack
@@ -68,7 +93,8 @@ EXPIRY_PERIODS = 4  # presence periods without a frame before removal
 SILENCE_HALVES = 5  # silence limit in half presence periods (2.5 periods, §9)
 ACK_MIN = 4  # acknowledgement samples before p_ack replaces d_in (then latched)
 ETX_ONE = 128  # fixed-point unit of the ETX
-ETX_MAX = 4 * ETX_ONE  # eligibility limit (ETX <= 4)
+ETX_MAX = 4 * ETX_ONE  # eligibility limit (ETX <= 4); cost cap of the root link
+UNREACH_RUN = 4  # consecutive failed samples of an unreachable root link (with a silence limit)
 MARGIN_LOW = 30  # tenths of dB: an eligible link becomes ineligible below
 MARGIN_HIGH = 60  # tenths of dB: an ineligible link becomes eligible again at
 SNR_SATURATION = 5  # dB: above, the packet SNR saturates (§5)
@@ -116,7 +142,10 @@ class Neighbour:
     counter (last frame counter); parent (set by routing); rx_bits,
     rx_span (reception window); ack_bits, ack_count (acknowledgement
     window), fail_at (ms, newest failure still in it, or None), latched
-    (`ACK_MIN` samples reached once); margin_ok (hysteresis state).
+    (`ACK_MIN` samples reached once); run (failed samples since the last
+    acknowledgement or ageing, saturated at `UNREACH_RUN`), answered (ms,
+    last acknowledgement, or creation of the entry); margin_ok (hysteresis
+    state).
     """
 
     def __init__(self):
@@ -137,6 +166,8 @@ class Neighbour:
         self.ack_count = 0
         self.fail_at = None
         self.latched = False
+        self.run = 0
+        self.answered = now
         self.m_count = 0
         self.m_next = 0
         self.m_sum = 0
@@ -183,15 +214,26 @@ class Neighbour:
             self.ack_count += 1
         if self.ack_count >= ACK_MIN:
             self.latched = True
-        if not ok:
+        if ok:
+            self._answered(now)
+        else:
             self.fail_at = now
+            if self.run < UNREACH_RUN:
+                self.run += 1
+
+    def _answered(self, now):
+        # An acknowledgement of the neighbour: ends the run of failed samples.
+        self.run = 0
+        self.answered = now
 
     def _age(self):
-        # Failures removed, successes kept (as the newest samples).
+        # Failures removed, successes kept (as the newest samples); the run,
+        # counted over the same failed samples, ends with them.
         n = popcount16(self.ack_bits)
         self.ack_count = n
         self.ack_bits = (1 << n) - 1
         self.fail_at = None
+        self.run = 0
 
     # --- ETX, margin, eligibility ----------------------------------------------
 
@@ -241,9 +283,32 @@ class Neighbour:
         elif average >= MARGIN_HIGH:
             self.margin_ok = True
 
-    def eligible(self):
-        """Return True if the link is eligible as a parent link (§9, MP12)."""
-        return self.margin_ok and self.m_count > 0 and self.etx() <= ETX_MAX
+    def link_etx(self):
+        """Return the ETX of the link cost (units of 1/ETX_ONE): capped at 4 towards the root."""
+        etx = self.etx()
+        if self.address == ROOT and etx > ETX_MAX:
+            return ETX_MAX
+        return etx
+
+    def reachable(self, now, silence):
+        """Return False once the last `UNREACH_RUN` failed samples are consecutive
+        and no acknowledgement came for silence ms (the silence limit, strict)."""
+        return self.run < UNREACH_RUN or now - self.answered < silence
+
+    def eligible(self, now=None, silence=None):
+        """Return True if the link is eligible as a parent link (§9, MP12).
+
+        Margin, and ETX <= 4, or for the link to the root its reachability
+        at now (ms) with the silence limit silence (ms); without now, the
+        root link is judged by its run alone (the silence taken as passed).
+        """
+        if not (self.margin_ok and self.m_count > 0):
+            return False
+        if self.address != ROOT:
+            return self.etx() <= ETX_MAX
+        if now is None:
+            return self.run < UNREACH_RUN
+        return self.reachable(now, silence)
 
     def age(self, now):
         """Return the time since the last frame (ms)."""
@@ -331,6 +396,18 @@ class NeighbourTable:
             end = now + silence_ms(self.period_ms)
             if end < self._next_expiry:
                 self._next_expiry = end
+        return True
+
+    def answered(self, address, now):
+        """Record an acknowledgement of address at now that gives no sample.
+
+        It ends the link's run of failed samples (reachability of the root).
+        Returns False if address is not in the table.
+        """
+        n = self.get(address)
+        if n is None:
+            return False
+        n._answered(now)
         return True
 
     def heard(self, address, counter, rank, version, rssi, snr, now):

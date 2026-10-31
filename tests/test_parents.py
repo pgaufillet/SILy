@@ -644,9 +644,65 @@ class KeepRoot(unittest.TestCase):
         self.assertEqual(p.next_parent(ROOT, 20), ROOT)
         self.assertEqual((p.members(), p.drops), ((ROOT, B), 0))
 
-    def test_ineligible_root_left(self):
-        self.net.etx(ROOT, 1, 5, 50)  # ETX 5 > 4
-        self._left(self.p.next_parent(ROOT, 100))
+    def _failing(self, until):
+        # Beacons of the root every 500 ms up to until; R's frames to it fail
+        # from 100 on, one failed sample per beacon interval, after its last
+        # acknowledgement at 50.
+        net = self.net
+        net.table.acked(ROOT, True, 50)
+        t = 100
+        while t <= until:
+            net.hear(ROOT, 0, t)
+            net.table.acked(ROOT, False, t)
+            t += 500
+
+    def test_unreachable_root_left(self):
+        # 4 consecutive failed samples by 1600, but kept until a silence
+        # limit since its last acknowledgement (§9 reachability).
+        silence = 5 * _PERIOD // 2
+        self._failing(2100)
+        self.assertEqual(self.net.table.get(ROOT).run, 4)
+        self.now = 50 + silence - 1
+        self._kept(self.p.next_parent(ROOT))
+        self._left(self.p.next_parent(ROOT, 50 + silence))
+
+    def test_unreachable_root_left_at_a_selection(self):
+        # No exhausted attempt needed: the next selection (a beacon) leaves it.
+        p = self.p
+        self._failing(2600)
+        events = p.recompute(2600)
+        self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
+        self.assertEqual((p.members(), p.rank, p.drops), ((), RANK_INFINITE, 0))
+
+    def test_reachable_root_kept_above_etx_4_its_cost_capped(self):
+        # ETX 9 to the root, acknowledged within the silence limit: kept,
+        # at a link cost of 32 (ETX 4), not 72 beyond the bound L + 56 = 64.
+        p = self.p
+        net = self.net
+        net.etx(ROOT, 1, 9, 200)
+        net.hear(ROOT, 0, 300)
+        self.assertEqual(net.table.get(ROOT).etx(), 9 * 128)
+        self.assertEqual(p.bound(), 64)
+        events = p.recompute(300)
+        self.assertEqual((p.members(), p.rank, p.cost, p.lowest), ((ROOT,), 32, 32, 8))
+        self.assertEqual(events, RANK_CHANGED | RANK_INCREASED)
+        self.now = 400
+        self.assertEqual(p.next_parent(ROOT), ROOT)
+        self.assertEqual((p.drops, p.detaches), (0, 0))
+
+    def test_cap_only_towards_the_root(self):
+        # The same ETX 9 on a relay link: ineligible (ETX > 4).
+        net = Net()
+        net.hear(A, 8, 0)
+        net.etx(A, 1, 9, 0)
+        p = Parents(net.table)
+        p.recompute(10)
+        self.assertEqual(p.members(), ())
+        # At ETX <= 4 towards the root, the cost of its ETX (no cap).
+        net.hear(ROOT, 0, 20)
+        net.etx(ROOT, 1, 3, 20)
+        p.recompute(30)
+        self.assertEqual((p.members(), p.rank), ((ROOT,), 24))
 
     def test_silent_root_left(self):
         # Silent from 2.5 periods on (strict, §9).
@@ -981,7 +1037,14 @@ def _reference(p, now):
     low = RANK_INFINITE if p.lowest is None else p.lowest
     cands = []
     for n in table.entries():
-        if n.version != p.version or not n.eligible():
+        if n.address == ROOT:
+            # Reachable: fewer than 4 failed samples in a row, or an
+            # acknowledgement within the silence limit (§9).
+            reach = n.run < 4 or now - n.answered < 5 * _PERIOD // 2
+            eligible = n.margin_ok and n.m_count > 0 and reach
+        else:
+            eligible = n.margin_ok and n.m_count > 0 and n.etx() <= 4 * 128
+        if n.version != p.version or not eligible:
             continue
         if n.rank >= low and n.address != p.preferred:
             continue
@@ -989,7 +1052,8 @@ def _reference(p, now):
             continue
         if p.poisoned_at is not None and n.heard <= p.poisoned_at:
             continue
-        cost = n.rank + max(8, int(8 * n.etx() / 128 + 0.5))
+        etx = min(n.etx(), 4 * 128) if n.address == ROOT else n.etx()
+        cost = n.rank + max(8, int(8 * etx / 128 + 0.5))
         if cost <= bound:
             cands.append((cost, -n.margin(), n.address, n.rank))
     cands.sort()
@@ -1022,6 +1086,8 @@ class _Scenario:
             clock=lambda: self.now,
         )
         self.addresses = [1 + self.below(0xFFFE) for _ in range(6 + self.below(15))]
+        if self.below(2):
+            self.addresses.append(ROOT)  # its link judged by reachability
         self.ranks = {}
 
     def below(self, n):

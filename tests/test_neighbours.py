@@ -11,6 +11,7 @@ from mesh.neighbours import (
     CAPACITY,
     ETX_MAX,
     ETX_ONE,
+    UNREACH_RUN,
     NeighbourTable,
     asymmetric,
     popcount16,
@@ -401,6 +402,139 @@ class FailureAgeing(unittest.TestCase):
         t.expire(10 + silence_ms(_PERIOD))
         self.assertEqual((n.ack_count, t.aged), (3, 1))
         self.assertEqual(len(t), 2)
+
+
+class RootReachability(unittest.TestCase):
+    """§9: the link to the root is ineligible once unreachable (U consecutive
+    failed samples and a silence limit without acknowledgement of the root),
+    not above ETX 4; its link cost's ETX is capped at 4."""
+
+    def _root(self, t, address=ROOT, now=0):
+        n = _hear(t, address, range(16), now=now)
+        # 1 of 5 acknowledged at now: ETX 5 > 4, the last 4 failed in a row.
+        for ok in (True, False, False, False, False):
+            t.acked(address, ok, now)
+        return n
+
+    def test_constants(self):
+        self.assertEqual(UNREACH_RUN, 4)
+
+    def test_root_eligible_above_etx_4_while_acknowledged_within_the_silence_limit(self):
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = self._root(t, now=100)
+        self.assertEqual((n.etx(), n.run, n.answered), (5 * ETX_ONE, 4, 100))
+        self.assertTrue(n.eligible(100, silence))
+        self.assertTrue(n.eligible(100 + silence - 1, silence))
+        # The same samples on another link: ineligible (ETX > 4).
+        m = self._root(t, A, now=100)
+        self.assertEqual(m.etx(), 5 * ETX_ONE)
+        self.assertFalse(m.eligible(100, silence))
+        self.assertFalse(m.eligible())
+
+    def test_unreachable_after_the_run_and_the_silence_limit(self):
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = self._root(t, now=100)
+        self.assertFalse(n.reachable(100 + silence, silence))
+        self.assertFalse(n.eligible(100 + silence, silence))
+        self.assertFalse(n.eligible())  # without the time: the run alone
+
+    def test_the_run_alone_or_the_silence_alone_does_not_suffice(self):
+        silence = silence_ms(_PERIOD)
+        # 3 consecutive failed samples, the last acknowledgement (the entry's
+        # creation) a silence limit old, the root heard: reachable.
+        t = _table()
+        n = _hear(t, ROOT, range(16))
+        for i, at in enumerate((0, 2000, 2400)):
+            _hear(t, ROOT, [16 + i], now=at)
+            t.acked(ROOT, False, at)
+        _hear(t, ROOT, [19], now=silence + 100)
+        self.assertEqual((n.run, n.answered, t.aged), (3, 0, 0))
+        self.assertTrue(n.eligible(silence + 100, silence))
+        t.acked(ROOT, False, silence + 100)  # the 4th
+        self.assertFalse(n.eligible(silence + 100, silence))
+        # 4 in a row (10 in the window), the last acknowledgement recent: reachable.
+        t = _table()
+        n = _hear(t, ROOT, range(16))
+        for ok in [False] * 6 + [True] + [False] * 4:
+            t.acked(ROOT, ok, 1000)
+        self.assertEqual((n.run, n.ack_count - n.acknowledged()), (4, 10))
+        self.assertTrue(n.eligible(1000 + silence - 1, silence))
+        self.assertFalse(n.eligible(1000 + silence, silence))
+
+    def test_an_acknowledgement_makes_it_reachable_again(self):
+        silence = silence_ms(_PERIOD)
+        for sample in (True, False):
+            t = _table()
+            n = self._root(t)
+            self.assertFalse(n.eligible(silence, silence))
+            if sample:
+                t.acked(ROOT, True, silence + 10)  # a success sample
+            else:
+                self.assertTrue(t.answered(ROOT, silence + 10))  # no sample (late)
+            self.assertEqual((n.run, n.answered), (0, silence + 10))
+            self.assertTrue(n.eligible(silence + 10, silence))
+            self.assertTrue(n.eligible(3 * silence, silence))  # no failure since
+            self.assertEqual(n.etx(), (6 * ETX_ONE + 1) // 2 if sample else 5 * ETX_ONE)
+        self.assertFalse(_table().answered(ROOT, 0))
+
+    def test_beacons_do_not_make_it_reachable(self):
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = _hear(t, ROOT, range(16))
+        t.acked(ROOT, True, 0)
+        for i, at in enumerate((0, 1000, 2000, 2400)):
+            _hear(t, ROOT, [16 + i], now=at)  # a beacon, and a failed sample
+            t.acked(ROOT, False, at)
+        _hear(t, ROOT, [20], now=silence)
+        self.assertEqual((n.run, n.answered, t.aged), (4, 0, 0))
+        self.assertFalse(n.eligible(silence, silence))
+
+    def test_ageing_ends_the_run_and_keeps_the_last_acknowledgement(self):
+        # The run is counted over the window's failed samples: when they age
+        # out, the link gets U more before it is left; the time of the last
+        # acknowledgement stays.
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = self._root(t, now=100)
+        _hear(t, ROOT, [16], now=100 + silence)
+        self.assertEqual((n.fail_at, n.run, n.answered, t.aged), (None, 0, 100, 1))
+        self.assertTrue(n.eligible(100 + silence, silence))
+        for i in range(UNREACH_RUN):
+            self.assertTrue(n.eligible(100 + silence, silence), i)
+            t.acked(ROOT, False, 100 + silence)
+        self.assertFalse(n.eligible(100 + silence, silence))
+
+    def test_new_entry_starts_reachable_its_creation_as_last_acknowledgement(self):
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        self._root(t, now=0)
+        t.remove(ROOT)
+        n = _hear(t, ROOT, [40], now=5000)
+        self.assertEqual((n.run, n.answered), (0, 5000))
+        for _ in range(UNREACH_RUN):
+            t.acked(ROOT, False, 5000)
+        self.assertTrue(n.eligible(5000 + silence - 1, silence))
+        self.assertFalse(n.eligible(5000 + silence, silence))
+
+    def test_margin_rule_unchanged(self):
+        t = _table()
+        n = _hear(t, ROOT, range(8), margin_x10=20)  # below 3 dB from its first frame
+        self.assertEqual(n.run, 0)
+        self.assertFalse(n.eligible(0, silence_ms(_PERIOD)))
+
+    def test_link_etx_capped_at_4_towards_the_root_only(self):
+        t = _table()
+        n = self._root(t)
+        self.assertEqual((n.etx(), n.link_etx()), (5 * ETX_ONE, ETX_MAX))
+        m = self._root(t, A)
+        self.assertEqual(m.link_etx(), 5 * ETX_ONE)
+        # At ETX <= 4 the ETX itself.
+        for ok in (True,) * 10:
+            t.acked(ROOT, ok, 0)
+        self.assertEqual(n.link_etx(), n.etx())
+        self.assertEqual(n.etx(), (15 * ETX_ONE + 5) // 11)
 
 
 class Expiry(unittest.TestCase):

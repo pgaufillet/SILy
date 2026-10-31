@@ -550,7 +550,8 @@ acknowledgement window and the time of its newest failure.
   perfect link (4 is the smallest count that ensures it, 3 keeps it below
   rank + 8), and a bad link becomes ineligible after 4 consecutive failures
   on a fresh window, 13 whatever its history (13 lost presences, i.e. 13
-  periods, when presence is the only traffic).
+  periods, when presence is the only traffic). The link to the root is
+  judged by its reachability instead (below).
 - **Silence limit**: a neighbour not heard for **2.5 presence periods** is
   silent (strict: heard less than 2.5 periods ago, it is not). Every node
   sends at least one frame per period jittered by ±10 % (§7: presence), so
@@ -563,9 +564,34 @@ acknowledgement window and the time of its newest failure.
   traffic).
 - **Margin**: SNR margin above the demodulation limit of the SF (§5),
   averaged over the last 8 frames. A link is **eligible** as a parent link if
-  its margin is ≥ 3 dB and its ETX ≤ 4; once ineligible, it becomes eligible
-  again at 6 dB (hysteresis, MP12). Among equal path costs, the larger margin
-  wins.
+  its margin is ≥ 3 dB and its ETX ≤ 4 (the link to the root: reachable,
+  below); once below 3 dB, it becomes eligible again at 6 dB (hysteresis,
+  MP12). Among equal path costs, the larger margin wins.
+- **Reachability of the root** (RPL neighbour unreachability detection
+  style): the link to the root is not tested against ETX ≤ 4 but is
+  ineligible while **unreachable**: the node's last **4** failed samples
+  towards the root are consecutive (the samples of the acknowledgement
+  window, one per batching delay: one lost batch counts once) **and** no
+  acknowledgement of the root came for one silence limit, measured from the
+  last one (an explicit entry of the root for the node, whatever the frame,
+  or a late one, §12), or from the entry's creation. Any acknowledgement of
+  the root ends the run and makes the link reachable again; beacons and
+  other frames do not. The probes are the node's own class 1 transmissions
+  towards the root (fresh attempts while the root is kept, §12): no extra
+  frame. Under hidden terminals the root's batches collide at a root child
+  (D28): its ETX to the root climbs above 4 while the root still answers
+  now and then, and ETX alone would remove the root, the root child's only
+  candidate under L, detaching its subtree. Reachability is read at each
+  selection (the root's beacons give one every half period). Failure
+  ageing ends the run with the failures it removes (the link then gets 4
+  more before it is left), the time of the last acknowledgement stays: a
+  node that stops sending to the root (it left it) sees it eligible again
+  a silence limit after its last failure, as with ETX. A dead uplink to a
+  root still heard is left about one silence limit after the last
+  acknowledgement (§9 repair times). The ETX of the root link used for its
+  **link cost is capped at 4** (cost 32): a reachable root at ETX above 8
+  would otherwise cost more than L + 56 and leave the candidates through
+  the bound (TLA+ `DODAG`, `Elig = "reach"`).
 - **Asymmetric links** (MP12): locally, a parent heard well (high `d_in`) but
   forwarding poorly (low `p_ack`) loses preference through its ETX; at the
   root, both directions of a link come from the two ends' topology reports
@@ -576,7 +602,8 @@ acknowledgement window and the time of its newest failure.
 
 - **Rank** (1 byte): 0 = root, 255 = infinite (no route, or poisoned). One
   hop of ETX 1 costs 8 (RPL MinHopRankIncrease); **link cost** = round(8 ×
-  ETX), from 8 to 32. **Path cost** through a neighbour m = rank(m) + link
+  ETX), from 8 to 32 (towards the root, the ETX capped at 4: its link is
+  eligible by reachability, above). **Path cost** through a neighbour m = rank(m) + link
   cost(m); above 254, m is not usable. The depth limit (8, MP13) is enforced
   by the root (§10); with ETX ≤ 3.9 per hop, 8 hops fit in the rank byte.
 - **Candidates**: neighbours with the same DODAG version, a rank **strictly
@@ -836,12 +863,12 @@ acknowledgement window and the time of its newest failure.
 
 | SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
 |---|---|---|---|---|---|---|---|---|
-| 7 | 1.6 | 12.0 | 182 | 75 | 7.0 | 13 | 12 | 11 |
-| 8 | 3.0 | 21.6 | 331 | 75 | 12.6 | 24 | 10 | 17 |
-| 9 | 5.3 | 38.4 | 588 | 150 | 22.4 | 42 | 10 | 15 |
-| 10 | 10.6 | 76.1 | 1161 | 300 | 44.8 | 84 | 10 | 14 |
-| 11 | 21.1 | 153.5 | 2352 | 750 | 89.7 | 169 | 10 | 12 |
-| 12 | 42.2 | 304.0 | 4642 | 1500 | 179.4 | 338 | 10 | 11 |
+| 7 | 1.6 | 12.0 | 92 | 75 | 7.0 | 13 | 12 | 11 |
+| 8 | 3.0 | 21.6 | 92 | 75 | 12.6 | 24 | 10 | 17 |
+| 9 | 5.3 | 38.4 | 183 | 150 | 22.4 | 42 | 10 | 15 |
+| 10 | 10.6 | 76.1 | 366 | 300 | 44.8 | 84 | 10 | 14 |
+| 11 | 21.1 | 153.5 | 915 | 750 | 89.7 | 169 | 10 | 12 |
+| 12 | 42.2 | 304.0 | 1830 | 1500 | 179.4 | 338 | 10 | 11 |
 
 (Times in seconds, from section E of `mesh_budget.py`; the "switch with
 traffic" columns are upper bounds, retry delays at their maximum from the
@@ -857,22 +884,28 @@ exchange lost on any hop, see below.)
   (forwarding delay 1, backoff 4, margin 1): 0.7 s at SF7, 2.2 s at SF9.
 - **Switch with traffic, parent root**: the root is not dropped after
   failed attempts while it is heard and its link eligible (§12): it is
-  left once its link turns ineligible (ETX above 4), or at the silence
-  limit if it is not heard at all ("switch, idle"), whichever comes first.
-  From a full acknowledgement window of successes, 13 failed samples make
-  the link ineligible (fewer after a short history: 4 failures out of the
-  first 4 samples). The attempts of one message go a root timeout and a
-  retry delay apart, with one more root timeout after each round of 3
-  (late acknowledgement, §12), and a failure is decided one root timeout
-  after its timeout: 18 root timeouts and 12 retry delays at most (64,
-  128, then 256 slots each: their range doubles with the consecutive
-  timeouts, §12, and makes up most of the figure). Root
-  timeout: its acknowledgement batching delay (§16) + one acknowledgement
-  frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9. Slower than a drop after 3
-  attempts would be (4 root timeouts: 9 s at SF7, 30 s at SF9), but a root
-  child does not detach, its subtree following, after frames lost to
-  collisions at the root (hidden terminals), the root being its only
-  candidate under L (TLA+ `DODAG`, Exhaust = "keeproot").
+  left once its link is unreachable (§9 link estimation: 4 consecutive
+  failed samples and one silence limit without acknowledgement of the
+  root), or at the silence limit if it is not heard at all ("switch,
+  idle"), whichever comes first. From the last acknowledgement: the
+  decision of the 4th failed sample (the attempts of one message go a root
+  timeout and a retry delay apart, with one more root timeout after each
+  round of 3, late acknowledgement, §12, and a failure is decided one root
+  timeout after its timeout: 6 root timeouts and 3 retry delays at most,
+  64, 128 then 256 slots, 37 s at SF7, 67 s at SF8) or the silence limit,
+  whichever comes last: the silence limit at every SF; then the next
+  selection, at the latest the root's next beacon (0.55 period): 3.05
+  presence periods, above "switch, idle", which counts no selection
+  delay. Root timeout: its acknowledgement batching delay (§16) + one
+  acknowledgement frame + 6 slots: 2.2 s at SF7, 7.5 s at SF9. Slower than
+  a drop after 3 attempts would be (4 root timeouts: 9 s at SF7, 30 s at
+  SF9), but a root child does not detach, its subtree following, after
+  frames lost to collisions at the root, nor after its ETX to the root
+  climbs above 4 while the root's batches collide at it but the root still
+  answers within the silence limit (hidden terminals, D28), the root being
+  its only candidate under L (TLA+ `DODAG`, Exhaust = "keeproot", Elig =
+  "reach"). Before reachability (ETX ≤ 4), 13 failed samples from a full
+  window: 331 s at SF8.
 - **Switch, idle**: no frame from the preferred parent for 2.5 presence
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
@@ -910,9 +943,10 @@ Findings:
 1. **With traffic, local repair takes seconds** through a relay at SF7–9
    (at most 12–38 s, retry delays included). The node switches to the next
    parent of its set without any exchange. Next to the root, the root is
-   kept while heard and eligible: a failed link to it is left within 182 s
-   at SF7, 331 s at SF8, 588 s at SF9 (ineligibility, or the silence limit
-   if the root is not heard).
+   kept while heard and eligible: a failed link to it is left within 92 s
+   at SF7–8, 183 s at SF9, about one silence limit after the root's last
+   acknowledgement (unreachability, or the silence limit if the root is
+   not heard).
 2. **Idle, local repair is bounded by the silence limit**, 2.5 presence
    periods (75 s at SF7–8, 150 s at SF9), and costs no airtime. The children
    of a failed relay re-attach and send their presence before the root
@@ -1300,14 +1334,20 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   kept** while it is a candidate apart from the drop (heard within the
   silence limit, link eligible, of the node's version, within the bound):
   one root timeout after the last attempt (late acknowledgement, above),
-  the message gets fresh attempts towards it, after a retry delay. Only
-  the silence limit or the link's ineligibility (its failed samples, §9)
-  removes the root. Under the test against L the root is a root child's
-  only candidate: a drop would be a detach, its subtree following, after
-  mere collisions at the root (TLA+ `DODAG_line_drop_rootloss`; kept:
-  `DODAG_*_keeproot_*`, no silent loss and the root never dropped with up
-  to 3 losses in any pattern, left over a dead link). Cost: a failed link
-  to the root is left later (§9 repair table).
+  the message gets fresh attempts towards it, after a retry delay: these
+  transmissions are the probes of the root's reachability. Only the
+  silence limit or the link's ineligibility (its margin, or unreachable: 4
+  consecutive failed samples and a silence limit without acknowledgement
+  of the root, §9; not ETX above 4) removes the root. Under the test
+  against L the root is a root child's only candidate: a drop would be a
+  detach, its subtree following, after mere collisions at the root (TLA+
+  `DODAG_line_drop_rootloss`; kept: `DODAG_*_keeproot_*`, no silent loss
+  and the root never dropped with up to 3 losses in any pattern, left over
+  a dead link), and so would the root link's ETX above 4 after the root's
+  batches collide at the root child (D28, `DODAG_line_etx_detach`;
+  reachability: `DODAG_*_reach_*`). Cost: a failed link to the root is
+  left later, about one silence limit after the root's last
+  acknowledgement (§9 repair table).
 - **Downward failure** (source route): error to the root (port 4, reason 1 or
   2); the root reroutes (§10) and sends the message again, being its origin
   (or, for P2P, the origin of the downward half).
@@ -1983,8 +2023,12 @@ in the DODAG information message (§9), so every node applies them:
   its frames reads as a perfect link until new samples arrive; a link whose
   failures aged out reads good again until it is used (a one-way link heard
   well is retried every 2.5 periods); a bad link seen only through presence
-  needs 13 lost presences to become ineligible. Revisit if repairs choose
-  bad links.
+  needs 13 lost presences to become ineligible; the link to the root is
+  left only after a silence limit without its acknowledgement, so a root
+  child keeps a root whose batches mostly collide at it (in the simulator's
+  star with the root hidden, none reached the root child for longer than
+  that during the burst: the root was left all the same, D28). Revisit if
+  repairs choose bad links.
 - Fairness parameters (quota 16 per origin above half a queue, §7): checked
   in a host scenario with a flooding node; to check on the bench.
 - Parameters chosen on paper (Imin, k, MaxRankIncrease, attempts,

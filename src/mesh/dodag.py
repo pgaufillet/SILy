@@ -22,7 +22,11 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   message of a new version is adopted first), when a member falls silent
   (the silence limit, `mesh.neighbours.silence_ms`: 2.5 presence periods),
   when a member's acknowledgement failures age out (its ETX may fall),
-  when the detach hold ends and when the answer window closes.
+  when the detach hold ends and when the answer window closes. The
+  reachability of the root's link (a silence limit since its last
+  acknowledgement, `mesh.neighbours`) gets no timer of its own: it is read
+  at these selections, the root's beacons giving one every half presence
+  period while it is heard.
 - **Advertisements**: when the Trickle timer says so, a frame to every
   neighbour holding one DODAG information message (23 B), priority 1 (every
   Trickle advertisement follows a reset, §6); one still queued (the root

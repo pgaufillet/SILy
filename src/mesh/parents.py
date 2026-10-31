@@ -5,7 +5,9 @@ Integer arithmetic; ranks are the 1-byte header values (0 = root, 255 =
 infinite: no route or poisoned).
 
 - **Link cost** = round(8 × ETX) (`MIN_HOP` = 8 per hop of ETX 1, RPL
-  MinHopRankIncrease), 8 to 32 on an eligible link; **path cost** through a
+  MinHopRankIncrease), 8 to 32 on an eligible link (towards the root, the
+  ETX capped at 4, `Neighbour.link_etx`: its link is eligible by
+  reachability, not ETX <= 4, `mesh.neighbours`); **path cost** through a
   neighbour = its rank + link cost; above 254 the neighbour is not usable.
 - **Candidates**: neighbours of the node's DODAG version, of rank strictly
   lower than **L**, the lowest rank the node has advertised since it
@@ -29,9 +31,11 @@ infinite: no route or poisoned).
   the message gets fresh attempts towards it. Under the test against L the
   root is a root child's only candidate, so a drop would be a detach, its
   subtree following, after mere collisions at the root (hidden
-  terminals); only the silence limit or the link's ineligibility (its
-  failed samples, ETX above 4) removes the root (TLA+ `DODAG`, Exhaust =
-  "keeproot"). Any other parent is dropped.
+  terminals); only the silence limit or the link's ineligibility (margin,
+  or unreachable: `UNREACH_RUN` consecutive failed samples and a silence
+  limit without acknowledgement of the root, `mesh.neighbours`) removes
+  the root (TLA+ `DODAG`, Exhaust = "keeproot", Elig = "reach"). Any
+  other parent is dropped.
 - **Behind a newer version** (``behind``, set by the Trickle step when a
   frame of a newer version is heard; cleared by `on_new_version` and the
   detach): the preferred parent stays a candidate once it has moved to a
@@ -220,17 +224,18 @@ class Parents:
                 return None  # not newer
         elif n.rank >= lowest and n.address != self.preferred:
             return None
-        if now - n.heard >= silence_ms(self.table.period_ms):
+        silence = silence_ms(self.table.period_ms)
+        if now - n.heard >= silence:
             return None
         if self.poisoned_at is not None and n.heard <= self.poisoned_at:
             return None
         if drops and self._dropped.get(n.address, -1) == n.counter:
             return None
-        if not n.eligible():
+        if not n.eligible(now, silence):
             return None
         if across:
             return self.rank
-        cost = n.rank + link_cost(n.etx())
+        cost = n.rank + link_cost(n.link_etx())
         return cost if cost <= self.bound() else None
 
     # --- Entry points --------------------------------------------------------------

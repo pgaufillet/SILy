@@ -661,6 +661,70 @@ class LateRootAcknowledgements(_RootCase):
         self.assertEqual((entry.ack_count, entry.acknowledged()), (3, 1))
 
 
+class RootRun(_RootCase):
+    """§9 reachability of the root: the run of consecutive failed samples
+    counts the acknowledgement window's failures (one per lost batch) and
+    ends at any acknowledgement of the root, explicit or late."""
+
+    def test_one_lost_batch_one_failure_of_the_run(self):
+        r, root, now = self._relay()
+        ends = []
+        for i in range(3):
+            f, now = self._send(r, now, i)
+            ends.append(now)
+            _rx(root, now, f)
+        _run(root, now, ends[0] + root.reliable.batch_ms)  # the batch, lost
+        _run(r, now, ends[2] + 2 * r.reliable.timeout_ms(ROOT))
+        self.assertEqual(r.neighbours.get(ROOT).run, 1)
+
+    def test_acknowledgement_ends_the_run(self):
+        # Two frames fail (a batching delay apart), then the root
+        # acknowledges a third one: the run ends, the time is recorded.
+        r, root, now = self._relay()
+        _, end1 = self._send(r, now, 0)
+        _run(r, end1, end1 + r.reliable.batch_ms)
+        _, end2 = self._send(r, end1 + r.reliable.batch_ms, 1)
+        timeout = r.reliable.timeout_ms(ROOT)
+        _, now = _run(r, end2, end2 + 2 * timeout)
+        entry = r.neighbours.get(ROOT)
+        self.assertEqual(entry.run, 2)
+        r.submit(30, 1, ROOT, b"z")
+        f, _, end = _next_frame(r, now, now)
+        _rx(root, end, f)
+        (ack,), now = _run(root, end, end + root.reliable.batch_ms)
+        _rx(r, now, ack)
+        self.assertEqual((entry.run, entry.answered), (0, now))
+
+    def test_acknowledgement_after_the_failure_decided_ends_the_run(self):
+        # The root's acknowledgement of R's first transmission comes after
+        # its failure was decided (no sample, a late one): it ends the run.
+        r, root, now = self._relay()
+        f, end = self._send(r, now, 0)
+        _rx(root, end, f)
+        (ack,), _ = _run(root, end, end + root.reliable.batch_ms)
+        timeout = r.reliable.timeout_ms(ROOT)
+        f2, _, end2 = _next_frame(r, end, end + timeout + r.reliable.retry_window_ms())
+        self.assertIsNotNone(f2)  # the retry, lost
+        _, now = _run(r, end2, end + 2 * timeout)
+        entry = r.neighbours.get(ROOT)
+        self.assertEqual((entry.run, self._failures(r), len(r.queue)), (1, 1, 1))
+        _rx(r, now, ack)
+        self.assertEqual(len(r.queue), 0)
+        self.assertEqual((entry.run, entry.answered, self._failures(r)), (0, now, 1))
+        self.assertEqual(entry.acknowledged(), 0)  # no sample: its failure stays
+
+    def test_acknowledgement_of_another_node_does_not_end_the_run(self):
+        r, root, now = self._relay()
+        _, end = self._send(r, now, 0)
+        _, now = _run(r, end, end + 2 * r.reliable.timeout_ms(ROOT))
+        entry = r.neighbours.get(ROOT)
+        self.assertEqual(entry.run, 1)
+        root.reliable.acknowledge(X, 7, now)
+        (ack,), now = _run(root, now, now + root.reliable.batch_ms)
+        _rx(r, now, ack)
+        self.assertEqual(entry.run, 1)
+
+
 class KeptNextHop(_RootCase):
     """§12 upward failure: "next hop after failure" returning the same hop
     (routing keeps the root) gives the message fresh attempts towards it."""
