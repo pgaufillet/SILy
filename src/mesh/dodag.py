@@ -1,10 +1,18 @@
 """DODAG version, DODAG information and repair timers, node side (MESH_DESIGN §9; §11 port 9).
 
 **DODAG information** (port 9, link-local, class 0): empty = solicitation;
-otherwise 8 B: flags 1 B (bit 0 topology report on change), presence period
+otherwise 9 B: flags 1 B (bit 0 topology report on change), presence period
 2 B (s), topology period 2 B (s), Imin 1 B (slots), maximum rank increase
-1 B, regional profile identifier 1 B (§4); little-endian. Its version is the
-frame header's. `encode_info` / `decode_info`.
+1 B, regional profile identifier 1 B (§4), root sequence 1 B (the one the
+sender holds, §9); little-endian. Its version is the frame header's.
+`encode_info` / `decode_info` (the parameters, `DodagInfo`); the sequence
+apart (`encode_info`'s ``sequence``, `frame_sequence`).
+
+**Root sequence** (8 bits, serial arithmetic, `mesh.parents`): the root
+increments it at each beacon; every DODAG information and every node's own
+presence (first hop, mode 6, `mesh.reports`) carry the sequence the sender
+holds, other messages none (a solicitation included). `frame_sequence`
+reads it from a frame's messages.
 
 **Versions** (4 bits, RFC 1982 serial arithmetic): `compare_versions` says
 whether a version is newer or older than another; versions 8 apart are not
@@ -17,6 +25,14 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
 `mesh.trickle.Trickle`, and keeps the header fields ``engine.rank`` and
 ``engine.dodag_version`` up to date.
 
+- **Root sequence read from every frame** (§9): every decoded frame that
+  carries one (`frame_sequence`), whatever its link destination (the link
+  engine's ``decoded``: a parent's presence goes to the grandparent, a
+  neighbour's to its own parent), records it as its sender's
+  (`NeighbourTable.set_sequence`), before its messages are processed; the
+  selection then takes the preferred parent's when newer
+  (`mesh.parents`). Frames of rank 255 too: a neighbour of rank 255 is no
+  candidate, its next frames replace the value.
 - **Selection**: the parent set is recomputed after every step in which a
   frame was heard (after the frame's messages, so that a DODAG information
   message of a new version is adopted first), when a member falls silent
@@ -28,7 +44,7 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   at these selections, the root's beacons giving one every half presence
   period while it is heard, a relay's presence one every period.
 - **Advertisements**: when the Trickle timer says so, a frame to every
-  neighbour holding one DODAG information message (23 B), priority 1 (every
+  neighbour holding one DODAG information message (24 B), priority 1 (every
   Trickle advertisement follows a reset, §6); one still queued (the root
   beacon) takes the new one's place, raised to priority 1 if needed. Every
   frame sent counts as sent for suppression, every frame of the own version
@@ -49,8 +65,9 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   a descendant that lost the poison may still advertise, in an older
   version too); one that has adopted nothing since boot adopts any
   version, its own included. It takes the network-wide parameters
-  (periods, Imin, maximum rank increase, flags), resets L
-  (`Parents.on_new_version`, which keeps a detach hold and its rejoin
+  (periods, Imin, maximum rank increase, flags), resets L and takes the
+  information's root sequence (`Parents.on_new_version`: sequences are
+  compared within a version; it keeps a detach hold and its rejoin
   rule) and its Trickle timer, the DODAG information owed (port 9 messages
   only suppress it); a node without route resets it when it attaches (in
   an answer window, below). A message with another regional profile
@@ -92,15 +109,16 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   neighbours reset their Trickle timers at the end of the solicitation (at
   most one slot on air) and answer before Imin; an answer then waits at
   most one busy channel sense (a backoff of at most `mesh.link.CW_MIN`
-  slots, §8) and takes at most 1.25 slots on air (23 B): 1 + 4 + 2 slots,
+  slots, §8) and takes at most 1.25 slots on air (24 B): 1 + 4 + 2 slots,
   and one more for the step. At its close the node takes the best
   candidate heard (lowest path cost, §9), or with none the first candidate
   heard afterwards (selection at each frame heard). A version adopted in
   the window keeps it (`Parents.on_new_version`); at boot, the first DODAG
   information is adopted at once (parameters), the parent selected at the
   close of the window if it is still open.
-- **Root**: rank 0, never adopts. **Beacon** (§9, §16): one DODAG
-  information advertisement, priority 2, every half presence period
+- **Root**: rank 0, never adopts. **Beacon** (§9, §16): the root
+  sequence incremented, then one DODAG information advertisement,
+  priority 2, every half presence period
   jittered by ±10 % (§7), the timer re-armed from each firing; it runs
   beside Trickle, whose resets (solicitation, older version, new version)
   send their priority-1 advertisements without postponing or suppressing
@@ -111,7 +129,12 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   two lost beacons could leave a gap of 3.3 periods and detach a subtree.
   `set_version` issues a version (and new parameters) and re-arms the
   beacon on the new period: the policy deciding when (global repair, §9)
-  belongs to the root's later step.
+  belongs to the root's later step. **Root sequence at boot** (§9): the
+  one after the newest heard while the root listens, any value (0) if
+  none; the root of this step listens until it queues its first DODAG
+  information (the version is given, ``version``: the boot listening of a
+  presence period belongs with the global repair policy), unless a first
+  sequence is given (``sequence``).
 
 ``next_hop`` gives the preferred parent for upward messages (the link
 engine's ``next_hop``, set by `mesh.routing.Routing`).
@@ -130,7 +153,9 @@ detached node neither answers solicitations nor resets on older versions
 (it has no route to advertise); frames of rank 255 are neither counted nor
 compared (they carry no version, §9); a version 8 apart is ignored and
 counted (``incomparable``); a DODAG information message with a presence
-period or Imin of 0 is malformed.
+period or Imin of 0 is malformed; the newest of the sequences heard by the
+root at boot is the newest in serial order of each one against the newest
+so far (they come from one root, close together).
 """
 
 from mesh.frame import BROADCAST, FIRST_HOP, LINK_LOCAL, RANK_INFINITE, UPWARD, Message
@@ -141,16 +166,19 @@ from mesh.parents import (
     MAX_RANK_INCREASE,
     PARENT_CHANGED,
     RANK_INCREASED,
+    SEQUENCE_MASK,
     VERSION_MASK,
     Parents,
+    sequence_newer,
 )
 from mesh.platform import jittered, randbelow
-from mesh.ports import DODAG_INFO
+from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.ports import priority as port_priority
 from mesh.trickle import IMIN_SLOTS, URGENT, Trickle
 from mesh.txqueue import accepted
 
-INFO_SIZE = 8
+INFO_SIZE = 9
+INFO_SEQUENCE = 8  # offset of the root sequence in the DODAG information
 DESYNC_SLOTS = 4  # random delay of the poison and solicitations (CW_MIN slots, §8)
 TOPOLOGY_ON_CHANGE = 0x01  # flags bit 0: topology report on change (deployment, §17)
 HOLD_IMIN = 2  # detach hold, in Imin (§9)
@@ -217,12 +245,13 @@ def default_info(sf, profile):
     )
 
 
-def encode_info(info, buf=None):
-    """Return the 8-byte payload of info (written into buf, a bytearray, if given).
+def encode_info(info, buf=None, sequence=0):
+    """Return the 9-byte payload of info and sequence (into buf, a bytearray, if given).
 
     Raises ValueError for a field out of range.
     """
     for value, high in (
+        (sequence, SEQUENCE_MASK),
         (info.flags, 0xFF),
         (info.presence_s, 0xFFFF),
         (info.topology_s, 0xFFFF),
@@ -242,6 +271,7 @@ def encode_info(info, buf=None):
     buf[5] = info.imin_slots
     buf[6] = info.max_increase
     buf[7] = info.profile
+    buf[INFO_SEQUENCE] = sequence
     return buf
 
 
@@ -249,6 +279,7 @@ def decode_info(payload):
     """Return the `DodagInfo` of a port 9 payload, None for a solicitation (empty).
 
     Raises ValueError for another length, a presence period or Imin of 0.
+    Its root sequence is the byte at `INFO_SEQUENCE`.
     """
     n = len(payload)
     if n == 0:
@@ -266,6 +297,23 @@ def decode_info(payload):
     if not info.presence_s or not info.imin_slots:
         raise ValueError("bad parameters")
     return info
+
+
+def frame_sequence(messages):
+    """Return the root sequence a frame's messages carry, else None (§9, §11).
+
+    The DODAG information (port 9, `INFO_SIZE` bytes) carries it at
+    `INFO_SEQUENCE`, the sender's own presence (port 1, mode 6) as its first
+    byte (`mesh.reports`); a solicitation and the other messages carry none.
+    """
+    for m in messages:
+        port = m.port
+        if port == DODAG_INFO:
+            if m.mode == LINK_LOCAL and len(m.payload) == INFO_SIZE:
+                return m.payload[INFO_SEQUENCE]
+        elif port == PRESENCE and m.mode == FIRST_HOP and len(m.payload) > 1:
+            return m.payload[0]
+    return None
 
 
 class Counters:
@@ -293,14 +341,17 @@ class Dodag:
     root issues, or a node's parameters until it adopts the network's
     (`default_info` of the engine's SF by default); version: the root's
     first DODAG version; parents: its `Parents` (built on the engine's
-    neighbour table by default).
+    neighbour table by default); sequence: the root's first root sequence
+    (None: the one after the newest heard before its first DODAG
+    information, 0 if none).
 
-    Read: ``info``, ``version``, ``configured`` (a version adopted since
-    boot; always True on the root), ``attached``, ``imin_ms``,
-    ``topology_ms``, ``parents``, ``trickle``, ``counters``.
+    Read: ``info``, ``version``, ``sequence`` (the root sequence its frames
+    carry), ``configured`` (a version adopted since boot; always True on
+    the root), ``attached``, ``imin_ms``, ``topology_ms``, ``parents``,
+    ``trickle``, ``counters``.
     """
 
-    def __init__(self, engine, profile, info=None, version=0, parents=None):
+    def __init__(self, engine, profile, info=None, version=0, parents=None, sequence=None):
         self.engine = engine
         self.root = engine.is_root
         self.profile = profile
@@ -331,13 +382,17 @@ class Dodag:
         self._rank_advert = None  # time of the last advertisement after a rank error
         self._solicit = None  # ... and of the last solicitation
         self._info_owed = False  # a version adopted: Trickle reset with its information owed
+        self._seq = sequence & SEQUENCE_MASK if self.root and sequence is not None else None
+        self._newest = None  # root at boot: newest sequence heard before its first advertisement
         self.changed = None  # function(events, now) after events are applied
         # Extension points: each wrapper calls the engine's previous method.
         self._base_heard = engine.heard
+        self._base_decoded = engine.decoded
         self._base_sent = engine.sent
         self._base_tick = engine.tick
         self._base_timer = engine.timer
         engine.heard = self._heard
+        engine.decoded = self._decoded
         engine.sent = self._sent
         engine.tick = self._tick
         engine.timer = self._timer
@@ -351,8 +406,13 @@ class Dodag:
         """True on the root and on a node with a preferred parent."""
         return self.root or self.parents.rank != RANK_INFINITE
 
+    @property
+    def sequence(self):
+        """The root sequence the board's frames carry (None: none yet)."""
+        return self._seq if self.root else self.parents.carried
+
     def _apply_info(self, info):
-        encode_info(info, self._buf)
+        encode_info(info, self._buf, self._buf[INFO_SEQUENCE])
         self.info = info
         engine = self.engine
         self.imin_ms = info.imin_slots * engine.slot_ms
@@ -435,6 +495,19 @@ class Dodag:
                 self._ask(now)
         return n
 
+    def _decoded(self, header, messages, entry, now):
+        self._base_decoded(header, messages, entry, now)
+        if entry is None:
+            return
+        seq = frame_sequence(messages)
+        if seq is None:
+            return
+        self.engine.neighbours.set_sequence(header.source, seq)
+        if self.root and self._seq is None:
+            newest = self._newest
+            if newest is None or sequence_newer(seq, newest):
+                self._newest = seq
+
     def _ask(self, now):
         # Solicit in this step's tick, at most once per Imin.
         if self._ask_at is None:
@@ -482,7 +555,7 @@ class Dodag:
                 p = self.parents
                 adopt = cmp != 0 and p.hold_until is None and not p.soliciting
             if adopt or not self.configured:
-                self._adopt(version, info, now)
+                self._adopt(version, info, payload[INFO_SEQUENCE], now)
                 return
         if cmp == 0 and self.attached:
             self.trickle.heard(True)
@@ -494,6 +567,7 @@ class Dodag:
             self._routing(now)
         elif self._beacon_at is not None and now >= self._beacon_at:
             self._beacon_at = self._next_beacon(now)
+            self._seq = (self._root_sequence() + 1) & SEQUENCE_MASK
             self._advertise(False)
         due = self.trickle.poll(now)
         if due:
@@ -503,6 +577,8 @@ class Dodag:
         events = self.parents.events()
         if events:
             self._apply(events, now)
+        if not self.root:
+            self._carry()  # a sequence taken in this step: the advertisement queued carries it
 
     def _timer(self):
         t = self._base_timer()
@@ -613,7 +689,7 @@ class Dodag:
         hold = self.parents.hold_until
         self._solicit_at = (now if hold is None else hold) + self._desync()
 
-    def _adopt(self, version, info, now):
+    def _adopt(self, version, info, sequence, now):
         self._apply_info(info)
         self.version = version
         self.engine.dodag_version = version
@@ -621,17 +697,33 @@ class Dodag:
         self.counters.adoptions += 1
         self._ask_at = None
         self._dirty = False
-        self.parents.on_new_version(version, now)
+        self.parents.on_new_version(version, now, sequence)
         self._info_owed = True  # at once, or once attached (answer window)
         self._apply(self.parents.events(), now)
 
     # --- Sending -----------------------------------------------------------------------------
+
+    def _root_sequence(self):
+        # Root: its sequence; at the end of its boot listening, the one after
+        # the newest heard, 0 if none.
+        if self._seq is None:
+            newest = self._newest
+            self._seq = 0 if newest is None else (newest + 1) & SEQUENCE_MASK
+        return self._seq
+
+    def _carry(self):
+        # The advertisement payload carries the sequence held (a queued one
+        # included: the payload is shared and updated in place).
+        seq = self._root_sequence() if self.root else self.parents.carried
+        if seq is not None:
+            self._buf[INFO_SEQUENCE] = seq
 
     def _queued(self, entry):
         return entry is not None and self.engine.queue.holds(entry[0], entry[1])
 
     def _advertise(self, urgent):
         """Queue an advertisement, unless one is still queued (raised to urgent if needed)."""
+        self._carry()
         entry = self._advert
         if self._queued(entry):
             if urgent:  # a queued root beacon (priority 2) takes priority 1

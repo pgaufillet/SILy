@@ -12,6 +12,7 @@ from mesh import profile as profiles
 from mesh.counter import FrameCounter
 from mesh.dodag import (
     DESYNC_SLOTS,
+    INFO_SEQUENCE,
     INFO_SIZE,
     TOPOLOGY_S,
     WINDOW_SLOTS,
@@ -21,11 +22,21 @@ from mesh.dodag import (
     decode_info,
     default_info,
     encode_info,
+    frame_sequence,
 )
-from mesh.frame import BROADCAST, LINK_LOCAL, RANK_INFINITE, ROOT, UPWARD, Header, Message
+from mesh.frame import (
+    BROADCAST,
+    FIRST_HOP,
+    LINK_LOCAL,
+    RANK_INFINITE,
+    ROOT,
+    UPWARD,
+    Header,
+    Message,
+)
 from mesh.link import open_link
 from mesh.parents import MAX_RANK_INCREASE
-from mesh.ports import DODAG_INFO
+from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.radio import CHANNEL, RX, SENSE, TX_DONE
 from mesh.replay import ReplayTable
 from mesh.security import KeyRing, Security
@@ -66,9 +77,14 @@ class Peer:
         self.security.seal(buf, n)
         return bytes(buf[:n])
 
-    def info(self, rank, version, info=INFO):
-        payload = encode_info(info)
+    def info(self, rank, version, info=INFO, seq=0):
+        payload = encode_info(info, None, seq)
         return self.frame(rank, version, [Message(LINK_LOCAL, 0, DODAG_INFO, payload)])
+
+    def presence(self, rank, version, seq, parent=ROOT):
+        """Its own presence (mode 6, root sequence seq) to parent: overheard by the bench."""
+        msg = Message(FIRST_HOP, 0, PRESENCE, bytes([seq, 0, 0x5A]))
+        return self.frame(rank, version, [msg], parent)
 
     def solicitation(self, version=0):
         return self.frame(RANK_INFINITE, version, [Message(LINK_LOCAL, 0, DODAG_INFO, b"")])
@@ -80,7 +96,7 @@ class Bench:
     ``frames`` lists (time, header, messages) of the frames it sent.
     """
 
-    def __init__(self, address=N, seed=1, info=None, version=0):
+    def __init__(self, address=N, seed=1, info=None, version=0, sequence=None):
         platform = FakePlatform(XorShift32(seed))
         engine = open_link(
             address,
@@ -91,7 +107,7 @@ class Bench:
             _EU,
             7,
         )
-        self.dodag = Dodag(engine, EU, info, version)
+        self.dodag = Dodag(engine, EU, info, version, sequence=sequence)
         engine.next_hop = self.dodag.next_hop
         self.engine = engine
         self.imin = self.dodag.imin_ms
@@ -200,9 +216,10 @@ class _Case(unittest.TestCase):
 class Codec(unittest.TestCase):
     def test_reference_payload(self):
         info = DodagInfo(1, 30, 0x1B4, 32, 56, 0xFF)
-        payload = bytes(encode_info(info))
-        self.assertEqual(payload, bytes([1, 30, 0, 0xB4, 1, 32, 56, 0xFF]))
+        payload = bytes(encode_info(info, None, 0xC3))
+        self.assertEqual(payload, bytes([1, 30, 0, 0xB4, 1, 32, 56, 0xFF, 0xC3]))
         self.assertEqual(decode_info(payload), info)
+        self.assertEqual(payload[INFO_SEQUENCE], 0xC3)
 
     def test_round_trip_extremes(self):
         info = DodagInfo(0xFF, 0xFFFF, 0xFFFF, 0xFF, 0xFF, 0)
@@ -213,7 +230,7 @@ class Codec(unittest.TestCase):
 
     def test_bad_payloads(self):
         good = bytes(encode_info(INFO))
-        for bad in (good[:7], good + b"\x00", b"\x00"):
+        for bad in (good[:8], good + b"\x00", b"\x00"):
             self.assertRaises(ValueError, decode_info, bad)
         no_presence = bytearray(good)
         no_presence[1] = no_presence[2] = 0
@@ -230,10 +247,26 @@ class Codec(unittest.TestCase):
             DodagInfo(0, 30, 180, 32, 56, 256),
         ):
             self.assertRaises(ValueError, encode_info, bad)
+        for seq in (-1, 256):
+            self.assertRaises(ValueError, encode_info, INFO, None, seq)
 
-    def test_advertisement_frame_is_23_bytes(self):
+    def test_advertisement_frame_is_24_bytes(self):
         msg = Message(LINK_LOCAL, 0, DODAG_INFO, bytes(INFO_SIZE))
-        self.assertEqual(frame.frame_size([msg]), 23)
+        self.assertEqual(frame.frame_size([msg]), 24)  # §11: 8 B of parameters + sequence
+
+    def test_frame_sequence(self):
+        # Carried by the DODAG information and the sender's own presence
+        # (mode 6, first byte); not by a solicitation, a forwarded presence
+        # (mode 1) or other messages.
+        info = Message(LINK_LOCAL, 0, DODAG_INFO, encode_info(INFO, None, 77))
+        own = Message(FIRST_HOP, 0, PRESENCE, bytes([78, 0, 0x5A]))
+        data = Message(LINK_LOCAL, 0, 20, b"data")
+        self.assertEqual(frame_sequence([data, info]), 77)
+        self.assertEqual(frame_sequence([own]), 78)
+        forwarded = Message(UPWARD, 0, PRESENCE, bytes([0x10, 0, 0, 0x5A]), origin=0x20)
+        solicitation = Message(LINK_LOCAL, 0, DODAG_INFO, b"")
+        self.assertIsNone(frame_sequence([forwarded, solicitation, data]))
+        self.assertIsNone(frame_sequence([Message(FIRST_HOP, 0, PRESENCE, b"\x01")]))
 
     def test_default_parameters_follow_the_sf(self):
         info = default_info(9, EU)
@@ -512,7 +545,9 @@ class Adoption(_Case):
         b.steady([(self.p, 16, 3)])
         d = b.dodag
         b.rx(self.q.frame(16, 4))  # Q moved to version 4; P has not
-        b.rx(self.s.frame(4, 3))  # path cost 12, better than P's by 12
+        # S's presence to its parent, overheard: at the node's sequence (0),
+        # path cost 12, better than P's by 12.
+        b.rx(self.s.presence(4, 3, 0))
         self.assertEqual((d.parents.preferred, b.engine.rank), (S, 12))
         self.assertEqual(d.counters.poisons, 0)
         self.assertTrue(d.parents.behind)
@@ -678,7 +713,7 @@ class Resets(_Case):
 
     def test_rank_increase_resets(self):
         b = self.attached(3)
-        b.rx(self.q.frame(20, 3))
+        b.rx(self.q.presence(20, 3, 0))  # overheard: Q at the node's sequence
         b.steady([(self.p, 16, 3), (self.q, 20, 3)])
         self.assertEqual(b.dodag.parents.members(), (P, Q))
         last_p = b.now
@@ -726,9 +761,11 @@ class Resets(_Case):
         # first, then S, better by less than the switch threshold.
         close = sol[0][0] + b.imin + WINDOW_SLOTS * b.engine.slot_ms
         self.assertEqual(d.parents.window_until, close)
-        b.rx(self.q.frame(20, 3))
+        # Their presences overheard, at the node's sequence (0, kept with L
+        # across the detach): below L (24), feasible.
+        b.rx(self.q.presence(20, 3, 0))
         b.advance(b.now + b.imin // 2)
-        b.rx(self.s.frame(12, 3))
+        b.rx(self.s.presence(12, 3, 0))
         b.advance(close - 1)
         self.assertEqual((d.parents.preferred, b.engine.rank), (None, RANK_INFINITE))
         # Rejoined at the close through the best one heard after the solicitation.
@@ -751,11 +788,12 @@ class Resets(_Case):
         b.advance(close)
         self.assertIsNone(d.parents.window_until)
         self.assertEqual(b.engine.rank, RANK_INFINITE)
-        # Nothing heard in the window: the first candidate heard is taken.
+        # Nothing heard in the window: the first candidate heard is taken
+        # (presences overheard at the node's sequence, below L).
         b.advance(close + 500)
-        b.rx(self.q.frame(20, 3))
+        b.rx(self.q.presence(20, 3, 0))
         self.assertEqual((d.parents.preferred, b.engine.rank), (Q, 28))
-        b.rx(self.s.frame(12, 3))  # better by 8: kept (switch threshold 12)
+        b.rx(self.s.presence(12, 3, 0))  # better by 8: kept (switch threshold 12)
         self.assertEqual((d.parents.preferred, b.engine.rank), (Q, 28))
 
     def test_detached_until_the_solicitation_goes_on_air(self):
@@ -822,6 +860,63 @@ class Resets(_Case):
         self.assertEqual(len(b.solicitations(detach)), 3)
 
 
+class Sequence(_Case):
+    """The root sequence of a node (§9): read from every frame heard,
+    overheard ones included, held from the preferred parent, carried by the
+    DODAG information."""
+
+    def test_adoption_takes_the_sequence_of_the_information(self):
+        b = Bench()
+        b.advance(100)
+        b.rx(self.p.info(16, 3, seq=77))
+        p = b.dodag.parents
+        self.assertEqual((p.preferred, p.sequence, b.dodag.sequence), (P, 77, 77))
+        self.assertEqual(b.engine.neighbours.get(P).sequence, 77)
+
+    def test_overheard_frame_records_the_sequence(self):
+        b = self.attached(3)
+        overheard = b.engine.counters.rx_overheard
+        b.rx(self.q.presence(20, 3, 5))  # Q's presence to the root
+        self.assertEqual(b.engine.counters.rx_overheard, overheard + 1)
+        self.assertEqual(b.engine.neighbours.get(Q).sequence, 5)
+        b.rx(self.q.frame(20, 3, dest=S))  # no sequence: the last one kept
+        self.assertEqual(b.engine.neighbours.get(Q).sequence, 5)
+        b.rx(self.q.solicitation(3))  # none either
+        self.assertEqual(b.engine.neighbours.get(Q).sequence, 5)
+
+    def test_parent_sequence_taken_and_advertised(self):
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        d = b.dodag
+        self.assertEqual((d.parents.sequence, d.parents.lowest), (0, 24))
+        # P's presence to the root, overheard, carries 1: taken, L restarted.
+        b.rx(self.p.presence(16, 3, 1))
+        self.assertEqual((d.parents.sequence, d.sequence, d.parents.sequence_at), (1, 1, b.now))
+        self.assertEqual(d.parents.lowest, 24)
+        # A neighbour's own presence carrying an older one does not change it.
+        b.rx(self.q.presence(8, 3, 0))
+        self.assertEqual(d.sequence, 1)
+        # The node's next DODAG information carries 1.
+        start = b.now
+        d.reset(start)
+        b.wake()
+        b.advance(start + b.imin + 200)
+        payloads = [p for t, h, p in b.port9(start) if p]
+        self.assertTrue(payloads)
+        self.assertEqual([p[INFO_SEQUENCE] for p in payloads], [1] * len(payloads))
+
+    def test_poison_carries_the_sequence_kept(self):
+        b = self.attached(3)
+        b.rx(self.p.presence(16, 3, 9))
+        b.rx(self.p.frame(RANK_INFINITE, 3))  # the parent's poison: detached
+        late = DESYNC_SLOTS * b.engine.slot_ms + 100
+        start = b.now
+        b.advance(start + late)
+        poison = [(h.rank, p[INFO_SEQUENCE]) for t, h, p in b.port9(start) if p]
+        self.assertEqual(poison, [(RANK_INFINITE, 9)])
+        self.assertEqual((b.dodag.parents.sequence, b.dodag.parents.lowest), (9, 24))
+
+
 class Root(_Case):
     def root(self):
         b = Bench(address=ROOT, info=INFO, version=5)
@@ -845,8 +940,13 @@ class Root(_Case):
         gaps = [u - t for t, u in zip(times, times[1:])]
         self.assertTrue(min(gaps) >= PERIOD * 9 // 20, gaps)
         self.assertTrue(max(gaps) <= PERIOD * 11 // 20 + 200, gaps)
-        self.assertEqual(b.port9(start)[0][2], bytes(encode_info(INFO)))
+        payloads = [p for t, h, p in b.port9(start)]
+        self.assertEqual(payloads[0][:INFO_SEQUENCE], bytes(encode_info(INFO))[:INFO_SEQUENCE])
         self.assertEqual(sent[0][1].rank, 0)
+        # The root sequence incremented at each beacon, the last one carried.
+        seqs = [p[INFO_SEQUENCE] for p in payloads]
+        self.assertEqual(seqs, [(seqs[0] + i) & 0xFF for i in range(len(seqs))])
+        self.assertEqual(b.dodag.sequence, seqs[-1])
 
     def test_beacon_not_postponed_by_trickle_resets(self):
         # A solicitation every second keeps the root's Trickle timer at Imin,
@@ -908,9 +1008,42 @@ class Root(_Case):
         self.assertEqual((b.dodag.version, b.engine.dodag_version), (6, 6))
         self.assertEqual(b.engine.neighbours.period_ms, 20000)
         t, h = self.assertAdvertWithin(b, start, version=6, rank=0)
-        self.assertEqual(b.port9(t)[0][2], bytes(encode_info(info)))
+        self.assertEqual(b.port9(t)[0][2], bytes(encode_info(info, None, b.dodag.sequence)))
         # The beacon re-armed on half the new period (20 s), +-10 %.
         self.assertTrue(start + 9000 <= b.dodag._beacon_at <= start + 11000, b.dodag._beacon_at)
+
+    def test_boot_sequence_after_the_newest_heard(self):
+        # §9: the one after the newest heard while the root listens (here
+        # until its first DODAG information), in serial order.
+        b = self.root()
+        b.rx(self.p.info(8, 4, seq=200))
+        b.rx(self.q.presence(16, 4, 198, parent=P))  # overheard, older
+        b.rx(self.s.info(8, 4, seq=255))  # newer: 55 ahead
+        t, h = self.assertAdvertWithin(b, 0, version=5, rank=0)
+        self.assertEqual(b.port9(t)[0][2][INFO_SEQUENCE], 0)  # after 255
+        self.assertEqual(b.dodag.sequence, 0)
+        # Heard later, nothing changes; the beacon increments.
+        b.rx(self.p.info(8, 5, seq=100))
+        self.assertEqual(self.beacons(b, 1), [1])
+
+    def beacons(self, b, count):
+        """Advance past count beacons; return the sequences they carried."""
+        out = []
+        for _ in range(count):
+            at = b.dodag._beacon_at
+            b.advance(at + 300)
+            out.append(b.port9(at)[0][2][INFO_SEQUENCE])
+        return out
+
+    def test_boot_sequence_without_any_heard_or_given(self):
+        b = self.root()
+        t, h = self.assertAdvertWithin(b, 0)
+        self.assertEqual(b.port9(t)[0][2][INFO_SEQUENCE], 0)
+        b = Bench(address=ROOT, info=INFO, version=5, sequence=0x1FE)  # 8 bits: 254
+        b.rx(self.p.info(8, 4, seq=10))  # a first sequence given: no listening
+        t, h = self.assertAdvertWithin(b, 0)
+        self.assertEqual(b.port9(t)[0][2][INFO_SEQUENCE], 254)
+        self.assertEqual(self.beacons(b, 2), [255, 0])  # wrap-around
 
     def test_first_beacon_within_half_a_period_of_boot(self):
         b = self.root()

@@ -17,7 +17,7 @@ from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
 from mesh.routing import Routing
 from sim.medium import OK
-from sim.net import Network
+from sim.net import Network, Observer
 
 _KEY = bytes(range(16))
 INFO = DodagInfo(0, 10, 60, 32, 56, EU_869)
@@ -412,3 +412,58 @@ class LinkCostRise(unittest.TestCase):
         # on hearing A, so whether a given seed catches a rise depends on
         # the timing of the retries.
         self.assertTrue(max(rises) > 24, rises)
+
+
+class _Advances(Observer):
+    """`sim.net.Observer` recording when each node's root sequence advances
+    (``Parents.sequence_at``, read after every step: it changes inside steps
+    only), and whether it stayed attached."""
+
+    def __init__(self, nodes):
+        self.nodes = nodes
+        self.times = dict((b.address, []) for b in nodes)
+        self.detached = set()
+        self._last = dict((b.address, b.routing.parents.sequence_at) for b in nodes)
+
+    def stepped(self, node, event):
+        for b in self.nodes:
+            p = b.routing.parents
+            if p.rank == RANK_INFINITE:
+                self.detached.add(b.address)
+            if p.sequence_at != self._last[b.address]:
+                self._last[b.address] = p.sequence_at
+                self.times[b.address].append(p.sequence_at)
+
+
+class RootSequence(unittest.TestCase):
+    """No false float material on a grounded path (§9 root sequence and
+    grounding): on the line, D 4 hops down, every node's sequence advances
+    at least once within each window of G = 2.5 + min(8, ceil(rank / 8))
+    presence periods, read from frames overheard as well: a node's parent
+    sends its presence to the grandparent, and Trickle is silent at Imax,
+    so that reading only the frames addressed to the node (and the DODAG
+    information) would leave it without an advance beyond hop 1."""
+
+    def test_held_sequence_advances_within_g(self):
+        line = Line(11)
+        line.run(12 * line.imin)
+        line.steady()
+        self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
+        watch = _Advances(line.nodes)
+        line.net.observers.append(watch)
+        start = line.net.now
+        end = start + 12 * PERIOD
+        line.run(end)
+        self.assertEqual(watch.detached, set())
+        root = line.root.routing.dodag.sequence
+        for b in line.nodes:
+            p = b.routing.parents
+            hops = min(8, (p.rank + MIN_HOP - 1) // MIN_HOP)
+            g = (5 + 2 * hops) * PERIOD // 2
+            times = [start] + watch.times[b.address] + [end]
+            gaps = [u - t for t, u in zip(times, times[1:])]
+            self.assertTrue(max(gaps) < g, (b.address, p.rank, gaps))
+            # At least one advance per period on average, and never ahead of
+            # the root's sequence.
+            self.assertTrue(len(watch.times[b.address]) >= 10, (b.address, gaps))
+            self.assertTrue(0 <= (root - p.sequence) & 0xFF < 2 * (hops + 1), (root, p.sequence))

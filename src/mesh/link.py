@@ -44,9 +44,10 @@ for authentication and replay). Step 4: duplicate address (link source equal
 to the own address: counted, flag set, frame dropped), `heard` (records
 the frame in the neighbour table ``neighbours``, `mesh.neighbours`: link
 estimation, §9; every frame counts, overheard ones included), message
-decoding (a malformed body drops the whole frame), then the link
-destination: own address or `BROADCAST` processes the messages, any other
-one goes to `overheard` (passive acknowledgements). Each message is
+decoding (a malformed body drops the whole frame), `decoded` (every
+decoded frame, overheard ones included: routing reads the root sequence,
+§9), then the link destination: own address or `BROADCAST` processes the
+messages, any other one goes to `overheard` (passive acknowledgements). Each message is
 delivered to its port's handler when this node is its destination, otherwise
 passed to `forward` (next hop from the injected ``next_hop`` function, after
 a random delay of at most one slot, §7). A class 1/2 message already in the
@@ -58,7 +59,8 @@ filters). Either way the frame gets an explicit acknowledgement, as when it
 carries a class 1/2 message delivered here or held (`mesh.reliable`).
 
 **Extension points** (minimal defaults, overridden or replaced by the later
-steps): `heard` (neighbour table), `overheard` (passive acknowledgements),
+steps): `heard` (neighbour table), `decoded` (every decoded frame, before
+its messages: the root sequence, §9), `overheard` (passive acknowledgements),
 `sent` (class 1 bookkeeping, frame counter of the frame), `tick` and `timer`
 (protocol timers): an override calls the base method (class 1 lives there);
 `give_up` (busy channel), `expand` (first-hop compression undone on every
@@ -116,7 +118,9 @@ from mesh.txqueue import EVICTED, OVER_QUOTA, REFUSED, SIZE, TxQueue, accepted
 CW_MIN = 4
 CW_MAX = 32
 MAX_ATTEMPTS = 6  # carrier senses of one access procedure
-PRESENCE_FRAME = 17  # bytes of a presence frame (§11 sizes): the backoff slot
+# Bytes of a first-hop presence frame before the root sequence (§11 sizes):
+# the backoff slot, kept so that the slot-based timers do not move (§8).
+PRESENCE_FRAME = 17
 DUTY_HIGH_PERCENT = 80  # duty-cycle use flagged above (§11 presence flag bit 2)
 
 MAX_PAYLOAD = 200  # announced maximum application payload (MP6)
@@ -478,6 +482,14 @@ class LinkEngine(Core):
             header.source, header.counter, header.rank, header.dodag_version, rssi, snr, now
         )
 
+    def decoded(self, header, messages, entry, now):
+        """A frame decoded, whatever its link destination, before its messages are processed.
+
+        entry: its neighbour-table entry (`heard`), None when the table did
+        not record it. Routing reads the root sequence there (§9); nothing
+        by default.
+        """
+
     def overheard(self, header, messages, now):
         """A frame for another link destination (passive acknowledgements)."""
         self.reliable.overheard(header, messages, now)
@@ -745,13 +757,14 @@ class LinkEngine(Core):
             c.duplicate_address += 1
             self.address_conflict = True
             return
-        self.heard(h, rssi, snr, now)
+        entry = self.heard(h, rssi, snr, now)
         # Key switch on a frame under the next key (§14 key change) goes here.
         try:
             messages = frame.decode_messages(buf, frame.HEADER_SIZE, n - frame.TAG_SIZE)
         except FormatError:
             c.rx_malformed += 1
             return
+        self.decoded(h, messages, entry, now)
         if h.dest != self.address and h.dest != BROADCAST:
             c.rx_overheard += 1
             self.overheard(h, messages, now)

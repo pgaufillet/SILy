@@ -5,6 +5,11 @@ the link engine's `heard` step with every authenticated frame, whatever its
 link destination (the channel is shared, §9). Per neighbour:
 
 - **rank and DODAG version** of its last frame, **time last heard**;
+- **root sequence** of its last frame carrying one (``sequence``, §9 root
+  sequence: its DODAG information and its own presence; None until one is
+  heard), set by routing (`set_sequence`) from every frame, overheard ones
+  included. Sequences are compared within a version: a frame of another
+  version than the entry's clears it;
 - **inbound delivery ratio** ``d_in``: frames received / counter values
   spent by the neighbour over its last 16 frame counter values (a 16-bit
   window shifted by the counter gap). A gap above 16 (long silence, reboot)
@@ -145,7 +150,9 @@ class Neighbour:
     """One entry of the table; read its attributes, change it through the table.
 
     address; heard (ms, last frame); rank, version (of its last frame);
-    counter (last frame counter); parent (set by routing); rx_bits,
+    sequence (root sequence of its last frame carrying one, of that
+    version, or None); counter (last frame counter); parent (set by
+    routing); rx_bits,
     rx_span (reception window); ack_bits, ack_count (acknowledgement
     window), fail_at (ms, newest failure still in it, or None), latched
     (`ACK_MIN` samples reached once); run (failed samples since the last
@@ -164,6 +171,7 @@ class Neighbour:
         self.heard = now
         self.rank = rank
         self.version = version
+        self.sequence = None
         self.counter = counter
         self.parent = False
         self.rx_bits = 1
@@ -419,6 +427,19 @@ class NeighbourTable:
         n._answered(now)
         return True
 
+    def set_sequence(self, address, sequence):
+        """Record the root sequence (8 bits) of the frame of address just heard (§9).
+
+        Routing calls it after `heard` for every frame carrying one (DODAG
+        information, the sender's own presence). Returns False if address
+        is not in the table.
+        """
+        n = self.get(address)
+        if n is None:
+            return False
+        n.sequence = sequence
+        return True
+
     def restart_reach(self, address, now):
         """Restart the reachability of address at now, as at the entry's creation.
 
@@ -455,7 +476,9 @@ class NeighbourTable:
             n._counter(counter)
             n.heard = now
             n.rank = rank
-            n.version = version
+            if version != n.version:
+                n.version = version
+                n.sequence = None  # compared within a version only
         if snr is not None:
             if snr >= SNR_SATURATION and self.noise_floor is not None and rssi is not None:
                 snr = rssi - self.noise_floor

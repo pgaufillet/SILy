@@ -111,6 +111,32 @@ class DeliveryRatio(unittest.TestCase):
         self.assertEqual(n.age(400), 150)
 
 
+class RootSequence(unittest.TestCase):
+    """Each neighbour's last root sequence, within its version (§9)."""
+
+    def test_unknown_until_set_kept_by_frames_without_one(self):
+        t = _table()
+        n = _hear(t, A, [1])
+        self.assertIsNone(n.sequence)
+        self.assertTrue(t.set_sequence(A, 200))
+        _hear(t, A, [2])  # a frame without sequence (data, acknowledgement)
+        self.assertEqual(n.sequence, 200)
+        self.assertTrue(t.set_sequence(A, 201))
+        self.assertEqual(t.get(A).sequence, 201)
+        self.assertFalse(t.set_sequence(B, 7))  # not in the table
+        self.assertIsNone(t.get(B))
+
+    def test_cleared_by_another_version_and_a_new_entry(self):
+        t = _table()
+        _hear(t, A, [1], version=3)
+        t.set_sequence(A, 9)
+        n = _hear(t, A, [2], version=4)
+        self.assertIsNone(n.sequence)  # compared within a version only
+        t.set_sequence(A, 9)
+        t.remove(A)
+        self.assertIsNone(_hear(t, A, [3]).sequence)  # the slot reused, cleared
+
+
 class AcknowledgementWindow(unittest.TestCase):
     def test_unknown_neighbour_not_recorded(self):
         t = _table()

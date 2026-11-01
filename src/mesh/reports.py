@@ -4,7 +4,9 @@ Codecs (little-endian; ValueError on a malformed payload):
 
 - **Presence** (port 1, upward, class 0): preferred parent 2 B (mode 1
   only: on the first hop, mode 6, the parent is the link destination and the
-  first relay restores it, `restore_parent`), flags 1 B, then if flag
+  first relay restores it, `restore_parent`), root sequence 1 B (mode 6
+  only: the sequence the sender holds, §9; dropped when forwarded,
+  `restore_parent`), flags 1 B, then if flag
   `TAILS`: tail count 1 B and per flow port 1 B, oldest unacknowledged
   sequence 2 B, last sequence 2 B (§12 class 2), then the **application
   extension**: the remaining bytes, opaque to the mesh. `Presence`,
@@ -28,8 +30,10 @@ and driven by its `mesh.dodag.Dodag`:
   random delay of at most `CHANGE_SLOTS` slots, so that the nodes that
   attach or switch on one frame (the children of a relay) do not transmit
   together; it also restarts the period. Sent only while attached, in mode 6 to the preferred
-  parent (17 B with a 1-byte extension, §11 sizes), class 0 replace by
-  newer (§12). Flags: bit 0 first report since boot; bit 1 queue overflow,
+  parent (18 B with a 1-byte extension, §11 sizes), always in mode 6, also
+  in a frame with a bundle of forwarded reports, carrying the root sequence
+  the node holds (``Dodag.sequence``) when it is generated; class 0
+  replace by newer (§12). Flags: bit 0 first report since boot; bit 1 queue overflow,
   bit 2 duty-cycle use above 80 % of the budget (seen by the link engine at
   each charge, ``duty_high``, or at the report), bit 4 rank errors (§9
   data-path validation), bit 5 address conflict, bit 6 authentication
@@ -119,14 +123,17 @@ def _u16(value, name):
 
 
 class Presence:
-    """A presence report: parent (None on the first hop), flags, tails, extension.
+    """A presence report: parent (None on the first hop), flags, tails, extension, sequence.
 
     flags: the flag byte (bit 3 `TAILS` is set by `encode_presence` from
-    tails); tails: tuple of (port, oldest, last); extension: bytes.
+    tails); tails: tuple of (port, oldest, last); extension: bytes;
+    sequence: the root sequence (8 bits) of the first-hop form, None in the
+    mode 1 form (with a parent).
     """
 
-    def __init__(self, flags=0, extension=b"", parent=None, tails=()):
+    def __init__(self, flags=0, extension=b"", parent=None, tails=(), sequence=None):
         self.parent = parent
+        self.sequence = sequence
         self.flags = flags
         self.tails = tuple(tails)
         self.extension = bytes(extension)
@@ -135,14 +142,16 @@ class Presence:
         return (
             isinstance(other, Presence)
             and self.parent == other.parent
+            and self.sequence == other.sequence
             and self.flags == other.flags
             and self.tails == other.tails
             and self.extension == other.extension
         )
 
     def __repr__(self):
-        return "Presence(parent=%r, flags=0x%02x, tails=%r, extension=%r)" % (
+        return "Presence(parent=%r, sequence=%r, flags=0x%02x, tails=%r, extension=%r)" % (
             self.parent,
+            self.sequence,
             self.flags,
             self.tails,
             self.extension,
@@ -150,16 +159,24 @@ class Presence:
 
 
 def encode_presence(p):
-    """Return the payload of `Presence` p (parent field only if p.parent is not None)."""
+    """Return the payload of `Presence` p: the mode 1 form if p.parent is not None
+    (parent field, no sequence), else the first-hop form (sequence field)."""
     if type(p.flags) is not int or p.flags < 0 or p.flags > 0xFF:
         raise ValueError("flags out of range")
     if len(p.tails) > MAX_TAILS:
         raise ValueError("too many tails")
     out = bytearray()
     if p.parent is not None:
+        if p.sequence is not None:
+            raise ValueError("sequence in the mode 1 form")
         _u16(p.parent, "parent")
         out.append(p.parent & 0xFF)
         out.append(p.parent >> 8)
+    else:
+        seq = p.sequence
+        if type(seq) is not int or seq < 0 or seq > 0xFF:
+            raise ValueError("sequence out of range")
+        out.append(seq)
     flags = p.flags & ~TAILS
     if p.tails:
         flags |= TAILS
@@ -181,22 +198,24 @@ def encode_presence(p):
 
 
 def decode_presence(payload, parent=True):
-    """Return the `Presence` of a port 1 payload; parent: the mode 1 form (parent field).
+    """Return the `Presence` of a port 1 payload; parent: the mode 1 form (parent
+    field), else the first-hop form (sequence field).
 
     Raises ValueError when the payload is too short for its fields or the
     tail count is 0 or above `MAX_TAILS`.
     """
     p = payload
     n = len(p)
-    i = 0
+    if n < (3 if parent else 2):
+        raise ValueError("presence too short")
     par = None
+    seq = None
     if parent:
-        if n < 3:
-            raise ValueError("presence too short")
         par = p[0] | p[1] << 8
         i = 2
-    elif n < 1:
-        raise ValueError("presence too short")
+    else:
+        seq = p[0]
+        i = 1
     flags = p[i]
     i += 1
     tails = []
@@ -210,15 +229,16 @@ def decode_presence(payload, parent=True):
         for _ in range(count):
             tails.append((p[i], p[i + 1] | p[i + 2] << 8, p[i + 3] | p[i + 4] << 8))
             i += TAIL_SIZE
-    return Presence(flags, bytes(p[i:]), par, tails)
+    return Presence(flags, bytes(p[i:]), par, tails, seq)
 
 
 def restore_parent(payload, parent):
-    """Return a first-hop presence payload with its parent field restored (§11)."""
-    out = bytearray(2 + len(payload))
+    """Return a first-hop presence payload in the mode 1 form (§11): its parent
+    field restored, its root sequence dropped."""
+    out = bytearray(2)
     out[0] = parent & 0xFF
     out[1] = parent >> 8
-    out[2:] = payload
+    out.extend(payload[1:])
     return bytes(out)
 
 
@@ -451,7 +471,7 @@ class Reporter:
             tails = self.tails() or ()
             if len(tails) > MAX_TAILS:
                 tails = tails[:MAX_TAILS]
-        return Presence(self.flags(now), ext, None, tails)
+        return Presence(self.flags(now), ext, None, tails, self.dodag.sequence)
 
     def topology(self, now):
         """Return the entries of a topology report at now (parent set first)."""

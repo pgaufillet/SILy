@@ -24,7 +24,7 @@ from mesh.counter import FrameCounter
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
 from mesh.neighbours import popcount16
-from mesh.parents import MIN_HOP, SWITCH_THRESHOLD, link_cost
+from mesh.parents import MIN_HOP, SWITCH_THRESHOLD, link_cost, sequence_newer
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
 from mesh.reliable import ATTEMPTS, RETRY_DOUBLINGS, identity
@@ -259,7 +259,11 @@ class Forming(unittest.TestCase):
         # one cheaper, by less than the switch threshold. Such a loss may also
         # raise both A's and B's ranks after C or D attached: C or D follows
         # its preferred parent, and the other, no longer below its L, is no
-        # candidate (§9 loop freedom, local repair below L).
+        # candidate (§9 loop freedom, local repair below L). The other is no
+        # candidate either while its last frame heard carries an older root
+        # sequence than the one C or D took from its parent (§9 feasibility:
+        # the siblings A and B take each beacon at their own time, and their
+        # presences carry it once per period).
         for n in (C, D):
             p = m.b(n).routing.parents
             views = dict((x, m.b(n).engine.neighbours.get(x)) for x in (A, B))
@@ -267,7 +271,10 @@ class Forming(unittest.TestCase):
             self.assertTrue(p.preferred in (A, B), cost)
             for x in (A, B):
                 if cost[x] is None:
-                    self.assertTrue(x != p.preferred and views[x].rank >= p.lowest, cost)
+                    seq = views[x].sequence
+                    older = seq != p.sequence and not sequence_newer(seq, p.sequence)
+                    self.assertTrue(x != p.preferred, cost)
+                    self.assertTrue(views[x].rank >= p.lowest or older, (cost, seq, p.sequence))
             best = min(c for c in cost.values() if c is not None)
             self.assertTrue(cost[p.preferred] - best < SWITCH_THRESHOLD, cost)
         self.assertTrue(m.preferred(E) in (C, D))
@@ -473,13 +480,16 @@ class FollowParentRank(unittest.TestCase):
 class LoopDuringRepair(unittest.TestCase):
     """Line root — A — B — C — D (+ sniffer). B stops hearing A and C (links
     A -> B and C -> B cut) and its view of C is stale: rank 8, as if C's
-    frames since it moved under B had been lost. B's class 1 attempts to A
-    fail; at the local repair B picks C, its own child, and C -> B comes
-    back: a loop B -> C -> B. Each follows the other's rank increase (§9
-    rank following), advertised at once on the rank errors of data-path
-    validation: the ranks climb until B's path cost passes L + 56, and B,
-    without another candidate, detaches (TLA+
-    `DODAG_line_follow_witness_bound`)."""
+    frames since it moved under B had been lost, and B's own root sequence,
+    which no frame of C can show under the root sequence (§9: a descendant
+    holds a sequence no newer than the node's, and with the same one a rank
+    above every rank the node advertised with it; forged here to exercise
+    the bound). B's class 1 attempts to A fail; at the local repair B picks
+    C, its own child, and C -> B comes back: a loop B -> C -> B. Each
+    follows the other's rank increase (§9 rank following), advertised at
+    once on the rank errors of data-path validation: the ranks climb until
+    B's path cost passes L + 56, and B, without another candidate, detaches
+    (TLA+ `DODAG_line_follow_witness_bound`)."""
 
     def test_loop_ends_at_the_rank_bound(self):
         names = (ROOT, A, B, C, D)
@@ -524,6 +534,7 @@ class LoopDuringRepair(unittest.TestCase):
         m.net.medium.cut(A, B)
         m.net.medium.cut(C, B)
         b.engine.neighbours.get(C).rank = 8
+        b.engine.neighbours.get(C).sequence = parents.sequence
         mine = b.submit(APP, 1, ROOT, b"mine")
         sent_d = []
 
@@ -927,11 +938,15 @@ class AdoptionDuringTheHold(unittest.TestCase):
 
 class LoopCustody(unittest.TestCase):
     """TLA+ `DODAG_line_current_MP5` on the code: B detaches; C, which lost
-    B's poison, sends its class 1 message to B, which holds it; B rejoins
-    through C, its own child, and the message loops. B's frames at rank 255
-    are lost at C until B rejoins: its poison, but also its explicit
-    acknowledgements and solicitation, which in the code carry its rank
-    255 in their header (the model's acknowledgements carry no rank)."""
+    B's poison, sends its class 1 message to B, which holds it. B's frames
+    at rank 255 are lost at C until B rejoins: its poison, but also its
+    explicit acknowledgements and solicitation, which in the code carry its
+    rank 255 in their header (the model's acknowledgements carry no rank).
+    Without the root sequence B rejoined through C, its own child, and the
+    message looped (TLA+ `DODAG_line_solicit_consec2`); with it C, which
+    holds B's sequence or an older one at a rank above B's L (kept across
+    the detach), is never feasible: B rejoins through A when A is heard
+    again (§9, ``Seq = "babel"``)."""
 
     def test_looped_message_delivered_or_failed(self):
         s = _Cutoff(12)
@@ -954,10 +969,11 @@ class LoopCustody(unittest.TestCase):
         s.cut(None)
         m.run(start + 3 * P + 4 * m.imin + 3 * P)
         self.assertTrue(len(sent) == 1 and sent[0] >= 0, sent)
-        # B rejoined through C (its poison and solicitation lost at C): the
-        # loop formed, beyond what the solicitation tolerates (TLA+
-        # `DODAG_line_solicit_consec2`).
-        self.assertTrue([p for t, n, p, r in log if n == B and p == C], log)
+        # B's poison and solicitation lost at C: C is still no candidate of
+        # B (feasibility), B rejoins through A.
+        self.assertEqual([p for t, n, p, r in log if n == B and p == C], [], log)
+        rejoined = [t for t, n, p, r in log if n == B and p == A and t > s.detached - start]
+        self.assertTrue(rejoined, log)
         # MP5: delivered (once: the root filters the copies that custody
         # makes travel), or the origin told.
         got = [p for o, p in m.root.inbox_from(APP) if o == C]

@@ -25,7 +25,8 @@ relay aggregates the reports of its subtree into the frames it sends anyway
 
 **First-hop compression** (§11): a node's own reports leave in mode 6; the
 node that receives them rewrites them in mode 1 (origin = link source) and
-restores the presence report's parent field (itself), so that relays forward
+restores the presence report's parent field (itself), dropping its root
+sequence (read from the frame before, `mesh.dodag`), so that relays forward
 and the root decodes the mode 1 form only.
 
 **Data-path validation** (§9 loop freedom; CTP, RPL §11.2): an upward

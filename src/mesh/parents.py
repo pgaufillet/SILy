@@ -9,12 +9,33 @@ infinite: no route or poisoned).
   reachability rather than ETX <= 4, below, the ETX capped at 4,
   `Neighbour.link_etx`); **path cost** through a neighbour = its rank +
   link cost; above 254 the neighbour is not usable.
-- **Candidates**: neighbours of the node's DODAG version, of rank strictly
-  lower than **L**, the lowest rank the node has advertised since it
-  attached or adopted its version (never above its advertised rank; any
-  finite rank without route), the preferred parent at any rank (**rank
-  following**, RPL: the node follows its preferred parent's rank increase
-  within the bound below), heard within the silence limit
+- **Root sequence** (§9, 8 bits, serial arithmetic: `sequence_newer`,
+  sequences less than 128 apart compared): the node holds the sequence of
+  its preferred parent (``sequence``). Each neighbour's is the last one
+  its frames carried (``Neighbour.sequence``, recorded by the routing
+  step from every frame heard, overheard ones included). When the
+  selection keeps or takes a preferred parent whose sequence is newer
+  than the node's, the node takes it (``sequence_at``: the time it
+  advanced) and **restarts L** at its current rank. **L and the sequence
+  are kept across a detach**: only a newer sequence restarts L. A
+  sequence not advanced for `FORGET_PERIODS` (50) presence periods is
+  forgotten with L (at most 111 root increments meanwhile, below the 128
+  of serial arithmetic): without a sequence (``sequence`` None: also
+  before the first one) every sequence heard is newer, so the next one is
+  taken at any rank. Adopting a DODAG version restarts L and takes the
+  sequence of the information adopted (`on_new_version`): sequences are
+  compared within a version. ``carried``: the sequence the node's frames
+  carry, the last one held (kept when forgotten).
+- **Candidates**: neighbours of the node's DODAG version that are
+  **feasible** (Babel, RFC 8966): a sequence **newer** than the node's, at
+  any rank (path cost within 254: the newer sequence restarts L), or the
+  same sequence and a rank strictly lower than **L**, the lowest rank the
+  node has advertised with that sequence (never above its advertised
+  rank; kept by a node without route); never an older sequence, nor an
+  unknown one while the node holds one. The preferred parent is one at any
+  rank (**rank following**, RPL: the node follows its preferred parent's
+  rank increase within the bound below; its sequence is never older than
+  the node's), heard within the silence limit
   (`mesh.neighbours.silence_ms`: 2.5 presence periods, strict), through an
   eligible link (`Neighbour.eligible`: margin, and ETX <= 4, or instead
   reachability for the link to the root and for the preferred parent's
@@ -28,13 +49,18 @@ infinite: no route or poisoned).
   included, gets its probes before it is judged), whose path cost is at
   most the
   **bound** min(254, L + max_increase), max_increase 56 by default
-  (MaxRankIncrease, carried by the DODAG information, §9). Testing against
-  L rather than the advertised rank keeps out a neighbour between L and a
-  rank increase not yet heard by the node's descendants: it may be one of
-  them, and taking it would close a cycle (DUAL's feasibility condition).
-  A neighbour dropped after failed attempts (`next_parent`) is no
-  candidate until a new frame of it is heard; after a detach, only
-  neighbours heard after the solicitation that ends its hold are.
+  (MaxRankIncrease, carried by the DODAG information, §9), 254 for a
+  neighbour of newer sequence. Testing against L rather than the
+  advertised rank keeps out a neighbour between L and a rank increase not
+  yet heard by the node's descendants: it may be one of them, and taking
+  it would close a cycle (DUAL's feasibility condition). A descendant
+  holds a sequence no newer than the node's (taken from it) and, with the
+  same one, a rank above every rank the node advertised with it: it is
+  never feasible, whatever was lost, across a detach too (TLA+ `DODAG`,
+  ``Seq = "babel"``). A neighbour dropped after failed attempts
+  (`next_parent`) is no candidate until a new frame of it is heard; after
+  a detach, only neighbours heard after the solicitation that ends its
+  hold are.
 - **Kept after exhausted attempts** (`next_parent`, §12): the root, and
   the preferred parent when it is the node's last candidate, are not
   dropped after failed attempts while they are candidates apart from
@@ -68,15 +94,18 @@ infinite: no route or poisoned).
 - **Advertised rank** (``rank``) = path cost through the preferred parent,
   updated when it differs by `RANK_HYSTERESIS` (4) or more, or when the
   preferred parent changes (a followed increase is at least one link cost,
-  8); L follows its decreases. Members other than the preferred parent whose
-  rank is not strictly lower than L, so updated, leave the set (rank rule),
-  so that the set holds no member the next selection would refuse.
+  8); L follows its decreases (and restarts with a newer sequence, above).
+  Members other than the preferred parent whose rank is not strictly lower
+  than L, so updated, or whose sequence is older than the node's, so
+  updated, leave the set (rank rule), so that the set holds no member the
+  next selection would refuse.
 - **Detach**: when no candidate remains (bound exceeded included), the node
-  advertises 255 at once, clears L and the set, and selects nothing for
-  ``hold_ms`` (2 Imin, set by the Trickle step; 0 by default), then until
-  its solicitation goes on air (`solicited`, ``soliciting`` meanwhile); it
-  then rejoins through neighbours heard after that solicitation, at any
-  rank (without hold: after the poison). **Answer window**: every
+  advertises 255 at once, clears the set (L and the sequence kept), and
+  selects nothing for ``hold_ms`` (2 Imin, set by the Trickle step; 0 by
+  default), then until its solicitation goes on air (`solicited`,
+  ``soliciting`` meanwhile); it then rejoins through feasible neighbours
+  heard after that solicitation (without hold: after the poison).
+  **Answer window**: every
   solicitation of a detached node (the one ending the hold, the periodic
   ones without route, the one at boot) opens a window of ``window_ms``
   (Imin and a margin, set by the Trickle step; 0 by default) during which
@@ -84,11 +113,10 @@ infinite: no route or poisoned).
   candidates heard meanwhile (no switch threshold: it has no preferred
   parent), and if none was heard, the first candidate heard afterwards.
   A child that lost the poison hears the solicitation (rank 255) and
-  detaches in turn, so that it is no candidate (§9, TLA+ `DODAG`: no loop
-  with at most one loss in a row on a link). A loop formed despite it
-  (two losses in a row) is not broken by the rank rule, each member
-  following the other's increase: it ends by a switch or when a member's
-  path cost passes the bound (§9).
+  detaches in turn; one that lost both is no candidate either, by
+  feasibility (above). A loop formed otherwise is not broken by the rank
+  rule, each member following the other's increase: it ends by a switch
+  or when a member's path cost passes the bound (§9).
 - **Parent flags**: the set's members are flagged in the neighbour table
   (`NeighbourTable.set_parent`), so that eviction spares them.
 
@@ -113,7 +141,15 @@ not end it, nor opens a window; a new version does not end the hold or
 the window nor lift its rejoin rule (its parents are taken at any rank,
 among the neighbours heard after the solicitation, at the window's close);
 a solicitation sent while the window is open (another version heard) does
-not extend it.
+not extend it; the sequence is taken at the selection that reads it (the
+step of the parent's frame), the preferred parent kept or new; a neighbour
+whose sequence is unknown (no frame carrying one heard since its entry
+was made or its version changed) is not feasible while the node holds a
+sequence, and a node without one compares an unknown sequence as the same
+(the rank rule alone); a sequence 128 apart from the node's is neither
+newer nor the same (not feasible); forgetting is checked at each
+selection; the members other than the preferred parent keep the rank
+rule (below L), a newer sequence above L not making one.
 """
 
 from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, ROOT, UPWARD
@@ -128,6 +164,9 @@ SWITCH_THRESHOLD = 12  # path cost gain to switch preferred parent (1.5 hops)
 RANK_HYSTERESIS = 4  # advertised rank change to advertise it (half a hop)
 VERSION_MASK = 0x0F  # 4-bit DODAG version
 _HALF = 8  # serial arithmetic on 4 bits: versions less than 8 apart compare
+SEQUENCE_MASK = 0xFF  # 8-bit root sequence (§9)
+_SEQ_HALF = 128  # serial arithmetic on 8 bits: sequences less than 128 apart compare
+FORGET_PERIODS = 50  # presence periods without advance: sequence and L forgotten
 
 # Event flags.
 PARENT_CHANGED = 1  # preferred parent changed (presence report at once)
@@ -141,6 +180,19 @@ def link_cost(etx):
     """Return round(8 × ETX) of an ETX in units of 1/ETX_ONE, at least 8."""
     cost = (etx * MIN_HOP + ETX_ONE // 2) // ETX_ONE
     return cost if cost > MIN_HOP else MIN_HOP
+
+
+def sequence_newer(a, b):
+    """Return True if root sequence a is newer than b (8-bit serial arithmetic, §9).
+
+    None is no sequence: every sequence is newer than None, None is newer
+    than none; sequences 128 apart are not comparable (False both ways).
+    """
+    if a is None:
+        return False
+    if b is None:
+        return True
+    return 0 < (a - b) & SEQUENCE_MASK < _SEQ_HALF
 
 
 def path_cost(rank, etx):
@@ -170,7 +222,10 @@ class Parents:
     (None: the time of the last `recompute`).
 
     Read: ``rank`` (advertised), ``version``, ``lowest`` (L, None after a
-    detach or a new version), ``preferred`` (address or None), ``cost``
+    new version or forgotten), ``sequence`` (root sequence held, None
+    before the first or forgotten), ``sequence_at`` (time it last
+    advanced), ``carried`` (the one the frames carry), ``preferred``
+    (address or None), ``cost``
     (path cost through it at the last selection), `members`,
     ``hold_until``, ``soliciting``, ``poisoned_at``, ``window_until``;
     counters ``switches``, ``detaches``, ``drops``. Read and set:
@@ -189,6 +244,9 @@ class Parents:
         self.version = 0
         self.rank = RANK_ROOT if root else RANK_INFINITE
         self.lowest = RANK_ROOT if root else None
+        self.sequence = None  # root sequence held (of the preferred parent)
+        self.sequence_at = None  # time it last advanced
+        self.carried = None  # the one the frames carry: the last held
         self.preferred = None
         self.cost = None
         self.poisoned_at = None  # last detach, then the solicitation ending its hold
@@ -225,24 +283,32 @@ class Parents:
         """Return the path cost through neighbour entry n if it is a candidate, else None.
 
         The preferred parent is one at any rank (its increase is followed,
-        within the bound), the others below L (any finite rank without
-        route). While the node is behind, the preferred parent moved to a
+        within the bound), the others when feasible: a newer sequence at any
+        rank (path cost within 254), or the same and a rank below L (any
+        finite rank once L is restarted), within the bound. While the node
+        is behind, the preferred parent moved to a
         newer version is one at the node's own rank. drops: False to ignore
         a drop of n after failed attempts (`next_parent`; the other
         neighbours' drops still count). The preferred parent's link is
         judged by reachability alone, without ETX <= 4, when it is the last
         candidate (`last`).
         """
-        lowest = RANK_INFINITE if self.lowest is None else self.lowest
         address = n.address
         across = n.version != self.version
+        newer = False
         if across:
             if not (self.behind and address == self.preferred and n.rank != RANK_INFINITE):
                 return None
             if not 0 < (n.version - self.version) & VERSION_MASK < _HALF:
                 return None  # not newer
-        elif n.rank >= lowest and address != self.preferred:
-            return None
+        else:
+            newer = sequence_newer(n.sequence, self.sequence)
+            if address != self.preferred and not newer:
+                # Feasibility: the same sequence and a rank below L.
+                if n.sequence != self.sequence:
+                    return None  # older, unknown or not comparable
+                if self.lowest is not None and n.rank >= self.lowest:
+                    return None
         silence = silence_ms(self.table.period_ms)
         if now - n.heard >= silence:
             return None
@@ -263,7 +329,7 @@ class Parents:
         if across:
             return self.rank
         cost = n.rank + link_cost(n.link_etx(reach))
-        return cost if cost <= self.bound() else None
+        return cost if cost <= (MAX_COST if newer else self.bound()) else None
 
     def last(self, address, now):
         """Return True if no neighbour but address is a candidate at now (drops included)."""
@@ -283,7 +349,7 @@ class Parents:
         return events
 
     def detach(self, now):
-        """Poison: advertise rank 255 at once, forget L and the set; return the events."""
+        """Poison: advertise rank 255 at once, forget the set (L kept); return the events."""
         if self.root:
             return 0
         events = self._detach(now)
@@ -311,10 +377,12 @@ class Parents:
         self.poisoned_at = now
         return True
 
-    def on_new_version(self, version, now):
+    def on_new_version(self, version, now, sequence=None):
         """Adopt DODAG version (4 bits) and select again, L restarted; return the events.
 
-        Only parents of the new version are taken, at any rank; without one
+        sequence: the root sequence of the DODAG information adopted, taken
+        (None: no sequence held). Only parents of the new version are
+        taken, at any rank at that sequence (or a newer one); without one
         the node detaches. A detach hold goes on, and after it only
         neighbours heard after the solicitation are taken. The root only
         records the version it issued.
@@ -329,6 +397,10 @@ class Parents:
         self.cost = None
         self.rank = RANK_INFINITE
         self.lowest = None
+        self.sequence = sequence
+        self.sequence_at = None if sequence is None else now
+        if sequence is not None:
+            self.carried = sequence
         self.behind = False
         self._dropped.clear()
         events = self._select(now)
@@ -387,6 +459,11 @@ class Parents:
         table = self.table
         table.expire(now)
         self._prune()
+        at = self.sequence_at
+        if at is not None and now - at >= FORGET_PERIODS * table.period_ms:
+            self.sequence = None  # forgotten with L: the next one taken at any rank
+            self.sequence_at = None
+            self.lowest = None
         if self.hold_until is not None:
             if now < self.hold_until:
                 return 0
@@ -398,13 +475,14 @@ class Parents:
             if now < self.window_until:
                 return 0  # answers still to come
             self.window_until = None
-        best = []  # (path cost, -margin, address, rank), lowest first
+        best = []  # (path cost, -margin, address, rank, sequence), lowest first
         for n in table.entries():
             cost = self.candidate_cost(n, now)
             if cost is not None:
-                # A preferred parent of another version: never a secondary member.
+                # A preferred parent of another version: never a secondary
+                # member, its sequence never taken.
                 rank = n.rank if n.version == self.version else RANK_INFINITE
-                _insert(best, (cost, -n.margin(), n.address, rank))
+                _insert(best, (cost, -n.margin(), n.address, rank, n.sequence))
         if not best:
             if self.rank != RANK_INFINITE:
                 return self._detach(now)
@@ -440,13 +518,21 @@ class Parents:
             events |= ATTACHED
             self.poisoned_at = None
         lowest = self.lowest
-        if lowest is None or rank < lowest:
+        seq = chosen[4]
+        if chosen[3] != RANK_INFINITE and sequence_newer(seq, self.sequence):
+            # The preferred parent's newer sequence: taken, L restarted.
+            self.sequence = self.carried = seq
+            self.sequence_at = now
+            lowest = self.lowest = rank
+        elif lowest is None or rank < lowest:
             lowest = self.lowest = rank
         self.cost = cost
+        seq = self.sequence
         members = [chosen[2]]
         for key in best:
             if key is not chosen and key[3] < lowest:
-                members.append(key[2])
+                if key[4] == seq or sequence_newer(key[4], seq):
+                    members.append(key[2])
         self._set_members(members)
         return events
 
@@ -455,8 +541,7 @@ class Parents:
         self._set_members([])
         self.cost = None
         self.rank = RANK_INFINITE
-        self.lowest = None
-        self.poisoned_at = now
+        self.poisoned_at = now  # L and the sequence kept: only a newer one restarts L
         self.hold_until = now + self.hold_ms if self.hold_ms else None
         self.soliciting = False
         self.window_until = None

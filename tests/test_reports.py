@@ -68,10 +68,12 @@ def _open(f):
 
 class PresenceCodec(unittest.TestCase):
     def test_first_hop_form_round_trip(self):
-        p = Presence(FIRST_REPORT | NEXT_KEY, b"\x5a")
+        p = Presence(FIRST_REPORT | NEXT_KEY, b"\x5a", sequence=0xC3)
         payload = encode_presence(p)
-        self.assertEqual(payload, b"\x81\x5a")  # flags, SILy extension: 17 B frame (§11)
+        # Root sequence, flags, SILy extension: 18 B frame (§11).
+        self.assertEqual(payload, b"\xc3\x81\x5a")
         self.assertEqual(decode_presence(payload, parent=False), p)
+        self.assertEqual(decode_presence(payload, parent=False).sequence, 0xC3)
 
     def test_upward_form_with_tails_round_trip(self):
         p = Presence(RANK_ERRORS, b"\x01\x02", 0x1B07, [(200, 0x1234, 0xFFFF), (16, 0, 1)])
@@ -82,28 +84,43 @@ class PresenceCodec(unittest.TestCase):
         q = decode_presence(payload)
         self.assertEqual(q.flags, RANK_ERRORS | TAILS)
         self.assertEqual((q.parent, q.tails, q.extension), (0x1B07, p.tails, b"\x01\x02"))
+        self.assertIsNone(q.sequence)  # no root sequence in the mode 1 form
 
     def test_tails_flag_follows_the_tails(self):
-        self.assertEqual(encode_presence(Presence(TAILS)), b"\x00")
+        self.assertEqual(encode_presence(Presence(TAILS, sequence=7)), b"\x07\x00")
         self.assertEqual(decode_presence(b"\x05\x00\x02").flags, 0x02)
 
     def test_restore_parent(self):
-        own = encode_presence(Presence(QUEUE_OVERFLOW, b"\x07"))
-        q = decode_presence(restore_parent(own, 0x0010))
+        # Parent restored, root sequence dropped (§11: mode 6 only).
+        own = encode_presence(Presence(QUEUE_OVERFLOW, b"\x07", sequence=9))
+        fwd = restore_parent(own, 0x0010)
+        self.assertEqual(len(fwd), len(own) + 1)
+        q = decode_presence(fwd)
         self.assertEqual((q.parent, q.flags, q.extension), (0x0010, QUEUE_OVERFLOW, b"\x07"))
+        self.assertIsNone(q.sequence)
+        # A malformed one stays malformed (the root counts it).
+        self.assertRaises(ValueError, decode_presence, restore_parent(b"", 0x0010))
 
     def test_malformed(self):
         for payload, parent in (
             (b"", False),
+            (b"\x05", False),  # root sequence without flags
             (b"\x01\x00", True),
-            (b"\x08", False),  # tails flag without count
-            (b"\x08\x00", False),  # zero tails
-            (b"\x08\x01\x10\x00\x00\x00", False),  # truncated tail
-            (b"\x08\x09" + bytes(45), False),  # above 8 flows
+            (b"\x05\x08", False),  # tails flag without count
+            (b"\x05\x08\x00", False),  # zero tails
+            (b"\x05\x08\x01\x10\x00\x00\x00", False),  # truncated tail
+            (b"\x05\x08\x09" + bytes(45), False),  # above 8 flows
         ):
             with self.assertRaises(ValueError):
                 decode_presence(payload, parent)
-        for p in (Presence(256), Presence(0, b"", 0x10000), Presence(0, b"", None, [(256, 0, 0)])):
+        for p in (
+            Presence(256, sequence=0),
+            Presence(0, b"", 0x10000),
+            Presence(0, b"", None, [(256, 0, 0)], 0),
+            Presence(0),  # first-hop form without its root sequence
+            Presence(0, sequence=256),
+            Presence(0, b"", 0x10, sequence=1),  # a sequence in the mode 1 form
+        ):
             with self.assertRaises(ValueError):
                 encode_presence(p)
 
@@ -229,11 +246,15 @@ class Presences(unittest.TestCase):
         own = [(t, h, m, n) for t, h, m, n in line.frames(N) if m[0].port == PRESENCE]
         self.assertTrue(len(own) >= 4)
         t, h, msgs, size = own[-1]
-        # Mode 6, single message, no origin and no parent: 17 B (§11).
+        # Mode 6, single message, no origin and no parent, the root
+        # sequence N holds: 18 B (§11).
         self.assertEqual(
             (h.dest, len(msgs), msgs[0].mode, msgs[0].origin), (R, 1, FIRST_HOP, None)
         )
-        self.assertEqual((size, bytes(msgs[0].payload)), (17, b"\x00\x5a"))
+        payload = bytes(msgs[0].payload)
+        self.assertEqual((size, payload[1:]), (18, b"\x00\x5a"))
+        # Two root beacons per period: N, two hops down, at most a few behind.
+        self.assertTrue((line.root.routing.dodag.sequence - payload[0]) & 0xFF <= 8)
         # The relay forwards it in mode 1, origin and parent restored.
         fwd = []
         for _, rh, rmsgs, _ in line.frames(R):

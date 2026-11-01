@@ -7,6 +7,7 @@ from mesh.neighbours import ACK_MIN, NeighbourTable
 from mesh.parents import (
     ATTACHED,
     DETACHED,
+    FORGET_PERIODS,
     MAX_RANK_INCREASE,
     PARENT_CHANGED,
     RANK_CHANGED,
@@ -15,6 +16,7 @@ from mesh.parents import (
     Parents,
     link_cost,
     path_cost,
+    sequence_newer,
 )
 from mesh.platform import randbelow
 from mesh.reliable import HOLD
@@ -29,6 +31,8 @@ C = 0x00C1
 D = 0x00D1
 E = 0x00E1
 F = 0x00F1
+G = 0x0101
+H = 0x0111
 
 
 def _snr(margin_x10):
@@ -42,10 +46,14 @@ class Net:
         self.table = NeighbourTable(7, _PERIOD, capacity)
         self._counters = {}
 
-    def hear(self, address, rank, now, version=0, margin=100, gap=1):
+    def hear(self, address, rank, now, version=0, margin=100, gap=1, seq=None):
+        """Feed a frame of address; seq: the root sequence it carries (None: none)."""
         counter = self._counters.get(address, 0) + gap
         self._counters[address] = counter
-        return self.table.heard(address, counter, rank, version, -80, _snr(margin), now)
+        n = self.table.heard(address, counter, rank, version, -80, _snr(margin), now)
+        if n is not None and seq is not None:
+            self.table.set_sequence(address, seq)
+        return n
 
     def etx(self, address, acked, total, now=0):
         """Give address an ETX of total / acked through acknowledgement samples at now.
@@ -325,15 +333,21 @@ class BoundedIncrease(unittest.TestCase):
         events = self.p.recompute(3000)
         self.assertEqual(self.p.rank, RANK_INFINITE)
         self.assertEqual(self.p.members(), ())
-        self.assertIsNone(self.p.lowest)
+        self.assertEqual(self.p.lowest, 16)  # kept across the detach (§9)
         self.assertEqual(self.p.detaches, 1)
         self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
         self.assertEqual(self.net.flagged(), [])
-        # Rejoin through a neighbour heard after the poison, at any rank: L restarts.
+        # A neighbour heard after the poison at the node's sequence is
+        # refused at a rank not below L; with a newer sequence it is taken
+        # at any rank, and L restarts.
         self.net.hear(C, 46, 3100)
         self.net.etx(C, 1, 4, 3100)
-        events = self.p.recompute(3100)
+        self.assertEqual(self.p.recompute(3100), 0)
+        self.assertEqual(self.p.rank, RANK_INFINITE)
+        self.net.hear(C, 46, 3200, seq=1)
+        events = self.p.recompute(3200)
         self.assertEqual((self.p.rank, self.p.lowest, self.p.members()), (78, 78, (C,)))
+        self.assertEqual(self.p.sequence, 1)
         self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | ATTACHED)
 
     def test_bound_prefers_a_usable_candidate(self):
@@ -403,7 +417,8 @@ class RankFollowing(unittest.TestCase):
         self.assertEqual((self.p.preferred, self.p.rank, self.p.lowest), (A, 80, 24))
         events = self.step(73, 200)  # 81 > L + 56
         self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
-        self.assertEqual((self.p.rank, self.p.members(), self.p.lowest), (RANK_INFINITE, (), None))
+        # L kept across the detach (§9 root sequence).
+        self.assertEqual((self.p.rank, self.p.members(), self.p.lowest), (RANK_INFINITE, (), 24))
         self.assertEqual(self.p.detaches, 1)
         self.assertEqual(self.net.flagged(), [])
 
@@ -488,7 +503,8 @@ class BelowLowest(unittest.TestCase):
         self.net.hear(A, 16, 5000)
         events = self.p.recompute(2550 + 5 * _PERIOD // 2)
         self.assertEqual(events, DETACHED | PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
-        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((), RANK_INFINITE, None))
+        # L kept across the detach (§9 root sequence).
+        self.assertEqual((self.p.members(), self.p.rank, self.p.lowest), ((), RANK_INFINITE, 24))
 
 
 class FollowDiamond(unittest.TestCase):
@@ -981,10 +997,12 @@ class AnswerWindow(unittest.TestCase):
     solicitation that ended the hold (TLA+ `Rejoin = "window"`, RejoinBest)."""
 
     def detached(self):
-        # Attached through A, detached at 1000; the hold (500 ms) ends at
-        # the solicitation of 1500, which opens the window (300 ms).
+        # Attached through A at rank 100 (L 100, kept across the detach: the
+        # answers below are feasible at the node's sequence), detached at
+        # 1000; the hold (500 ms) ends at the solicitation of 1500, which
+        # opens the window (300 ms).
         self.net = Net()
-        self.net.hear(A, 8, 900)
+        self.net.hear(A, 92, 900)
         p = Parents(self.net.table, hold_ms=500, window_ms=300)
         p.recompute(900)
         p.detach(1000)
@@ -1076,6 +1094,179 @@ class AnswerWindow(unittest.TestCase):
         self.assertEqual((p.preferred, p.rank), (C, 24))
 
 
+class SequenceArithmetic(unittest.TestCase):
+    def test_serial_on_8_bits(self):
+        # Less than 128 apart compared (§9), across the wrap-around.
+        self.assertTrue(sequence_newer(1, 0))
+        self.assertTrue(sequence_newer(127, 0))
+        self.assertTrue(sequence_newer(2, 250))
+        self.assertFalse(sequence_newer(250, 2))
+        self.assertFalse(sequence_newer(5, 5))
+        self.assertFalse(sequence_newer(128, 0))  # 128 apart: not comparable
+        self.assertFalse(sequence_newer(0, 128))
+
+    def test_none_is_no_sequence(self):
+        self.assertTrue(sequence_newer(0, None))
+        self.assertFalse(sequence_newer(None, 0))
+        self.assertFalse(sequence_newer(None, None))
+
+
+class RootSequence(unittest.TestCase):
+    """Feasibility with the root sequence (§9, Babel; TLA+ `DODAG`, ``Seq =
+    "babel"``): attached through A (rank 16, sequence 10): rank 24, L 24."""
+
+    def setUp(self):
+        self.net = Net()
+        self.net.hear(A, 16, 0, seq=10)
+        self.p = Parents(self.net.table)
+        self.p.recompute(0)
+
+    def cost(self, address, now):
+        return self.p.candidate_cost(self.net.table.get(address), now)
+
+    def test_taken_from_the_preferred_parent(self):
+        p = self.p
+        self.assertEqual((p.preferred, p.rank, p.lowest), (A, 24, 24))
+        self.assertEqual((p.sequence, p.carried, p.sequence_at), (10, 10, 0))
+
+    def test_feasibility(self):
+        net = self.net
+        net.hear(B, 30, 10, seq=11)  # newer: any rank (above L)
+        net.hear(C, 23, 10, seq=10)  # same, below L
+        net.hear(D, 24, 10, seq=10)  # same, at L
+        net.hear(E, 8, 10, seq=9)  # older, far below L
+        net.hear(F, 8, 10)  # sequence unknown
+        net.hear(G, 200, 10, seq=11)  # newer: beyond L + 56, within 254
+        net.hear(H, 250, 10, seq=11)  # newer, path cost above 254
+        costs = [self.cost(x, 10) for x in (B, C, D, E, F, G, H)]
+        self.assertEqual(costs, [38, 31, None, None, None, 208, None])
+        self.assertEqual(self.p.bound(), 24 + MAX_RANK_INCREASE)
+
+    def test_preferred_parent_followed_whatever_its_sequence(self):
+        self.net.hear(A, 30, 100, seq=10)  # same sequence, above L: followed
+        self.assertEqual(self.cost(A, 100), 38)
+        self.net.hear(A, 30, 200)  # a frame without sequence keeps the last one
+        self.assertEqual(self.net.table.get(A).sequence, 10)
+        self.assertEqual(self.cost(A, 200), 38)
+
+    def test_newer_sequence_of_the_parent_restarts_l(self):
+        p = self.p
+        self.net.hear(A, 32, 100, seq=10)  # followed: rank 40, L stays 24
+        self.net.hear(C, 30, 100, seq=10)
+        p.recompute(100)
+        self.assertEqual((p.rank, p.lowest, p.sequence, p.members()), (40, 24, 10, (A,)))
+        self.assertIsNone(self.cost(C, 100))  # not below L
+        # A's next frame carries 11: taken, L restarted at the current rank.
+        self.net.hear(A, 32, 600, seq=11)
+        self.net.hear(C, 30, 600, seq=11)
+        self.assertEqual(p.recompute(600), 0)
+        self.assertEqual((p.rank, p.lowest, p.sequence, p.sequence_at), (40, 40, 11, 600))
+        self.assertEqual(self.cost(C, 600), 38)
+        self.assertEqual(p.members(), (A, C))
+
+    def test_switch_to_a_newer_sequence_takes_it(self):
+        p = self.p
+        self.net.hear(B, 2, 100, seq=11)  # path cost 10, 14 below A's
+        self.assertEqual(p.recompute(100), PARENT_CHANGED | RANK_CHANGED)
+        self.assertEqual((p.preferred, p.rank, p.lowest, p.sequence), (B, 10, 10, 11))
+
+    def test_members_of_an_older_sequence_leave_the_set(self):
+        p = self.p
+        self.net.hear(C, 20, 100, seq=10)
+        p.recompute(100)
+        self.assertEqual(p.members(), (A, C))
+        self.net.hear(A, 16, 200, seq=11)  # C still at 10: older than the node's now
+        p.recompute(200)
+        self.assertEqual((p.members(), p.sequence), ((A,), 11))
+        self.assertEqual(self.net.flagged(), [A])
+
+    def test_l_and_sequence_kept_across_a_detach(self):
+        p = self.p
+        p.detach(1000)
+        self.assertEqual((p.rank, p.lowest, p.sequence), (RANK_INFINITE, 24, 10))
+        # Heard after the poison: at the node's sequence, only below L.
+        self.net.hear(B, 30, 1100, seq=10)
+        self.assertEqual(p.recompute(1100), 0)
+        self.assertEqual(p.rank, RANK_INFINITE)
+        self.net.hear(C, 20, 1200, seq=10)
+        self.assertTrue(p.recompute(1200) & ATTACHED)
+        self.assertEqual((p.preferred, p.rank, p.lowest, p.sequence), (C, 28, 24, 10))
+        # A newer sequence is feasible at any rank and restarts L.
+        p.detach(1300)
+        self.net.hear(B, 30, 1400, seq=11)
+        self.assertTrue(p.recompute(1400) & ATTACHED)
+        self.assertEqual((p.preferred, p.rank, p.lowest, p.sequence), (B, 38, 38, 11))
+
+    def test_older_sequence_never_feasible_without_route(self):
+        p = self.p
+        p.detach(1000)
+        self.net.hear(B, 0, 1100, seq=9)  # rank 0, but an older sequence
+        self.assertEqual(p.recompute(1100), 0)
+        self.assertEqual((p.rank, p.members()), (RANK_INFINITE, ()))
+
+    def test_wrap_around(self):
+        net = Net()
+        net.hear(A, 16, 0, seq=254)
+        p = Parents(net.table)
+        p.recompute(0)
+        net.hear(B, 30, 10, seq=1)  # 3 ahead across the wrap-around: newer
+        net.hear(C, 8, 10, seq=200)  # 54 behind: older
+        net.hear(D, 8, 10, seq=126)  # 128 apart: not comparable
+        costs = [p.candidate_cost(net.table.get(x), 10) for x in (B, C, D)]
+        self.assertEqual(costs, [38, None, None])
+        net.hear(A, 16, 20, seq=1)
+        p.recompute(20)
+        self.assertEqual((p.sequence, p.lowest), (1, 24))
+
+    def test_forgotten_after_50_periods_then_taken_at_any_rank(self):
+        # A falls silent: detached, sequence 10 and L 24 kept. B, heard
+        # every period at rank 30 with sequence 200 (older by serial
+        # arithmetic), is refused until the sequence has not advanced for
+        # 50 periods: then forgotten with L, and B's taken at any rank.
+        p = self.p
+        p.recompute(5 * _PERIOD // 2)
+        self.assertEqual((p.rank, p.lowest, p.sequence), (RANK_INFINITE, 24, 10))
+        limit = FORGET_PERIODS * _PERIOD
+        t = 3 * _PERIOD
+        while t < limit:
+            self.net.hear(B, 30, t, seq=200)
+            self.assertEqual(p.recompute(t), 0, t)
+            t += _PERIOD
+        self.net.hear(B, 30, limit - 1, seq=200)
+        self.assertEqual(p.recompute(limit - 1), 0)
+        self.assertEqual(p.carried, 10)
+        self.assertTrue(p.recompute(limit) & ATTACHED)
+        self.assertEqual((p.preferred, p.rank, p.lowest), (B, 38, 38))
+        self.assertEqual((p.sequence, p.carried, p.sequence_at), (200, 200, limit))
+
+    def test_forgotten_with_l_without_a_candidate(self):
+        p = self.p
+        p.recompute(5 * _PERIOD // 2)  # A silent: detached, L and sequence kept
+        p.recompute(FORGET_PERIODS * _PERIOD - 1)
+        self.assertEqual((p.lowest, p.sequence), (24, 10))
+        p.recompute(FORGET_PERIODS * _PERIOD)
+        self.assertEqual(
+            (p.rank, p.lowest, p.sequence, p.sequence_at), (RANK_INFINITE, None, None, None)
+        )
+        self.assertEqual(p.carried, 10)  # still carried by its frames
+
+    def test_attached_node_forgets_l_too(self):
+        # A heard every period, its sequence never advancing (a cut-off
+        # part): at 50 periods L is forgotten and restarted at the current
+        # rank, the sequence taken again from A at any rank.
+        p = self.p
+        self.net.hear(A, 40, 1000, seq=10)  # followed: rank 48, L 24
+        p.recompute(1000)
+        self.assertEqual((p.rank, p.lowest), (48, 24))
+        t = 2000
+        while t <= FORGET_PERIODS * _PERIOD:
+            self.net.hear(A, 40, t, seq=10)
+            p.recompute(t)
+            t += _PERIOD
+        self.assertEqual((p.preferred, p.rank, p.lowest, p.sequence), (A, 48, 48, 10))
+        self.assertEqual(p.sequence_at, FORGET_PERIODS * _PERIOD)
+
+
 class NewVersion(unittest.TestCase):
     def test_parents_of_new_version_any_rank(self):
         net = Net()
@@ -1089,6 +1280,21 @@ class NewVersion(unittest.TestCase):
         self.assertEqual((p.members(), p.rank, p.lowest), ((B,), 108, 108))
         self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED)
         self.assertFalse(net.table.get(A).parent)
+
+    def test_new_version_takes_the_sequence_of_the_information(self):
+        # Sequences are compared within a version: L restarted, the
+        # sequence of the information adopted taken (§9).
+        net = Net()
+        net.hear(A, 8, 0, seq=200)
+        p = Parents(net.table)
+        p.recompute(0)
+        self.assertEqual((p.sequence, p.lowest), (200, 16))
+        net.hear(B, 100, 100, version=1, seq=50)
+        net.hear(C, 8, 100, version=1, seq=49)  # older in the new version
+        p.on_new_version(1, 100, 50)
+        self.assertEqual((p.members(), p.rank, p.lowest), ((B,), 108, 108))
+        self.assertEqual((p.sequence, p.carried, p.sequence_at), (50, 50, 100))
+        self.assertIsNone(p.candidate_cost(net.table.get(C), 100))
 
     def test_no_parent_of_new_version_detaches(self):
         net = Net()
@@ -1206,16 +1412,26 @@ class Events(unittest.TestCase):
 # --- Properties on random neighbour tables -----------------------------------------
 
 
+def _newer(a, b):
+    # Root sequence a newer than b: 1 to 127 ahead modulo 256; any is newer
+    # than none (§9).
+    if a is None:
+        return False
+    return b is None or 0 < (a - b) % 256 < 128
+
+
 def _reference(p, now):
-    """Return the expected (rank, members) of p.recompute(now), computed afresh.
+    """Return the expected (rank, members, sequence) of p.recompute(now), computed afresh.
 
     Independent of the module: full sort of every candidate, float rounding.
-    Valid without drops (`next_parent`) and with hold_ms = 0.
+    Valid without drops (`next_parent`), with hold_ms = 0 and within 50
+    periods of the last advance of the sequence.
     """
     table = p.table
     table.expire(now)
     bound = 254 if p.lowest is None else min(254, p.lowest + p.max_increase)
     low = RANK_INFINITE if p.lowest is None else p.lowest
+    seq = p.sequence
 
     def candidate(n, by_reach):
         # By reachability: fewer than 4 failed samples in a row, or an
@@ -1228,7 +1444,10 @@ def _reference(p, now):
             eligible = n.margin_ok and n.m_count > 0 and n.etx() <= 4 * 128
         if n.version != p.version or not eligible:
             return None
-        if n.rank >= low and n.address != p.preferred:
+        # Feasible (Babel): a newer sequence at any rank within 254, or the
+        # same and below L; the preferred parent followed.
+        newer = _newer(n.sequence, seq)
+        if n.address != p.preferred and not newer and (n.sequence != seq or n.rank >= low):
             return None
         if now - n.heard >= 5 * _PERIOD // 2:
             return None
@@ -1236,7 +1455,9 @@ def _reference(p, now):
             return None
         etx = min(n.etx(), 4 * 128) if by_reach else n.etx()
         cost = n.rank + max(8, int(8 * etx / 128 + 0.5))
-        return (cost, -n.margin(), n.address, n.rank) if cost <= bound else None
+        return (
+            (cost, -n.margin(), n.address, n.rank) if cost <= (254 if newer else bound) else None
+        )
 
     # The others first (the root by reachability, the rest by ETX), then the
     # preferred parent, by reachability if it is the root or no other is a
@@ -1257,7 +1478,7 @@ def _reference(p, now):
     cands.sort()
     top = cands[:3]
     if not top:
-        return RANK_INFINITE, ()
+        return RANK_INFINITE, (), seq
     chosen = top[0]
     for key in top:
         if key[2] == p.preferred and key[0] - top[0][0] < 12:
@@ -1265,9 +1486,19 @@ def _reference(p, now):
     rank = p.rank
     if chosen[2] != p.preferred or abs(chosen[0] - rank) >= 4:
         rank = chosen[0]
-    low = min(low, rank)
-    members = [chosen[2]] + [k[2] for k in top if k is not chosen and k[3] < low]
-    return rank, tuple(members)
+    parent_seq = table.get(chosen[2]).sequence
+    if _newer(parent_seq, seq):
+        seq = parent_seq  # taken: L restarts at the rank
+        low = rank
+    else:
+        low = min(low, rank)
+
+    def kept(key):
+        other = table.get(key[2]).sequence
+        return key[3] < low and (other == seq or _newer(other, seq))
+
+    members = [chosen[2]] + [k[2] for k in top if k is not chosen and kept(k)]
+    return rank, tuple(members), seq
 
 
 class _Scenario:
@@ -1287,6 +1518,7 @@ class _Scenario:
         if self.below(2):
             self.addresses.append(ROOT)  # its link judged by reachability
         self.ranks = {}
+        self.root_seq = self.below(256)  # the newest root sequence, wrapping around
 
     def below(self, n):
         return randbelow(self.rng, n)
@@ -1309,7 +1541,11 @@ class _Scenario:
             self.ranks[address] = rank
             version = p.version if self.below(8) else (p.version + 1) & 15
             margin = 10 + self.below(140)
-            self.net.hear(address, rank, self.now, version, margin, 1 + self.below(3))
+            # The root advances now and then; a frame carries a sequence up
+            # to 3 behind it, or none (data, acknowledgements).
+            self.root_seq = (self.root_seq + self.below(2)) & 0xFF
+            seq = None if self.below(4) == 0 else (self.root_seq - self.below(4)) & 0xFF
+            self.net.hear(address, rank, self.now, version, margin, 1 + self.below(3), seq)
         elif k < 60:
             address = self.addresses[self.below(len(self.addresses))]
             self.net.table.acked(address, rng.chance(0.7), self.now)
@@ -1319,15 +1555,22 @@ class _Scenario:
             else:
                 expected = _reference(p, self.now)
                 p.recompute(self.now)
-                test.assertEqual((p.rank, p.members()), expected)
+                test.assertEqual((p.rank, p.members(), p.sequence), expected)
             test.check(p)
         elif not self.drops:
             p.detach(self.now)
             test.check(p)
         elif p.preferred is not None:
-            hop = p.next_parent(p.preferred)
+            pref, members, drops = p.preferred, p.members(), p.drops
+            hop = p.next_parent(pref)
             test.assertTrue(hop == HOLD or hop == p.preferred)
-            test.check(p)
+            if hop == pref and p.drops == drops:
+                # Kept, no selection: the frames heard since the last one
+                # (a parent's rank increase, followed by the next) are not
+                # selected on yet, so only the set is checked unchanged.
+                test.assertEqual(p.members(), members)
+            else:
+                test.check(p)
         return (self.now, p.rank, p.members())
 
 
@@ -1351,6 +1594,7 @@ class Properties(unittest.TestCase):
             self.assertTrue(n.parent)
             if m != p.preferred:
                 self.assertTrue(n.rank < p.lowest, "member rank %d >= L %d" % (n.rank, p.lowest))
+                self.assertTrue(n.sequence == p.sequence or _newer(n.sequence, p.sequence))
         flagged = sorted(n.address for n in table.entries() if n.parent)
         self.assertEqual(flagged, sorted(members))
         if members:

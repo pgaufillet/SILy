@@ -266,6 +266,29 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(bystander.counters.rx_overheard, 1)
         self.assertEqual(len(bystander.queue), 0)
 
+    def test_every_decoded_frame_passed_to_decoded_first(self):
+        # Overheard ones included, before the messages are processed, with
+        # the neighbour-table entry of the sender (the root sequence, §9).
+        sender = _engine(A, hop=C)
+        bystander = _engine(B, seed=2, hop=ROOT)
+        inbox = _Inbox()
+        bystander.bind(20, inbox)
+        seen = []
+
+        def decoded(h, msgs, entry, now):
+            seen.append((h.dest, [bytes(m.payload) for m in msgs], entry, len(inbox.messages)))
+
+        bystander.decoded = decoded
+        sender.submit(20, 0, B, b"via C")  # overheard: for C
+        sender.submit(20, 0, BROADCAST, b"all")
+        frames, now = _drain(sender, 0)
+        for f in frames:
+            _rx(bystander, now, f)
+        entry = bystander.neighbours.get(A)
+        self.assertIsNotNone(entry)
+        self.assertEqual(seen, [(C, [b"via C"], entry, 0), (BROADCAST, [b"all"], entry, 0)])
+        self.assertEqual(len(inbox.messages), 1)  # the broadcast, after decoded
+
 
 class Reception(unittest.TestCase):
     def setUp(self):
