@@ -1777,8 +1777,8 @@ keystream repeats: the XOR of two plaintexts leaks; authenticity weakens), so
   the password. JSON export omits the key; JSON import accepts a
   password, derived on import (mass deployment).
 - **Strength**: from one recorded frame, an attacker tests guesses offline.
-  With N = 10 000, a GPU tests in the order of 10^5–10^6 guesses per second: a
-  40-bit password falls within weeks on one GPU, an 80-bit one never. The UI
+  With N = 6000, a GPU tests in the order of 10^6 guesses per second: a
+  40-bit password falls within days to weeks on one GPU, an 80-bit one never. The UI
   offers a generated password (16 base32 characters, 80 bits) and refuses
   fewer than 12 characters.
 - **No flash encryption** in v1: the key can be read from a captured board's
