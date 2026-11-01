@@ -39,13 +39,17 @@ SEQ = 2  # message sequence, classes 1 and 2
 PRESENCE_REC = ADDR + ADDR + 1 + 1
 TOPO_REC = ADDR + 1 + 6 * 4  # topology: origin, count, 6 x (addr 2, margin 1, quality 1)
 PUNCH_REC = ADDR + SEQ + 10  # punch, class 2: origin, sequence, SIPy punch
-# The same on the first hop (mode 6): origin = link source, presence parent = link destination.
-PRESENCE_FIRST = PRESENCE_REC - 2 * ADDR
+ROOT_SEQ = 1  # root sequence, carried by the node's own presence and port 9 (§9, §11)
+# The same on the first hop (mode 6): origin = link source, presence parent = link
+# destination, plus the root sequence. A node's own presence always goes in mode 6:
+# beside a bundle of forwarded reports it takes control, port, length and 3 B, as many
+# bytes as its record in the bundle would (6), so relay frames keep their size.
+PRESENCE_FIRST = PRESENCE_REC - 2 * ADDR + ROOT_SEQ
 TOPO_FIRST = TOPO_REC - ADDR
 PUNCH_FIRST = PUNCH_REC - ADDR
 # Port 9 DODAG information: flags 1, presence 2, topology 2, Imin 1, max rank
-# increase 1, profile 1.
-DODAG_INFO = 8
+# increase 1, profile 1, root sequence 1.
+DODAG_INFO = 8 + ROOT_SEQ
 # Root beacon and Trickle advertisement: one DODAG information message.
 BEACON = LAST_HEADER + DODAG_INFO
 ACK_ENTRY = 4  # class 1 acknowledgement: link source 2, frame counter low 16 bits 2
@@ -96,7 +100,10 @@ PERIODS = (15, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1200, 1800, 3600)
 
 # --- Routing and repair (MESH_DESIGN §9) -----------------------------------
 DEPTH = 8  # maximum depth (MP13)
-TRICKLE_IMIN = 32  # slots (slot = time on air of a first-hop presence frame, §8)
+TRICKLE_IMIN = 32  # slots (§8)
+# The slot is the time on air of a 17 B frame (a first-hop presence before the root
+# sequence was added; kept so that the slot-based timers do not move, §8).
+SLOT_FRAME = 17
 TRICKLE_K = 2  # Trickle redundancy constant
 GLOBAL_REPAIR_MIN = 4  # presence periods between two DODAG versions, at least
 K_PARENT = SILENCE_LIMIT  # presence periods without any frame from the preferred parent
@@ -290,7 +297,7 @@ def main():
     )
     print("                        relay   root     last relay")
     for sf in SFS:
-        slot = toa(frame(1, PRESENCE_FIRST), sf)
+        slot = toa(SLOT_FRAME, sf)
         imin = TRICKLE_IMIN * slot
         live = periods[sf]
         rto_relay = toa(MAX_FRAME, sf) + RTO_SLOTS * slot
@@ -343,7 +350,7 @@ def main():
     print("SF  NACK    lost message,       lost last message   presence period with a tail")
     print("    delay   after the gap seen  (tail, idle flow)   on every Node (s, transient)")
     for sf in SFS:
-        slot = toa(frame(1, PRESENCE_FIRST), sf)
+        slot = toa(SLOT_FRAME, sf)
         live = periods[sf]
         rto_relay = toa(MAX_FRAME, sf) + RTO_SLOTS * slot
         ack = toa(OVERHEAD + LAST_HEADER + ACK_PER_FRAME * ACK_ENTRY, sf)

@@ -162,11 +162,11 @@ measurement recorded).
 | **Robustness** ||||
 | MP9 | Duty-cycle compliance guaranteed whatever the applications do; mesh control traffic bounded, its budget known per SF | designed | §6; budget §16 (SILy) |
 | MP10 | Self-forming, self-healing: no configuration beyond network key and radio parameters; repair within a bounded time stated per SF | designed | §9: local repair by parent set, detach and rejoin, global repair by DODAG version; repair times per SF (§9 table) |
-| MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, data-path validation with duplicate cache; no hop limit needed. No loop with at most one consecutive loss per link (TLA+ `DODAG`); beyond, a loop ends by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.6 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
+| MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, Babel's feasibility condition with a root sequence (L kept across a detach), data-path validation with duplicate cache; no hop limit needed. No loop in the cases checked (TLA+ `DODAG`, `Seq = "babel"`: line, star, star2 and diamond graphs, a dead relay, up to 1–3 losses in any pattern, one root sequence increment, fixed link costs; a diamond run with 2 losses stopped incomplete), the argument holding whatever was lost; without the root sequence, none with at most one consecutive loss per link, and beyond, a loop ended by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.6 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
 | MP12 | Stability: hysteresis, no route flapping; link quality (margin, delivery ratio) preferred over hop count; asymmetric links detected | designed | §9: ETX over 16-frame windows, margin eligibility with 3/6 dB hysteresis, ETX ≤ 4 eligibility (waived, for reachability alone, only on the link to the root and the last candidate's), parent switch threshold, rank hysteresis; asymmetric links flagged by the root |
 | MP13 | Bounded resources: sized tables (default 64 nodes, depth 8), bounded queues and buffers, documented degradation beyond | designed | §12 (resource table and degradation), §9 (neighbour table), §10 (graph, depth) |
 | MP14 | Reboot tolerance: a rebooted node or root rejoins without operator action; no persistent state required except security counters and the duty-cycle window (§6) | designed | §9: a node solicits at boot and rejoins; the root listens one presence period and issues the next DODAG version (no persistent routing state); persistent state limited to the frame counter and class 2 sequences in NVS, replay table and duty-cycle window in RTC memory (§6, §14) |
-| MP15 | Partition tolerance: an isolated node stays audible, is reported as soon as a neighbour hears it and rejoins automatically; class 1 holds messages during repair; no long-term store-and-forward (application journals do that) | designed | §9: a node without route solicits once per presence period and appears in its neighbours' topology reports; §12: class 1 and 2 held 2 presence periods |
+| MP15 | Partition tolerance: an isolated node stays audible, is reported as soon as a neighbour hears it and rejoins automatically; class 1 holds messages during repair; no long-term store-and-forward (application journals do that) | designed | §9: a node without route solicits once per presence period and appears in its neighbours' topology reports; §12: class 1 and 2 held 2 presence periods from the loss of route or grounding, not renewed at a hand-over |
 | MP16 | Coexistence: several networks on one channel (network identity / key); foreign LoRa traffic filtered (private sync word) | designed | §14: private sync word filters LoRaWAN; other networks fail authentication, counted and reported; two networks in range tolerated, not supported (shared capacity) |
 | MP17 | Security: only authenticated nodes inject traffic or routing information; replay protection; limits of a network-wide shared key documented | designed | §14: AES-128-CCM on every frame (4-byte tag), nonce from address and lifelong frame counter, replay table, PBKDF2 key derivation, staged key switch, next key wrapped under the current key for distribution by the application; threat model and limits of the shared key |
 | MP27 | Regulatory compliance by construction: channels, bandwidth, power, duty cycle, maximum transmission time and mandatory listen-before-talk come from a **regional profile** (data, not code) selected by configuration; radio settings outside the profile are refused; the mesh enforces the profile's access rules whatever the applications do | designed | §4: profile table, configuration validated against it, custom profile flagged as the operator's responsibility; §6 duty cycle, §8 listen-before-talk where mandatory, §9 profile identifier checked between nodes |
@@ -220,7 +220,7 @@ this document cites its source and what was changed.
 |---|---|---|
 | Topology, upward/downward routes, P2P | **RPL** (RFC 6550) | DODAG rooted at the root, parent set with preferred parent; rank rule against loops; local repair by switching parent, global repair by version number; storing vs non-storing modes (§10) |
 | Parent choice | **MRHOF** (RFC 6719), **CTP** (TinyOS) | ETX metric with hysteresis; CTP data-path validation (a packet going up towards a higher cost reveals a loop, detected without extra traffic) |
-| Loop freedom during repair | **Babel** (RFC 8966) | Considered and rejected: feasibility condition with a root-issued sequence number; the RPL rank rule is kept (§9) |
+| Loop freedom during repair | **Babel** (RFC 8966), **RPL** floating DODAG | Feasibility condition with a root-issued sequence number, on top of the RPL rank rule: a neighbour is a candidate with a newer sequence, or the same sequence and a rank below the node's lowest one; a node whose sequence stops advancing is ungrounded (RPL's floating DODAG) and holds its traffic (§9, §12) |
 | Link estimation, asymmetric links | **CTP** (4-bit link estimator), **Thread** (link quality in/out exchanged between neighbours) | Combine beacon reception and class 1 acknowledgements: ETX measured at no airtime cost |
 | Control traffic cost | **Trickle** (RFC 6206) | Route advertisements fast after a change, increasingly spaced when stable, suppressed when neighbours already said the same; presence stays periodic for supervision |
 | State dissemination | **Trickle** / Drip (TinyOS) | Versioned value disseminated to every node, including late or rebooted ones |
@@ -229,6 +229,18 @@ this document cites its source and what was changed.
 | Service classes | **CoAP** (CON/NON, RFC 7252), **MQTT-SN** QoS 0/1/2, **NORM** (RFC 5740), **SCHC** ACK-on-Error | At most once / at least once / exactly once semantics; NACK-based reliability with tail announcement (class 2) |
 | Security (§14) | **IEEE 802.15.4 / Thread**, **LoRaWAN** | CCM with a nonce from (address, frame counter) and a 4-byte MIC; persistent frame counters; Thread's key switch on the first frame received under the next key |
 | Supervision | **RPL non-storing**, **Thread Network Diagnostics** | Root rebuilds the whole graph and DODAG; diagnostic queries as TLVs; ping, traceroute |
+
+The root-issued sequence was first considered and rejected: Babel keeps one
+sequence per destination and starving nodes request a newer one, traffic that
+RPL's rank rule avoids. Neither applies with a single destination: the root
+issues the sequence on its beacon (§9), one byte in the DODAG information
+and in each node's own presence, and no request is ever sent. It was adopted
+once the host simulator showed the limit of the rank rule alone: the poison
+protects a node against its descendants only, and L restarts at each
+rejoin, so the Nodes of a dead relay rejoined through siblings still
+advertising a finite rank, cut off from the root; ranks counted up one hop
+per generation and the rootless DODAG, with messages circulating in it,
+persisted for minutes (30-node star).
 
 Sources: [LoRaMesher at IETF 122 GAIA](https://datatracker.ietf.org/meeting/122/materials/slides-122-gaia-loramesher-for-lora-mesh-networks-00),
 [draft-vilajosana-lpwan-lora-hc-00](https://datatracker.ietf.org/doc/html/draft-vilajosana-lpwan-lora-hc-00),
@@ -466,7 +478,8 @@ gets its share, not its relays' capacity.
   after 6 attempts a priority-2/3 report is dropped, a class 1/2 message (and
   a priority-1 class 0 message) is retried later: a new procedure after one
   more backoff of up to 32 slots. The slot is the time on air of a 17 B frame
-  (SILy presence size), fixed whatever the presence extension.
+  (the SILy presence size before the root sequence), fixed whatever the
+  presence extension and the sequence byte.
 - **Hidden terminals** remain (nodes that hear the relay but not each other).
   Accepted: class 1/2 recover losses, presence losses are absorbed by the
   silence threshold (`K_MISS`); measured loss rates decide whether more is
@@ -481,11 +494,10 @@ Upward routing is a simplified RPL (RFC 6550): DODAG
 rooted at the root, rank rule against loops, local repair by parent set,
 global repair by DODAG version. The metric follows MRHOF (RFC 6719), loop
 detection on the data path follows CTP, control timers follow Trickle
-(RFC 6206). Choices: RPL rank rule rather than Babel's feasibility
-condition (one destination, the root, which is what RPL is designed for;
-Babel needs per-destination sequence requests), with the other candidates
-tested against the node's lowest rank (DUAL's feasibility condition, no
-sequence number); ETX metric with the margin
+(RFC 6206). Choices: RPL rank rule, with the other candidates tested
+against the node's lowest rank L, and Babel's feasibility condition on a
+root sequence (one destination, the root, which issues the sequence on its
+beacon: no sequence request), L kept across a detach; ETX metric with the margin
 as an eligibility filter (link quality rather than hop count, MP12); global
 repair on demand only (each one resets Trickle in every neighbourhood,
 finding 4 below); parent declared lost when silent (2.5 presence periods:
@@ -646,11 +658,13 @@ acknowledgement window and the time of its newest failure.
   or the last candidate's, the ETX capped at 4, above). **Path cost** through a neighbour m = rank(m) + link
   cost(m); above 254, m is not usable. The depth limit (8, MP13) is enforced
   by the root (§10); with ETX ≤ 3.9 per hop, 8 hops fit in the rank byte.
-- **Candidates**: neighbours with the same DODAG version, a rank **strictly
-  lower than L**, the lowest rank the node has advertised since it attached
-  or adopted its DODAG version (never above its current rank; any finite
-  rank for a node without route), heard within the silence limit (2.5
-  presence periods, strict), through an eligible link. The **preferred parent** stays a candidate at any finite
+- **Candidates**: neighbours with the same DODAG version that are
+  **feasible**: a **root sequence newer** than the node's (any rank), or
+  the same sequence and a rank **strictly lower than L**, the lowest rank
+  the node has advertised with that sequence (never above its current
+  rank; kept by a node without route), never an older sequence (root
+  sequence and grounding, below); not floating; heard within the silence
+  limit (2.5 presence periods, strict), through an eligible link. The **preferred parent** stays a candidate at any finite
   rank (**rank following**, the RPL rule): when its rank rises to the
   node's or above (it fell back on a worse parent), the node keeps it and
   follows the increase, within the L + 56 bound (below), instead of
@@ -708,14 +722,16 @@ acknowledgement window and the time of its newest failure.
   air fails the same way: the children's ranks reach the node later than
   its rank reaches them. This is the feasibility condition of DUAL (EIGRP),
   L playing the feasible distance and the detach, hold and rejoin its
-  active state. Cost: fewer local repairs and more detaches, since a node
+  active state, and of Babel with the root sequence (below). Cost: fewer local repairs and more detaches, since a node
   whose rank has risen above L moves only to a neighbour below L, otherwise
   it follows its preferred parent up to the bound or detaches and rejoins
-  (L restarting); the first local repair after a parent loss is unchanged
+  (L restarting with a newer root sequence only, below); the first local
+  repair after a parent loss is unchanged
   when the node was at its lowest rank (L is then its current rank). The
   argument assumes no node holds a view of an ancestor older than that
   ancestor's last attach, which the detach below ensures with at most one
-  consecutive loss per link.
+  consecutive loss per link; L kept across the detach, with the root
+  sequence, removes that assumption (below).
 - **Detach (poisoning)**: when no candidate remains, the node advertises rank
   255 at once (Trickle reset, after a random delay of at most 4 slots, as its
   solicitations: siblings detaching together otherwise collide and may
@@ -723,7 +739,9 @@ acknowledgement window and the time of its newest failure.
   its descendants hear the poison and switch parent or detach in turn. It
   then sends a solicitation **without selecting** and stays detached until
   the solicitation is on air (queue, duty cycle); it rejoins only through
-  neighbours heard **after the solicitation**, at any rank (L restarts).
+  neighbours heard **after the solicitation** and feasible: a newer root
+  sequence, or the same sequence and a rank below L, which the detach
+  keeps (below).
   The solicitation opens an **answer window** of Imin + 8 slots (Trickle
   below) during which the node selects nothing; at its close it takes the
   **best** candidate heard after the solicitation (lowest path cost, the
@@ -735,10 +753,14 @@ acknowledgement window and the time of its newest failure.
   node adopting another version in its window also waits for the close
   (selecting at the adoption violates RejoinBest). The solicitation (rank
   255) is a second poison: a descendant that lost the poison hears it and
-  detaches instead of answering. With at most one consecutive loss per link no loop
-  forms (TLA+ `DODAG`, `spec/README.md`: line and subtree graphs); two
+  detaches instead of answering. Without the root sequence (L restarting
+  at the rejoin), no loop forms with at most one consecutive loss per link
+  (TLA+ `DODAG`, `spec/README.md`: line and subtree graphs), and two
   consecutive losses on one link (poison and solicitation) may let the node
-  rejoin through a descendant. Such a loop is **not broken at once by the
+  rejoin through a descendant (`DODAG_line_reachall_consec2`); with it, a
+  descendant is never feasible, whatever was lost (checked with up to
+  1–3 losses in any pattern, `DODAG_*_babel_*`).
+  A loop formed otherwise is **not broken at once by the
   rank rule**: each member follows its preferred parent's increase (rank
   following). It ends when a member switches to a candidate better by the
   switch threshold, or when the ranks have climbed past `L + 56` and a
@@ -774,6 +796,125 @@ acknowledgement window and the time of its newest failure.
   it at once would attach the node through its own child, a loop without
   any loss (TLA+ `DODAG_diamond_versions_adopt`; a new version ends neither
   the hold nor that rule).
+
+### Root sequence and grounding
+
+- **Root sequence** (8 bits, serial arithmetic): the root increments it at
+  each beacon (every half presence period) and carries it in its DODAG
+  information (port 9); every node carries the sequence it holds in its
+  DODAG information and in its own presence (+1 B each, §11), the frames
+  a child hears from its parent every period. Other frames (data,
+  acknowledgements, solicitations) carry none. A node reads the sequence
+  of **every frame heard** that carries one, **overheard ones included**
+  (addressed to another node), and keeps each neighbour's last one, the
+  preferred parent's included: the parent's presence goes to the
+  grandparent, a neighbour's to its own parent, and Trickle is silent in
+  steady state, so a node reading only the frames addressed to it would
+  never see the sequence beyond hop 1 and would float after G (below).
+  A node holds the sequence of its preferred parent: when a frame of the
+  parent carries a newer one, without the floating flag, the node takes
+  it and **restarts L** at its current rank. A floating neighbour's
+  sequence grounds no one (floating flag, below).
+- **Feasibility** (Babel, RFC 8966): a neighbour other than the preferred
+  parent is a candidate when its last sequence heard is newer than the
+  node's, at any rank (path cost within 254: the newer sequence restarts
+  L), or the same and its rank below L; never older. The preferred parent
+  is followed as before (its sequence is never older than the node's).
+  **L and the sequence are kept across a detach**: a node without route
+  rejoins only through feasible neighbours, and only a newer sequence
+  restarts L. A descendant holds a sequence no newer than the node's
+  (taken from it) and, with the same sequence, a rank above every rank
+  the node advertised with it: it is never feasible, whatever was lost or
+  delayed, so no loop forms, poison or not (TLA+ `DODAG`, `Seq =
+  "babel"`: up to 1–3 losses in any pattern, one root sequence increment,
+  fixed link costs).
+- **Moves into a cut-off part**: without the sequence, a Node of a dead
+  relay detached at its silence limit and rejoined through a sibling
+  still advertising a finite rank, itself cut off from the root; L
+  restarting at each rejoin, ranks counted up one hop per generation and
+  the rootless DODAG persisted (host simulator, 30-node star;
+  `DODAG_star_reachall_stalerejoin`). With it, what remains:
+  - a sibling cut off with the node at the same depth holds the same
+    sequence or an older one and no rank below the node's L: it is not
+    feasible (`DODAG_star_babel_safety`, `NoStaleRejoin`);
+  - a cut-off neighbour **at the same sequence and below L** stays
+    feasible: a Node at depth 3 cut off with its parent hears a depth-2
+    Node cut off with them (a sibling of its parent, under the same dead
+    relay); it switches to it when its parent detaches, or rejoins
+    through it after its own detach. A dead parent is feasible by
+    sequence and rank too: only the rejoin rule (neighbours heard after
+    the solicitation) excludes it. Within one sequence a node moves only
+    to a neighbour below its L, which never rises: no count-up; the
+    structure dissolves as its nodes float (G and the floating flag,
+    below: a floating neighbour is not a candidate);
+  - a cut-off neighbour **with a newer sequence** (it heard the relay
+    once more before its death) stays feasible at any rank: the node
+    takes that sequence, however many increments ahead, so this happens
+    at most once per distinct sequence of the cut-off part newer than its
+    own, without count-up, each such attachment ended as that part floats
+    or detaches at a silence limit.
+
+  A relay hearing the root does not join a cut-off Node: its parent is
+  chosen by path cost among the feasible candidates, and a cut-off Node
+  holds the sequence it had at the cut, older than that of a relay that
+  has heard a beacon since; it is feasible only to a relay that lost the
+  beacons whose sequence it holds, until the relay's next beacon. A
+  relay whose uplink died stays detached rather than joining a cut-off
+  Node with no newer sequence (`DODAG_star2_*`).
+- **Grounding**: a node is **ungrounded** while it is detached, and while
+  attached once its sequence has not advanced for **G = 2.5 + h presence
+  periods**, h = min(8, ⌈rank / 8⌉) (at least its hop count, a hop costing
+  at least 8; capped at the depth limit, MP13): 3.5 periods at a child of
+  the root. With a path to the root the sequence advances at least once
+  per 0.55 period at a child of the root (beacons), once per 1.1 period at
+  hop 2 (each presence of its parent carries a newer one), and the gap
+  grows by at most one presence period per further hop (a parent's
+  advance can fall just after its presence): 1.1 (h − 1) periods without
+  loss. G leaves 2.9 periods at hop 1 (three lost beacons and the on-air
+  delay variation, as the silence limit) and about 2 periods, two lost
+  presences, at hop 8. An ungrounded node keeps its routing state (RPL's
+  floating DODAG) but **holds its upward messages** (§12); it is grounded
+  again when its preferred parent's frame carries a newer sequence.
+  Grounding tells that the root's sequence still comes down, not that the
+  way up works: over a dead uplink the node still hears its parent and
+  stays grounded, its messages keep probing the link and its
+  reachability leaves the parent (a node floating there would hold them,
+  stop probing, and never leave it). A false float (more losses on a path
+  to the root) delays messages until the next advance; it fails them only
+  if the hold ends first.
+- **Floating flag** (frame header bit 0, §11): set in every frame of an
+  ungrounded node. A neighbour heard with it is not a candidate (except
+  the preferred parent, followed) and its sequence grounds no one; a node
+  whose preferred parent's frame carries it is ungrounded at once, so a
+  subtree floats with its top instead of waiting for G at each hop.
+- **Wrap-around, boot, versions**: sequences less than 128 apart are
+  compared; a node whose sequence has not advanced for 50 presence periods
+  forgets it and L (the root's beacons, every half period ±10 %, are at
+  least 0.45 period apart: at most 111 increments meanwhile, below the
+  128 of serial arithmetic), and takes the next sequence heard
+  from a neighbour that is not floating, at any rank (every entry of that
+  time has long expired). The root at boot takes the sequence after the
+  newest heard during its listening period, as for the version
+  (presences carry it), any value if none. Adopting a new DODAG version
+  restarts L and takes the sequence of the information adopted:
+  sequences are compared within a version.
+- **Repair times**: a local repair is unchanged when the node was at its
+  lowest rank, and gains candidates: a neighbour grounded elsewhere
+  becomes feasible at any rank once its sequence is newer than the
+  node's, within about one presence period of the parent's loss, so a
+  node whose rank had risen above L switches instead of detaching. A
+  rejoin takes the best feasible candidate of the answer window (Imin + 8
+  slots after the solicitation, as before, when one answers); a grounded
+  neighbour at the node's sequence and not below L becomes feasible with
+  its next frame carrying a newer sequence (its presence, overheard, or
+  its answer to the next solicitation), and the node rejoins through it
+  then: up to about one presence period (1.1 with jitter) after the
+  window. After a rejoin through a parent holding the node's sequence
+  (below L), the node stays ungrounded until the parent's next frame with
+  a newer sequence, again up to about one presence period: its routing is
+  repaired at once, its held messages leave then. Either way held
+  messages leave at most about one presence period after the "detach +
+  rejoin" time of the repair table (below).
 
 ### DODAG version and global repair
 
@@ -826,7 +967,7 @@ acknowledgement window and the time of its newest failure.
 - Every frame advertises its sender's version and rank (§11), so the content
   of an RPL DIO travels for free. Trickle only decides when a node sends a
   frame **for advertisement alone**: a frame to every neighbour (0xFFFF)
-  holding one DODAG information message (23 B).
+  holding one DODAG information message (24 B).
 - **Imin = 32 slots** (§8): 1.6 s at SF7, 5.3 s at SF9, 42 s at SF12. **Imax
   = the presence period**: above it the periodic presence frame advertises
   anyway, so in steady state Trickle sends **nothing**. Redundancy **k = 2**:
@@ -846,7 +987,7 @@ acknowledgement window and the time of its newest failure.
   selects no parent: an answer leaves in [Imin/2, Imin) after the
   solicitation is received (at most 1 slot on air), then waits at most one
   busy carrier sense (a backoff of at most CW_MIN = 4 slots, §8) and takes
-  at most 1.25 slots on air (23 B): 1 + 4 + 2 slots, plus 1 for the
+  at most 1.25 slots on air (24 B): 1 + 4 + 2 slots, plus 1 for the
   scheduling step (the solicitation's own random delay of at most 4 slots
   comes before it goes on air). At the close the node takes the best
   candidate heard after the solicitation that ended its hold, or with none
@@ -884,7 +1025,8 @@ acknowledgement window and the time of its newest failure.
 - **DODAG information** (port 9, link-local): flags 1 B (bit 0 topology
   report on change, as in *deployment*; others reserved), presence period
   2 B (s), topology period 2 B (s), Imin 1 B (slots), maximum rank increase
-  1 B, regional profile identifier 1 B (§4; 0xFF custom); 8 B. Its version is
+  1 B, regional profile identifier 1 B (§4; 0xFF custom), root sequence 1 B
+  (the sender's, above); 9 B. Its version is
   the frame header's. A node that receives another regional profile
   identifier does not adopt it and reports a misconfiguration (MP22).
 - Precise rules: at Imax nodes send no advertisement (presence
@@ -914,8 +1056,10 @@ acknowledgement window and the time of its newest failure.
 (Times in seconds, from section E of `mesh_budget.py`; the "with
 traffic" columns are upper bounds, retry delays at their maximum from the
 first timeout after an acknowledgement; "switch, idle" is the silence
-limit, 2.5 presence periods; "global repair wave" assumes no frame of the
-exchange lost on any hop, see below.)
+limit, 2.5 presence periods; "detach + rejoin" assumes a feasible
+neighbour answers the solicitation, held messages leaving up to about
+one presence period later, see below; "global repair wave" assumes no
+frame of the exchange lost on any hop, see below.)
 
 - **Switch with traffic, parent relay**: a relay preferred parent, when
   the node has another candidate, is dropped
@@ -967,7 +1111,16 @@ exchange lost on any hop, see below.)
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
 - **Detach + rejoin**, after the detection above: poison within Imin, hold
-  2 Imin, then the answer window of the solicitation, Imin + 8 slots.
+  2 Imin, then the answer window of the solicitation, Imin + 8 slots, when
+  a feasible neighbour answers it (the table). Otherwise the node rejoins
+  at the first feasible frame heard afterwards: a neighbour at the node's
+  root sequence and not below L becomes feasible with its next newer
+  sequence, up to about one presence period later (1.1 with jitter). A
+  rejoin through a parent at the node's sequence leaves it ungrounded
+  until that parent's next newer sequence, up to about one presence
+  period: routing is repaired within the table's time, held messages
+  (§12) leave at most about one presence period after it (root sequence
+  and grounding, above).
 - **Global repair wave**: one Imin per hop over 8 hops when no frame of a
   hop's exchange is lost (the table). A rank change reaches the children
   within one Imin. Losses are not rare, and the protocol causes most of
@@ -977,7 +1130,7 @@ exchange lost on any hop, see below.)
   solicitation also resets the child's own children, still in the old
   version, whose answers fall in the window of the parent's advertisement
   ([Imin/2, Imin) of both resets) and collide with it at the child (parent
-  and grandchild are hidden terminals): about 2 × ToA(23 B) / (Imin/2) ≈ 15 %
+  and grandchild are hidden terminals): about 2 × ToA(24 B) / (Imin/2) ≈ 15 %
   per hop whose node has children, at every SF (Imin is in slots). The
   child, behind, solicits with backoff: each frame of the exchange lost
   (the parent's advertisement at the child, the child's solicitation at the
@@ -1143,7 +1296,7 @@ Overhead: 9 B header + 4 B tag = **13 B**.
 
 | Bytes | Field | Notes |
 |---|---|---|
-| 0 | versions | bits 7–6 protocol version (0 reserved, never valid; 1 this version; 2 next incompatible version; 3 escape: an extended version byte follows byte 0, for later versions, since four values could prove limiting and the escape costs nothing until needed; values not supported are rejected and counted, MP25); bit 5 key epoch (alternates at each key change, lets old and new keys coexist during the change, §14); bits 4–1 DODAG version (root-issued, incremented on global repair and parameter change, §9; serial arithmetic on 4 bits); bit 0 reserved (sent as 0, ignored) |
+| 0 | versions | bits 7–6 protocol version (0 reserved, never valid; 1 this version; 2 next incompatible version; 3 escape: an extended version byte follows byte 0, for later versions, since four values could prove limiting and the escape costs nothing until needed; values not supported are rejected and counted, MP25); bit 5 key epoch (alternates at each key change, lets old and new keys coexist during the change, §14); bits 4–1 DODAG version (root-issued, incremented on global repair and parameter change, §9; serial arithmetic on 4 bits); bit 0 floating: the sender is ungrounded (§9, root sequence and grounding) |
 | 1–2 | link destination | next hop, or 0xFFFF (every neighbour) |
 | 3–4 | link source | sender |
 | 5–7 | frame counter | 24 bits, strictly increasing per sender for the board's whole life, never reset, even across key changes: persisted in NVS by blocks of 256 (§14); 2^24 frames last about 20 years of SILy use. Part of the AEAD nonce and replay check (§14); gaps give neighbours the delivery ratio (link estimation); identifies the frame for class 1 acknowledgements |
@@ -1151,7 +1304,8 @@ Overhead: 9 B header + 4 B tag = **13 B**.
 | 9… | messages | encrypted |
 | last 4 | tag | AES-128-CCM, 32 bits (MIC-32 as LoRaWAN and IEEE 802.15.4; forging requires online attempts at radio speed, about 2^31 frames on average, years of continuous emission, and shows in authentication-failure counters, MP22; §14) |
 
-Every frame thus advertises its sender's routing state (DODAG version, rank):
+Every frame thus advertises its sender's routing state (DODAG version, rank,
+floating flag):
 the content of an RPL DIO travels in every frame for free; Trickle (§9) only
 governs frames sent for advertisement alone. Frames are rebuilt at each hop:
 a relay decrypts, keeps or forwards each message, and repacks the messages
@@ -1198,7 +1352,9 @@ Addressing modes:
   presence frames per period); they carry neither origin nor length, and the
   presence report no parent (§ mesh ports). The relay restores the fields when
   it forwards, since it knows them (the origin is the link source, the parent
-  is itself).
+  is itself). A node's own presence always goes in mode 6, carrying its root
+  sequence (§9), even in a frame with a bundle of forwarded reports: control,
+  port, length and 3 B, as many bytes as its record in the bundle would take.
 - **Decoding rules**: a bundle carries a count of at least 2; a
   bundle with *last* must end exactly at the tag; the final message need not
   carry *last* if it ends at the tag; a routing header is valid in modes 2
@@ -1219,7 +1375,7 @@ Addressing modes:
 
 | Port | Message | Mode, class | Payload |
 |---|---|---|---|
-| 1 | presence | upward (mode 6 on the first hop, 1 when forwarded), 0 | preferred parent 2 B (mode 1 only; in mode 6 it is the link destination); flags 1 B (bit 0 first report since boot, bit 1 queue overflow since last report, bit 2 duty-cycle use above 80 % since last report (seen at every transmission, kept until a presence goes on air: presence itself is refused above 80 %), bit 3 class 2 tails follow, bit 4 rank errors since last report (§9), bit 5 address conflict, bit 6 authentication failures since last report (§13), bit 7 next key loaded (§14)); if bit 3: tail count 1 B, then per idle flow not yet acknowledged: port 1 B, oldest unacknowledged sequence 2 B, last sequence 2 B (§12); application extension: the remaining bytes, opaque (length set by configuration; SILy: battery and mode, 1 B) |
+| 1 | presence | upward (mode 6 on the first hop, 1 when forwarded), 0 | preferred parent 2 B (mode 1 only; in mode 6 it is the link destination); root sequence 1 B (mode 6 only: the sequence the sender holds, §9; dropped when forwarded); flags 1 B (bit 0 first report since boot, bit 1 queue overflow since last report, bit 2 duty-cycle use above 80 % since last report (seen at every transmission, kept until a presence goes on air: presence itself is refused above 80 %), bit 3 class 2 tails follow, bit 4 rank errors since last report (§9), bit 5 address conflict, bit 6 authentication failures since last report (§13), bit 7 next key loaded (§14)); if bit 3: tail count 1 B, then per idle flow not yet acknowledged: port 1 B, oldest unacknowledged sequence 2 B, last sequence 2 B (§12); application extension: the remaining bytes, opaque (length set by configuration; SILy: battery and mode, 1 B) |
 | 2 | topology | upward (6 / 1), 0 | count 1 B; per neighbour: address 2 B, margin 1 B (signed dB, saturated, §5), quality 1 B (bit 7 parent-set member, bits 6–0 delivery ratio 0–100 %); parent set first, then best other links; 6 entries by default |
 | 3 | acknowledgement | link-local, 0 | per acknowledged frame: link source 2 B, frame counter low 16 bits 2 B |
 | 4 | error | upward (6 / 1), 1 | reason 1 B (1 next hop unreachable, 2 next hop not a neighbour, 3 no route, 4 queue full, 5 duty-cycle budget, 6 route beyond 8 hops); next hop 2 B; failed message: origin 2 B, destination 2 B, port 1 B, sequence 2 B (§10, §12; the root forwards it to the origin) |
@@ -1227,7 +1383,7 @@ Addressing modes:
 | 6 | echo | any, 0 | kind 1 B (0 request, 1 response); identifier 2 B; hop count out 1 B; hop count back 1 B; padding (optional) (§13) |
 | 7 | traceroute | any, 0 | kind 1 B (0 request, 1 response, bit 7 truncated); identifier 2 B; then per hop, out and back: address 2 B, margin of the received frame 1 B (signed dB), link cost 1 B (8 × ETX); 16 entries at most (§13) |
 | 8 | management query / response | any, 1 | query: request identifier 1 B, object 1 B (0 counters, 1 neighbours, 2 routing state and parent set, 3 queues and duty cycle, 4 route-change log, 5 node information), offset 1 B; response: request identifier 1 B, object 1 B, offset 1 B, flags 1 B (bit 0 more follows), TLV entries ≤ 200 B (§13) |
-| 9 | DODAG information | link-local, 0 | empty: solicitation; otherwise flags 1 B, presence period 2 B, topology period 2 B, Imin 1 B, maximum rank increase 1 B, regional profile identifier 1 B (§9) |
+| 9 | DODAG information | link-local, 0 | empty: solicitation; otherwise flags 1 B, presence period 2 B, topology period 2 B, Imin 1 B, maximum rank increase 1 B, regional profile identifier 1 B, root sequence 1 B (§9) |
 | 10 | class 2 control | reverse direction of the flow, 0 | kind 1 B, flow port 1 B, then: kind 0 acknowledgement / NACK (receiver → sender): cumulative point 2 B, then missing ranges (first 2 B, count 1 B), none for a pure acknowledgement; kind 1 tail (sender → receiver other than the root): oldest unacknowledged 2 B, last 2 B; kind 2 gone (sender → receiver): first 2 B, count 1 B (§12) |
 | 0, 11–15 | reserved | | |
 
@@ -1243,28 +1399,29 @@ goes with the first topology report and then with every 8th.
 
 | Frame | Bytes |
 |---|---|
-| presence of a node to its parent (mode 6, last) | 13 + 2 + 2 = 17 |
-| 30 presence reports bundled by a relay | 13 + 4 + 30 × 6 = 197 |
+| presence of a node to its parent (mode 6, last) | 13 + 2 + 3 = 18 |
+| 30 presence reports of a relay (its own in mode 6, 29 bundled) | 13 + 6 + 4 + 29 × 6 = 197 |
 | topology of a node, 6 neighbours (mode 6, last) | 13 + 2 + 25 = 40 |
 | punch of a node, class 2 (mode 6, last; 10-byte SIPy punch) | 13 + 2 + 2 + 10 = 27 |
 | 17 punches bundled by a relay | 13 + 4 + 17 × 14 = 255 |
 | root acknowledgement, one entry | 13 + 2 + 4 = 19 |
 | class 2 NACK, downward, depth 3 (last) | 13 + 2 + 2 + 5 + payload |
 
-### Example: presence of node 0x3F2A to its parent 0x1B07 (17 B)
+### Example: presence of node 0x3F2A to its parent 0x1B07 (18 B)
 
 | Bytes | Value | Field |
 |---|---|---|
-| 0 | 0x40 + 2 × DODAG version | versions: protocol 1, key epoch 0, DODAG version in bits 4–1 |
+| 0 | 0x40 + 2 × DODAG version | versions: protocol 1, key epoch 0, DODAG version in bits 4–1, not floating |
 | 1–2 | 07 1B | link destination = parent |
 | 3–4 | 2A 3F | link source = origin |
 | 5–7 | … | frame counter |
 | 8 | … | rank |
 | 9 | 0xC1 | control: mode 6, class 0, last |
 | 10 | 0x01 | port: presence |
-| 11 | 0x00 | presence flags |
-| 12 | … | SILy extension (battery, mode) |
-| 13–16 | … | tag |
+| 11 | … | root sequence |
+| 12 | 0x00 | presence flags |
+| 13 | … | SILy extension (battery, mode) |
+| 14–17 | … | tag |
 
 ### Compaction
 
@@ -1272,7 +1429,8 @@ Against the first draft of this section (header 11 B, tag 8 B): DODAG version
 and protocol version packed into one byte, security level replaced by a
 key-epoch bit (A1); 24-bit counter (A2); implicit length of the last message
 (A3); first-hop compression (A4); 4-byte tag (A5, confirmed in
-§14). A presence frame shrinks from 28 to 17 B, a single-punch frame from 36
+§14). A presence frame shrinks from 28 to 17 B (18 B with the root sequence
+since), a single-punch frame from 36
 to 27 B. Option A6 (LoRa payload CRC off, relying on the tag as LoRaWAN
 downlinks do; saves 16 bits on air, i.e. 10–30 % of a small frame) is kept
 open until the corruption rate is measured (§18).
@@ -1418,12 +1576,39 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
 - **Downward failure** (source route): error to the root (port 4, reason 1 or
   2); the root reroutes (§10) and sends the message again, being its origin
   (or, for P2P, the origin of the downward half).
-- **Holding during repair** (MP15): a node without route keeps class 1 and 2
-  messages for **2 presence periods**, longer than a detach and rejoin at
-  every SF (§9). Then it drops them and queues an error (reason 3) for the
-  root. After a detach, the queued upward class 1/2 messages, those waiting
-  for an acknowledgement included, are held; queued class 0 messages are
-  dropped.
+- **Holding during repair** (MP15): a node without route, or ungrounded
+  (detached, or floating: §9, root sequence and grounding), keeps its
+  upward class 1 and 2 messages for **2 presence periods counted from the
+  loss of grounding** (its detach, or the moment it became ungrounded),
+  longer than a detach and rejoin at every SF (§9). Then it drops them and
+  queues an error (reason 3) for the root. After a detach, the queued
+  upward class 1/2 messages, those waiting for an acknowledgement
+  included, are held; queued class 0 messages are dropped. An ungrounded
+  node forwards no upward message: its queued ones are held, a waiting one
+  is held at its timeout (no retry, no drop of the parent), one it receives
+  is held and acknowledged explicitly.
+- **The hold is not renewed** at a hand-over nor at a rejoin: a message
+  received by an ungrounded node is held until that node's deadline, set
+  when it lost grounding, before the message arrived; only grounding
+  again (a newer root sequence from its preferred parent, §9) ends the
+  hold, and the messages leave. A hold restarted at each holder let a
+  message handed over inside a rootless structure get a new hold at
+  every node and circulate without end, neither delivered nor failed
+  (host simulator, 30-node star after its relay died: median 26
+  transmissions, up to 75, up to 321 s on air). Bound: a node cut off from
+  the root is ungrounded within G of its last advance and grounds again
+  only through a parent that is not floating and holds a newer sequence;
+  it then takes that sequence, however many increments ahead, so this
+  happens at most once per distinct sequence the cut-off part holds
+  beyond its oldest, and per hop of that part. Every held message is
+  delivered or failed within one G of the last such advance, plus 2
+  periods, whatever the number of hand-overs. The Nodes of a dead relay
+  (one hop) hold the sequence of its last presence (or DODAG
+  information) or, having lost it, of an earlier one, about two
+  increments older per presence lost (the root increments twice per
+  period, the relay's presence goes once): with at most one of those
+  frames lost per Node, two distinct sequences, 2 G + 2 periods; one more
+  G per further frame lost.
 - **Errors are class 1** (port 4, upward). The root forwards an error about an
   upward or P2P message to its origin. An error about an error is never
   generated, only counted. Class 1 thus delivers the message, or its origin
@@ -1938,11 +2123,11 @@ capacity is about the same, single-punch capacity higher.
 
 ### Time on air (ms)
 
-| SF | beacon 23 B | presence ×1 17 B | presence ×30 197 B | punch ×1 27 B | punch ×17 255 B |
+| SF | beacon 24 B | presence ×1 18 B | presence ×30 197 B | punch ×1 27 B | punch ×17 255 B |
 |---|---|---|---|---|---|
 | 7 | 62 | 51 | 313 | 67 | 400 |
 | 8 | 113 | 93 | 553 | 123 | 707 |
-| 9 | 206 | 165 | 984 | 226 | 1250 |
+| 9 | 206 | 185 | 984 | 226 | 1250 |
 | 10 | 371 | 330 | 1804 | 412 | 2296 |
 | 11 | 823 | 659 | 3936 | 823 | 5001 |
 | 12 | 1483 | 1319 | 7217 | 1647 | 9019 |
@@ -1973,7 +2158,7 @@ the channel load stays at 13.9 %).
 |---|---|---|---|---|---|---|---|---|---|---|
 | 7 | 30 | 135 | 180 | 259 | 3871 | 11002 | 225 | 638 | 9 % | 12 % |
 | 8 | 30 | 135 | 300 | 228 | 1849 | 5486 | 122 | 361 | 14 % | 21 % |
-| 9 | 60 | 270 | 600 | 239 | 1056 | 3248 | 66 | 204 | 12 % | 25 % |
+| 9 | 60 | 270 | 600 | 239 | 1056 | 3248 | 66 | 204 | 13 % | 26 % |
 | 10 | 120 | 540 | 900 | 238 | 579 | 1764 | 36 | 111 | 13 % | 36 % |
 | 11 | 300 | 1350 | 3600 | 259 | 287 | 882 | 17 | 51 | 10 % | 58 % |
 | 12 | 600 | 2700 | 3600 | 249 | 151 | 469 | 9 | 28 | 11 % | 102 % |
@@ -2024,7 +2209,7 @@ acknowledgement is still accepted (§12).
    lies between the carrier-sense bound (frames collide only when they start
    within ~6 symbols, one collision domain) and pure ALOHA (hidden terminals
    everywhere). False "silent Node" reports per hour (4 consecutive lost
-   presences): SF7 0.002–8.0, SF9 0.05–43, SF12 0.9–103. The real figure
+   presences): SF7 0.002–8.0, SF9 0.04–49, SF12 0.9–103. The real figure
    must be measured on the bench and in the field; `K_MISS` and
    the periods are configuration parameters.
 

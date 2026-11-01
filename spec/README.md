@@ -53,7 +53,10 @@ cores), plus about 1.5 hours for the link cost rise configurations
 and about 65 minutes for the link death configurations (`DODAG_*_cutlive`:
 1.5 to 17 minutes each; `DODAG_diamond_reachall_cutlive` 17, its
 liveness check slow for its 24 000 states, `DODAG_line_reachall_cutlive`
-12), plus 10 minutes for `DODAG_diamond_reachall_nocycle`.
+12), plus 10 minutes for `DODAG_diamond_reachall_nocycle`, and about
+52 minutes for the root sequence configurations (`DODAG_*_babel_*`: 1 s
+to 11 minutes each: `DODAG_diamond_babel_cutuplive` 11, `DODAG_star_babel_live`
+10, `DODAG_star2_babel_safety` 9).
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
@@ -193,7 +196,7 @@ they mirror (file:line, `src/mesh`).
   silence threshold, hence the detection of a dead root or a cut link
   (2.5 periods after the last frame heard, idle switch time unchanged), and
   tolerates 3 consecutive lost beacons up to an on-air delay of T/4 (2 up to
-  0.4 T); its cost is one more beacon per period at the root (23 B, 7–14
+  0.4 T); its cost is one more beacon per period at the root (24 B, 7–14
   s/h at SF7–12, 2–4 % of the root's budget; at SF8 it takes the presence
   share of the channel, already at 99 %, to 103 %). A beacon every 2/3
   period tolerates exactly 2 lost beacons (up to D = 0.27 period) for half
@@ -249,7 +252,9 @@ whose link cost rises takes its own descendant as parent without any
 loss, a late root acknowledgement, ignored, makes a node drop the
 root without any loss, and three frames of a root child lost at the root
 (collisions, no failed link) make it drop the root, its only candidate,
-and detach; against MP5, MP10, MP11 and MP12.
+and detach, and a detached node rejoins through a neighbour still at a
+finite rank but cut off from the root (a rootless DODAG whose ranks count
+up); against MP5, MP10, MP11 and MP12.
 Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
 
 ## Scope and abstractions
@@ -266,7 +271,13 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   path cost 4, a gain below the switch threshold); `switch` 0-1, 0-2, 1-3
   and a costly 2-3 (ETX 3) (no death: 3 drops 1, falls back on 2, keeps
   it as its last candidate, then hears 1 again, 2 hops cheaper: the
-  keep followed by a switch). `Victim = 0`: no node dies.
+  keep followed by a switch); `star` 0-1, 1-2, 1-3, 2-3 (a relay and two
+  of its Nodes hearing each other; relay 1 dies: both cut off, each still
+  hearing the other at a finite rank until its own silence limit);
+  `star2` 0-1, 0-2, 2-3 and a costlier 1-3 (ETX 2) (two relays, Node 3
+  under relay 2; relay 2 dies and the uplink 1 → 0 dies, `Cut = "up"`:
+  relay 1 still hears the root but cannot reach it). `Victim = 0`: no
+  node dies.
 - **Ranks** in whole hops (MIN_HOP 8 = 1): the hysteresis of 4 never holds a
   change back, the switch threshold 12 is a gain of 2 hops; 254 and
   MaxRankIncrease 56 scaled to `MaxRank` = 6 and `MaxInc` = 3. Links always
@@ -431,6 +442,59 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   relay whose holding expires, received when the failing relay and the
   origin are both connected to the root (or at once when the origin itself
   fails); the error's own custody is not modelled.
+- **Root sequence** (`Seq`, `MaxSeq`): the root increments a sequence at
+  each beacon (`NewSeq`, `MaxSeq` times, no wrap-around: the code compares
+  in serial arithmetic and forgets a sequence that has not advanced for 50
+  periods, MESH_DESIGN §9; with `MaxSeq` ≥ 2 without end and weakly fair:
+  once the root is at `MaxSeq` and every sequence still compared is at
+  least 1, all go down by one, which keeps every comparison, so that a
+  liveness check does not run out of increments; a node `MaxSeq` behind
+  holds the root back); the frames of `Announce` and `HoldEnd`
+  (presence, DODAG information, poison, solicitation) carry the sender's
+  sequence, data and acknowledgement frames do not; every receiver of a
+  frame reads it, whatever the frame's link destination (`sv`: the
+  sequence of each neighbour's last frame heard; the code must read
+  overheard frames too, MESH_DESIGN §9). The design's solicitation is an
+  empty port 9 message without the sequence (MESH_DESIGN §11): the model
+  is more permissive there, though its solicitation only repeats the
+  poison's sequence (a detached node keeps its own) and differs only when
+  the poison was lost; the safety argument does not depend on which
+  frames carry the sequence. A node holds the sequence of its
+  preferred parent's last frame when newer than its own. `"none"` (every
+  configuration before this option, `MaxSeq` = 0; with `MaxSeq` > 0 the
+  sequence is a ghost read by `NoStaleRejoin` only): the code before
+  remedy C. `"babel"` (remedy C, Babel's feasibility condition): a
+  neighbour other than the preferred parent is a candidate with a newer
+  sequence (any rank within the rank limit: the newer sequence restarts
+  L), or the same sequence and a rank below L, never an older one; L and
+  the sequence are kept across a detach, only a newer sequence restarts
+  L. **Grounding**: a detached node is ungrounded (`fl`), and an attached
+  one becomes so (`Float`) once its sequence has not advanced for the
+  grounding limit G; the timer abstraction: G exceeds the longest gap
+  between advances at a node that the root's sequence still reaches down
+  its chain of preferred parents (MESH_DESIGN §9), so only a node it no
+  longer reaches floats, at any later moment (a dead or detached node on
+  the chain, or a parent whose frames no longer reach the node; a dead
+  uplink still lets the sequence down: the relay stays grounded and its
+  reachability leaves the parent). A newer sequence of
+  its preferred parent grounds it again, even from a floating parent:
+  the design forbids that (a floating neighbour's sequence grounds no
+  one, MESH_DESIGN §9), the model is more permissive (below). An ungrounded node keeps its
+  routing state but forwards no upward message: queued copies are held,
+  a waiting one is held at its timeout (no retry, no drop), one it
+  receives is held and acknowledged explicitly; `HoldExpire` may fail
+  them, `Resume` waits for the grounding. The hold counted from the loss
+  of grounding, not renewed at a hand-over, is a time bound, outside this
+  untimed model; so is the floating flag of the frame header (a floating
+  neighbour not a candidate, its sequence grounding no one, children
+  floating with their parent), left out (`Float` may come at any moment):
+  the model is more permissive there, and the safety argument (a
+  descendant never feasible) does not use the flag, but what rests on it
+  is not checked: the hold bound
+  (MESH_DESIGN §12: a node grounds again only through a parent that is
+  not floating) and the dissolution of a cut-off structure as its nodes
+  float. `"babel"` requires
+  `Thr = "low"`, one version, acknowledgements as frames and fix 5.
 - The relay dies only while it holds no message (dying with an acknowledged
   message is MP5's accepted exception, §12).
 
@@ -505,7 +569,21 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   (`NoFreshRoot`), or towards a relay (`NoFreshRelay`), a run of `MaxLoss`
   consecutive failed samples towards the root (`ShortFailRuns`), or towards
   a relay (`ShortRelayRuns`), a node switches away from the relay it kept
-  as its last candidate (`NoSwitchAfterKeep`, ghost `kp` with `Ghosts`).
+  as its last candidate (`NoSwitchAfterKeep`, ghost `kp` with `Ghosts`), an
+  ungrounded node keeps its parent and holds a message (`NeverFloatHold`).
+- **NoStaleRejoin** (rootless DODAG, action property): no node rejoins
+  (attaches from rank 255) through a neighbour whose chain of preferred
+  parents no longer reaches the root (a dead or detached node, or a cycle,
+  on it; read after the step) and which holds no root sequence newer than
+  the node's own: it knows nothing of the root the node did not know when
+  it detached. A dead link not yet detected does not make the chain stale
+  (no node can tell it; its reachability does, `Elig`). With `Seq =
+  "none"` the sequence is a ghost. With `"babel"` its newer-sequence
+  exception restates the feasibility guard: what it checks is that no
+  node rejoins through a stale neighbour at the same sequence and below
+  its L, which no configured graph (line, diamond, `star`, `star2`)
+  offers; it checks rejoins from rank 255 only, not parent switches
+  without a detach (results, limits).
 
 ## Fixes modelled
 
@@ -589,6 +667,11 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   ETX ≤ 4. `"reachall"` (A extended to relays): every link by
   reachability; the code limits it to the preferred parent while it is
   the last candidate (open points).
+- **Root sequence with feasibility** (`Seq = "babel"`, remedy C, to be
+  implemented): candidates other than the preferred parent feasible in
+  Babel's sense against the root sequence and L, L and the sequence kept
+  across a detach; ungrounded nodes (detached, or floating) hold their
+  upward messages. `"none"`: the code, L restarting at each rejoin.
 
 ## Results
 
@@ -691,6 +774,20 @@ Remedy A extended to relays (`Exhaust = "keepboth"`, `Elig =
 | Tightness of `UNREACH` on relay links | line, ≤ 3 losses, ≤ 1 consecutive: a run of 3 consecutive failed samples towards relay 2 on a live link (4 313 states, 6 s) | `DODAG_line_reachall_witness_run` |
 | Non-vacuity | a copy gets fresh attempts towards a relay after its last attempt: after 3 losses (line, 478 states), or with no loss over the dead uplink 2 → 1 (42 states) | `DODAG_line_reachall_witness_fresh`, `DODAG_line_reachall_witness_relaycutfresh` |
 | Earlier configurations | given `"none"`, `"etx"`, `"reach"` and no relay cut, the earlier model (`rfail` indexed by link, only the root column moves; `KeepParent`'s exception for a link made ineligible over a dead link is reached only with `"reachall"`): state counts unchanged where compared (`DODAG_line_drop_rootloss` 727 and `DODAG_line_lateignore_drop` 13 with one worker; `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413, `DODAG_line_keeproot_MP5` 18 669, `DODAG_line_keeproot_live` 1 987, `DODAG_diamond_keeproot_cutuplive` 4 457, `DODAG_line_custody_MP5` 19 706, `DODAG_line_reach_MP5` 18 674, `DODAG_line_reach_live` 1 992, `DODAG_diamond_reach_cutuplive` 4 269, `DODAG_line_keeplast_MP5` 7 361, `DODAG_diamond_keeplast_MP5` 12 593, `DODAG_line_reach_nocycle` 84 131, `DODAG_line_reach_rootloss` 52 708); outcomes unchanged for `DODAG_line_etx_detach`, `DODAG_line_etx_rootloss`, `DODAG_line_reach_witness_run`, `DODAG_diamond_reach_witness_cutfresh` | the 111 other `DODAG_*` |
+
+Root sequence with feasibility (remedy C, `Seq = "babel"`), on the code of
+A extended to relays (`Exhaust = "keepboth"`, `Elig = "reachall"`,
+`LateAck = "accept"`), one root sequence increment (`MaxSeq = 1`):
+
+| Item | Result | Configurations |
+|---|---|---|
+| Rejoin through a stale node, the code (`"none"`, the sequence a ghost) | `star`, relay 1 dies, no loss: 2 drops the silent relay and detaches, its hold ends with its solicitation, 3 answers at rank 2 (its own parent, the dead relay, not yet silent for it) and 2 rejoins through it at rank 3: a rejoin into a part cut off from the root, through a node knowing nothing newer of the root (6 states; 135 states, 2 s). Repeated as each node's silence limit passes, L restarting at each rejoin, it is the rootless DODAG counting up of the simulator's star. `star2`, no loss: relay 2 dies, the uplink 1 → 0 dies, 1's message probes it; after `UNREACH` failed samples 1 leaves the root, detaches, solicits, and rejoins through Node 3, still under the dead relay 2, at rank 4 (16 states; 4 363 states, 7 s): the relay hearing the root directly joins the stale Node | `DODAG_star_reachall_stalerejoin`, `DODAG_star2_reachall_stalerejoin` |
+| Loops on views older than an attach, the code | line, relay 1 dies, 2 losses on one link: 2 detaches, 3 loses both its poison and its solicitation, 2 rejoins through 3 (loop 2 → 3 → 2; 6 states; 127 states, 2 s) | `DODAG_line_reachall_consec2` |
+| Remedy C, safety | the losses below in any pattern (no separate bound on consecutive ones), one root sequence increment (`MaxSeq = 1` in every safety configuration): no loop, no rejoin loop, `NoStaleRejoin` (no rejoin from rank 255 through a stale node at the same sequence and below L, a case these graphs do not offer), no silent loss, the root never dropped, no live link unreachable, `LastKept`, `KeepOnlyLast` (and `KeepParent` on line and star). `star`, relay 1 dies, a message of 3, ≤ 2 losses (377 311 states, 4 min 14 s); line, relay 1 dies, a message of 3, ≤ 3 losses (538 462 states, 7 min 10 s); `star2`, relay 2 dies and the uplink 1 → 0 dies, a message of 1, ≤ 1 loss: relay 1 stays detached rather than joining Node 3 at the same sequence (286 352 states, 9 min 11 s); diamond, relay 1 dies, a message of 4, ≤ 1 loss (165 474 states, 7 min 43 s; with ≤ 2 losses stopped after 7 min, beyond the time budget, no violation in the 188 487 states explored) | `DODAG_*_babel_safety`, `DODAG_diamond_babel_MP5` |
+| Remedy C, liveness | line, no death, a message of 3, ≤ 3 losses in any pattern: MP5Live, LoopsEnd, RanksSettle, MP10Live, no live link unreachable (10 244 states, 2 min 43 s); `star`, relay 1 dies, a message of 3, ≤ 1 loss: the message ends delivered or failed (`MP5Decided`, the partition exception), LoopsEnd, RanksSettle, CutOffLive (102 898 states, 10 min); diamond, the uplink 1 → 0 dies, the root sequence incremented without end, a message of 4, no loss: MP5Live, LoopsEnd, RanksSettle, `NoStaleRejoin` (59 758 states, 11 min; renormalisation counts no view of the root, which selects no parent: with its view of 1 over the dead uplink counted, the root stops issuing sequences and the run violates MP5Live, 1 never seeing a sequence newer than its own). With `MaxSeq = 1` (line, `star`) a node ungrounded once the single increment has reached it never grounds again, so MP5Live (`MP5Decided`) holds through its held messages failing; delivery after grounding again is checked only by `DODAG_diamond_babel_cutuplive` (`MaxSeq = 2`) | `DODAG_*_babel_live`, `DODAG_diamond_babel_cutuplive` |
+| Non-vacuity | `star`, no loss: an ungrounded node keeps its parent and holds the message (128 states, 2 s) | `DODAG_star_babel_witness_floathold` |
+| Limits | a cut-off neighbour at the node's sequence and below its L stays feasible (MESH_DESIGN §9: a Node at depth 3 hearing a depth-2 Node cut off with it, a sibling of its parent; no configured graph has one): within one sequence a node moves only below its L, which never rises, so ranks do not count up, and the structure dissolves as its nodes float (G, the floating flag), which this untimed model does not check; a dead parent is feasible by sequence and rank, excluded only by the rejoin rule (neighbours heard after the solicitation); `NoStaleRejoin` checks rejoins from rank 255 only, not parent switches without a detach; a cut-off neighbour with a newer sequence (it heard the dead relay once more) stays feasible at any rank: `NoStaleRejoin` excepts it, at most one such attachment per distinct newer sequence of the cut-off part (the node takes the parent's sequence), ending as that part floats or at a silence limit; the bound of the hold counted from the loss of grounding (a time property) and the floating flag are outside the untimed model, which grounds a node through a floating parent's newer sequence (the design does not, and the hold bound rests on it); `SeqVals` takes in the sequences of dead nodes and the views of dead or cut-off neighbours, never compared again: with a death and `MaxSeq` ≥ 2 the renormalisation stops after at most `MaxSeq` steps and the fairness on `NewSeq` becomes empty (no current configuration is affected; one with a death and `MaxSeq` ≥ 2 would be); with values in 0..`MaxSeq` no node is ever more than `MaxSeq` behind, so wrap-around and the forget rule are not exercised; with `MaxSeq` = 1 the increments run out: a node grounded again only by a newer sequence then fails its held messages (allowed by MP5Live) instead of delivering them, and a relay left detached over its dead uplink at the root's last sequence never sees a newer one from its former child and never rejoins, so its error never travels (`DODAG_diamond_babel_cutuplive` with `MaxSeq` = 1 violates MP5Live; with endless increments, `MaxSeq` = 2, the relay rejoins through 3 once 3's sequence passes its own) | — |
+| Earlier configurations | given `Seq = "none"`, `MaxSeq = 0`, the earlier model: state counts unchanged where compared (`DODAG_line_lateack_MP5` 6 307, `DODAG_line_reach_MP5` 18 674, `DODAG_line_keeplast_MP5` 7 361, `DODAG_line_reachall_MP5` 51 114, `DODAG_line_reachall_live` 1 178, `DODAG_diamond_reachall_cutuplive` 4 897, `DODAG_line_reachall_witness_relaycutfresh` 42, `DODAG_line_keepboth_relaycut` 40, `DODAG_line_solicit_consec2` 127) | the 120 other `DODAG_*` |
 
 **Why L.** Every rank a node puts on air since it attached is at least
 L; a child's rank is the rank it heard from its parent plus a link cost
@@ -934,6 +1031,44 @@ How each fix is implemented, what it costs, and the limits accepted.
   `LocalRepair.test_only_relay_parent_kept_after_exhausted_attempts_until_its_link_is_unreachable`
   (tests/test_routing.py), `PresenceAcknowledgement`
   (tests/test_reports.py).
+- **Code changes for remedy C** (`Seq = "babel"`, to implement): the root
+  increments an 8-bit sequence at each beacon (`Dodag`); port 9 DODAG
+  information and the node's own presence (always in mode 6, also beside
+  a bundle of forwarded reports) carry the sequence the node holds
+  (`reports.py`, `dodag.py` codecs; MESH_DESIGN §11), a solicitation
+  none; the sequence is read from every frame heard, overheard ones
+  included (today a frame addressed to another node only feeds
+  `overheard`, passive acknowledgements, `link.py` receive path: the
+  parent's presence goes to the grandparent, a neighbour's to its own
+  parent, so a node at hop 2 or more would never read it and would float
+  after G), and the neighbour table keeps each neighbour's last sequence,
+  the parent's included (`neighbours.py`); `Parents` keeps
+  the sequence of its preferred parent, takes a newer one from the
+  parent's frame unless the frame carries the floating flag (a floating
+  neighbour's sequence grounds no one) and then restarts ``lowest``, keeps both across
+  `_detach`, and `candidate_cost` tests feasibility (newer sequence at
+  any rank within 254, or the same and a rank below ``lowest``; never
+  older; the preferred parent followed as now) and excludes neighbours
+  heard with the floating flag; grounding: ungrounded while detached, or
+  once the sequence has not advanced for (2.5 + min(8, ⌈rank / 8⌉))
+  presence periods, or while the preferred parent's frames carry the
+  flag; header bit 0 set while ungrounded (`frame.py`); `Reliable` holds
+  upward class 1/2 messages while ungrounded (no forward, no retry, no
+  drop of the parent; arrivals held and acknowledged explicitly) and fails
+  them 2 presence periods after the loss of grounding, the deadline not
+  restarted by an arrival nor a rejoin, cleared when grounded again; a
+  sequence not advanced for 50 periods (at most 111 increments) is
+  forgotten with ``lowest``; the
+  root at boot takes the sequence after the newest heard while it
+  listens; a new DODAG version restarts the comparison. What the model
+  does not check and the simulator must: the hold bound (a message in a
+  rootless part is delivered or failed within about 2 G + 2 periods of
+  the cut for the Nodes of a dead relay, one more G per further frame of
+  the relay lost, MESH_DESIGN §12, whatever the hand-overs), the
+  dissolution of a cut-off structure as its nodes float, the absence of
+  false floats on grounded paths (the sequence read from overheard
+  frames), the grounding delay after a rejoin at the same sequence, and
+  a node ungrounded, grounded again, its held message delivered.
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
@@ -1010,7 +1145,10 @@ How each fix is implemented, what it costs, and the limits accepted.
   consecutive loss per link; in the simulator's star (hidden-terminal collapse) a
   descendant that heard none of the node's frames since its detach (poison
   and solicitation included) takes part in a loop after the rejoin, and L,
-  restarted, no longer excludes it.
+  restarted, no longer excludes it. With remedy C (`Seq = "babel"`) L is
+  kept across the detach and a descendant's sequence is never newer: no
+  loop with up to 3 (line) or 2 (`star`) losses in any pattern; closed in
+  the code once C is implemented.
 - **Global repair wave**: a solicitation of finite rank (only a node behind
   a newer version sends one) answered by newer neighbours only, so that the
   node's own children no longer answer it in the window of its parent's

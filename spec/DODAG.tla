@@ -244,6 +244,27 @@
 (*   cost ETX 1, or the costly links of the graph), so the cap is outside *)
 (*   the model, as for the root.                                           *)
 (*                                                                         *)
+(* Root sequence (Seq, remedy C of the rootless DODAG): the root          *)
+(* increments a sequence at each beacon (NewSeq, MaxSeq times); every      *)
+(* Announce frame (presence, DODAG information) carries its sender's       *)
+(* sequence, data and acknowledgement frames do not; a node holds the     *)
+(* sequence of its preferred parent's last frame when newer than its own. *)
+(* - "none" (every configuration before this option, MaxSeq = 0; with     *)
+(*   MaxSeq > 0 the sequence is a ghost, read by NoStaleRejoin only): the *)
+(*   rank test against L, L forgotten at a detach (any finite rank after  *)
+(*   the solicitation).                                                     *)
+(* - "babel" (Babel's feasibility condition, RFC 8966): a neighbour other *)
+(*   than the preferred parent is a candidate when the sequence of its     *)
+(*   last frame heard is newer than the node's (at any rank, within the   *)
+(*   rank limit: the newer sequence restarts L), or equal and its rank     *)
+(*   below L; never older. L and the sequence are kept across a detach;    *)
+(*   only a newer sequence restarts L. The preferred parent is followed as *)
+(*   before (its sequence is never older than the node's). A descendant   *)
+(*   holds a sequence no newer than the node's, and at the same sequence a *)
+(*   rank above every rank the node advertised with it: never a candidate, *)
+(*   whatever was lost. Ungrounded nodes hold their upward messages        *)
+(*   (Float, below).                                                        *)
+(*                                                                         *)
 (* The relay Victim may die once, at a moment it holds no message (a      *)
 (* relay dying with a message it acknowledged is MP5's accepted exception, *)
 (* §12, left out of the model). Victim = 0 (the root): no node dies.       *)
@@ -329,8 +350,10 @@ CONSTANTS
     LateAck,    \* root acknowledgement later than the timeout: "none", "ignore" or "accept" (the code)
     Exhaust,    \* after the last attempt: "drop", "keeproot" (the code), "keeplast" or "keepboth"
     Cut,        \* link death: "none", "both" or "up" (0 - 1; 1 -> 0 only), "relayup" (2 -> 1 or 3 -> 1)
-    Elig        \* link ineligible: "none" (after the cut only), "etx" (the code before A), "reach" (remedy A, the code),
+    Elig,       \* link ineligible: "none" (after the cut only), "etx" (the code before A), "reach" (remedy A, the code),
                 \* "reachetx" (the same, relay links by ETX) or "reachall" (every link by reachability)
+    Seq,        \* root sequence: "none" (a ghost only: the code before remedy C) or "babel" (feasibility, floating)
+    MaxSeq      \* increments of the root sequence (0: none; values 0..MaxSeq, no wrap-around)
 
 NONE == -1
 Root == 0
@@ -376,6 +399,13 @@ Lim == IF RootReach THEN UNREACH ELSE INELIG    \* the largest LimOf
 (*   detaches (3 at rank 2, 4 at rank 3 are not below it) and rejoins      *)
 (*   through 3 (path cost 3) or 4 (4), a gain of one hop, below the switch *)
 (*   threshold: the parent taken at the rejoin stays.                      *)
+(* - star: 0 - 1, 1 - 2, 1 - 3, 2 - 3: the relay of a star and two of its  *)
+(*   Nodes, which hear each other; relay 1 dies: 2 and 3 are cut off, each *)
+(*   still hearing the other at a finite rank until its own silence limit. *)
+(* - star2: two relays, 0 - 1, 0 - 2, Node 3 under relay 2 (2 - 3) and     *)
+(*   hearing relay 1 through a costlier link (1 - 3, ETX 2); relay 2 dies  *)
+(*   and the uplink 1 -> 0 dies (Cut = "up"): relay 1 still hears the root *)
+(*   but cannot reach it, and Node 3 is cut off from the root.             *)
 (***************************************************************************)
 Edges ==
     CASE Graph = "chain"   -> {<<0, 1, 1>>, <<1, 2, 1>>}
@@ -387,6 +417,8 @@ Edges ==
       [] Graph = "switch"  -> {<<0, 1, 1>>, <<0, 2, 1>>, <<1, 3, 1>>, <<2, 3, 3>>}
       [] Graph = "rejoin"  -> {<<0, 1, 1>>, <<1, 2, 1>>, <<0, 3, 2>>, <<2, 3, 1>>, <<0, 4, 3>>,
                                <<2, 4, 1>>}
+      [] Graph = "star"    -> {<<0, 1, 1>>, <<1, 2, 1>>, <<1, 3, 1>>, <<2, 3, 1>>}
+      [] Graph = "star2"   -> {<<0, 1, 1>>, <<0, 2, 1>>, <<1, 3, 2>>, <<2, 3, 1>>}
 
 Nodes == {e[1] : e \in Edges} \cup {e[2] : e \in Edges}
 \* Constant functions (computed once by TLC).
@@ -417,6 +449,8 @@ ASSUME Exhaust \in {"drop", "keeproot", "keeplast", "keepboth"}
 ASSUME Cut \in {"none", "both", "up", "relayup"} /\ (Cut = "relayup" => Graph \in {"line", "diamond"})
 ASSUME Cut # "none" => Acks = "frame" /\ CutChild \in Nbr(CutParent)
 ASSUME Elig \in {"none", "etx", "reach", "reachetx", "reachall"} /\ (Elig # "none" => Acks = "frame")
+ASSUME Seq \in {"none", "babel"} /\ MaxSeq \in Nat
+ASSUME Seq = "babel" => Thr = "low" /\ Versions = 1 /\ Acks = "frame" /\ Fix5 = "solicit"
 
 \* The rank of the last frame is tracked (otherwise constant).
 TrackAir == Thr \in {"air", "minair"}
@@ -477,10 +511,13 @@ VARIABLES
     inc,       \* inc[k]: k's rank rose since its last frame (IncAdv; otherwise FALSE)
     cut,       \* the link CutChild - CutParent is dead (Cut)
     rfail,     \* rfail[k][c]: k's failed samples towards c (Elig), saturated at LimOf(c)
-    kp         \* kp[k]: the relay k last kept as its last candidate (ghost, Ghosts; NONE: none)
+    kp,        \* kp[k]: the relay k last kept as its last candidate (ghost, Ghosts; NONE: none)
+    sq,        \* sq[k]: the root sequence k holds (Seq "none": a ghost, read by NoStaleRejoin only)
+    sv,        \* sv[k][c]: the root sequence of c's last frame heard by k
+    fl         \* fl[k]: k is ungrounded (Seq "babel": detached, or floating), holding its upward messages
 
 routing0 == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
-              ver, vview, behind, sol, owe, win, wh, rj>>
+              ver, vview, behind, sol, owe, win, wh, rj, sq, sv, fl>>
 routing == <<routing0, dc, rises, air, inc>>
 msgvars == <<sub, cp, giver, delivered, err, errFrom>>
 linkvars == <<cut, rfail, kp>>
@@ -518,6 +555,7 @@ TypeOK ==
     /\ air \in [Nodes -> 0..INF] /\ inc \in [Nodes -> BOOLEAN]
     /\ cut \in BOOLEAN /\ rfail \in [Nodes -> [Nodes -> 0..Lim]]
     /\ kp \in [Nodes -> Nodes \cup {NONE}]
+    /\ sq \in [Nodes -> 0..MaxSeq] /\ sv \in [Nodes -> [Nodes -> 0..MaxSeq]] /\ fl \in [Nodes -> BOOLEAN]
 
 (***************************************************************************)
 (* Chains of preferred parents (dead nodes have none).                     *)
@@ -570,11 +608,11 @@ GraphConnected(n) == n \in Reach({Root}, Cardinality(Nodes))
 (***************************************************************************)
 Rec(k) == [rank |-> rank[k], pref |-> pref[k], low |-> low[k], hold |-> hold[k],
            poisoned |-> poisoned[k], toSend |-> toSend[k], ver |-> ver[k], behind |-> behind[k],
-           win |-> win[k]]
+           win |-> win[k], sq |-> sq[k]]
 
 KeepR(R) == [rank |-> R.rank, pref |-> R.pref, low |-> R.low, hold |-> R.hold,
              poisoned |-> R.poisoned, toSend |-> R.toSend, ver |-> R.ver, behind |-> R.behind,
-             win |-> R.win, det |-> FALSE, chg |-> FALSE, att |-> FALSE]
+             win |-> R.win, sq |-> R.sq, det |-> FALSE, chg |-> FALSE, att |-> FALSE]
 
 Keep(k) == KeepR(Rec(k))
 
@@ -606,40 +644,58 @@ ThrR(k, R) ==
       [] Thr = "air"    -> IF R.rank = INF THEN INF ELSE air[k]
       [] Thr = "minair" -> IF air[k] < R.rank THEN air[k] ELSE R.rank
 
-CandCost(k, c, V, VV, Dr, Fr, R) ==
+\* Seq "babel": c's root sequence, as k heard it last, is newer than k's own.
+Newer(k, c, SV, R) == Seq = "babel" /\ SV[k][c] > R.sq
+
+\* The rank test of a candidate other than the preferred parent. Seq "babel" (the
+\* feasibility condition of Babel): a newer root sequence at any rank, or the same
+\* sequence and a rank below L (kept across a detach); never an older sequence.
+Feasible(k, c, v, SV, R) ==
+    IF Seq = "babel" THEN Newer(k, c, SV, R) \/ (SV[k][c] = R.sq /\ v < ThrR(k, R))
+    ELSE v < ThrR(k, R)
+
+CandCost(k, c, V, VV, Dr, Fr, SV, R) ==
     LET v == V[k][c] IN
     IF v = NONE \/ v = INF \/ Dr[k][c] \/ Inel(k, c) THEN NONE
     ELSE IF VV[k][c] = R.ver
-    THEN IF /\ \/ v < ThrR(k, R)
+    THEN IF /\ \/ Feasible(k, c, v, SV, R)
                \/ Follow /\ c = R.pref
             /\ ~R.poisoned \/ Fr[k][c]
-            /\ v + LCost(k, c) <= BoundR(R)
+            \* a newer sequence restarts L: the bound is the rank limit
+            /\ v + LCost(k, c) <= IF Newer(k, c, SV, R) THEN MaxRank ELSE BoundR(R)
          THEN v + LCost(k, c) ELSE NONE
     ELSE IF Behind = "keep" /\ R.behind /\ c = R.pref /\ VV[k][c] > R.ver
     THEN R.rank
     ELSE NONE
 
-\* Selection at k from views V, VV, drops Dr, fresh flags Fr, k's record R (hold not tested).
-SelCore(k, V, VV, Dr, Fr, R) ==
-    LET cf == [c \in Nbr(k) |-> CandCost(k, c, V, VV, Dr, Fr, R)]
+\* Selection at k from views V, VV, drops Dr, fresh flags Fr, sequence views SV, k's
+\* record R (hold not tested). The node holds the root sequence of its preferred parent
+\* (as heard last, when newer than its own); with Seq "babel" a newer one restarts L,
+\* and a detach keeps L and the sequence.
+SelCore(k, V, VV, Dr, Fr, SV, R) ==
+    LET cf == [c \in Nbr(k) |-> CandCost(k, c, V, VV, Dr, Fr, SV, R)]
         C == {c \in Nbr(k) : cf[c] # NONE}
     IN  IF C = {}
         THEN IF rank[k] = INF THEN KeepR(R)
              ELSE \* Detach (Parents._detach, parents.py:327-340; Dodag._poison,
                   \* dodag.py:551-557): rank 255, L and set forgotten, hold.
-                  [rank |-> INF, pref |-> NONE, low |-> NONE, hold |-> TRUE,
+                  [rank |-> INF, pref |-> NONE, low |-> IF Seq = "babel" THEN R.low ELSE NONE,
+                   hold |-> TRUE,
                    poisoned |-> TRUE, toSend |-> Poisons, ver |-> R.ver, behind |-> FALSE,
-                   win |-> FALSE, det |-> TRUE, chg |-> TRUE, att |-> FALSE]
+                   win |-> FALSE, sq |-> R.sq, det |-> TRUE, chg |-> TRUE, att |-> FALSE]
         ELSE LET lowest == Min({cf[c] : c \in C})
                  best == Min({c \in C : cf[c] = lowest})
                  \* the preferred parent stays unless beaten by the threshold (parents.py:293-299)
                  ch == IF R.pref \in C /\ cf[R.pref] - cf[best] < SwitchThr
                        THEN R.pref ELSE best
                  r == cf[ch]
+                 adv == SV[k][ch] > R.sq                 \* the parent's sequence is newer
              IN  [rank |-> r, pref |-> ch,
-                  low |-> IF R.low = NONE \/ r < R.low THEN r ELSE R.low,   \* parents.py:317-318
+                  low |-> IF Seq = "babel" /\ adv THEN r
+                          ELSE IF R.low = NONE \/ r < R.low THEN r ELSE R.low, \* parents.py:317-318
                   hold |-> FALSE, poisoned |-> FALSE, toSend |-> 0,          \* parents.py:314-316
                   ver |-> R.ver, behind |-> R.behind, win |-> R.win,
+                  sq |-> IF adv THEN SV[k][ch] ELSE R.sq,
                   det |-> FALSE, chg |-> ch # pref[k], att |-> rank[k] = INF]
 
 \* Selection after an event at k: nothing during the hold (parents.py:275-281); the root
@@ -647,14 +703,14 @@ SelCore(k, V, VV, Dr, Fr, R) ==
 \* "window", "window_rejoin": a detached node selects nothing in its answer window.
 InWindow(R) == Rejoin # "first" /\ R.win /\ R.rank = INF
 
-Sel(k, V, VV, Dr, Fr, R) ==
+Sel(k, V, VV, Dr, Fr, SV, R) ==
     IF k = Root \/ R.hold \/ InWindow(R) \/ (Behind = "detach" /\ R.behind) THEN KeepR(R)
-    ELSE SelCore(k, V, VV, Dr, Fr, R)
+    ELSE SelCore(k, V, VV, Dr, Fr, SV, R)
 
 \* Selection after a class 1 drop (Parents.next_parent, parents.py:300-318: recompute
 \* called directly, not through the paused Dodag step).
-SelDrop(k, V, VV, Dr, Fr, R) ==
-    IF k = Root \/ R.hold \/ InWindow(R) THEN KeepR(R) ELSE SelCore(k, V, VV, Dr, Fr, R)
+SelDrop(k, V, VV, Dr, Fr, SV, R) ==
+    IF k = Root \/ R.hold \/ InWindow(R) THEN KeepR(R) ELSE SelCore(k, V, VV, Dr, Fr, SV, R)
 
 \* LateAck = "accept": a copy keeps its late acknowledgement whatever happens to
 \* it (Reliable keeps the counters of the transmissions while the message is
@@ -692,9 +748,14 @@ Reshape(c, S) == WithLate(ReshapeCore(c, S), c)
 (* in it; both restart when the window opens. The sender's frame carries  *)
 (* its rank (air, TrackAir); inc (IncAdv): a rank increase not yet on air. *)
 (***************************************************************************)
-CommitH(S, V, VV, Dr, Fr, OW, SO, s, H) ==
+CommitH(S, V, VV, Dr, Fr, OW, SO, SV, s, H) ==
     LET NP == [k \in Nodes |-> S[k].pref]
-    IN  /\ air' = IF TrackAir /\ s # NONE THEN [air EXCEPT ![s] = rank[s]] ELSE air
+    IN  /\ sq' = [k \in Nodes |-> S[k].sq]
+        /\ sv' = SV
+        \* Seq "babel": a detach makes the node ungrounded; a newer root sequence of its
+        \* (new) preferred parent grounds it again.
+        /\ fl' = [k \in Nodes |-> (fl[k] \/ (Seq = "babel" /\ S[k].det)) /\ ~(S[k].sq > sq[k])]
+        /\ air' = IF TrackAir /\ s # NONE THEN [air EXCEPT ![s] = rank[s]] ELSE air
         /\ inc' = IF ~IncAdv THEN inc
                   ELSE [k \in Nodes |-> k # s /\ S[k].rank # INF /\ (inc[k] \/ S[k].rank > rank[k])]
         /\ UNCHANGED <<dc, rises>>
@@ -725,7 +786,7 @@ CommitH(S, V, VV, Dr, Fr, OW, SO, s, H) ==
                     THEN loops + 1 ELSE loops
         /\ rl' = (rl \/ \E k \in Nodes : S[k].att /\ InCycle(k, LiveP(NP)))
 
-Commit(S, V, VV, Dr, Fr, OW, SO) == CommitH(S, V, VV, Dr, Fr, OW, SO, NONE, {})
+Commit(S, V, VV, Dr, Fr, OW, SO) == CommitH(S, V, VV, Dr, Fr, OW, SO, sv, NONE, {})
 
 \* Owed information and solicitations after a step without frame: dropped when detached
 \* (Trickle stopped) or no longer behind.
@@ -741,7 +802,9 @@ SoKeep(S) == [k \in Nodes |-> sol[k] /\ S[k].behind]
 (* (Dodag._heard, dodag.py:373-399; Dodag._on_info, dodag.py:420-445) and *)
 (* select again (dodag.py:505-511), or adopt its version                  *)
 (* (Parents.on_new_version, parents.py:207-240). SS: the sender's own      *)
-(* routing record after the frame, SF its fresh row.                       *)
+(* routing record after the frame, SF its fresh row. sc: the frame carries *)
+(* the sender's root sequence (presence, DODAG information: the frames of  *)
+(* Announce and HoldEnd; not data nor acknowledgement frames).             *)
 (***************************************************************************)
 Receivers(s) == {k \in Nbr(s) : alive[k] /\ ~Severed(s, k)}
 
@@ -756,7 +819,7 @@ FrameCounters(s, L, H, extra) ==
                           IF k \in L THEN consec[s][k] + 1
                           ELSE IF k \in H THEN 0 ELSE consec[s][k]]]
 
-Effect(s, H, dio, SS, SF, ann) ==
+Effect(s, H, dio, SS, SF, ann, sc) ==
     LET fin == rank[s] # INF
         vs == ver[s]
         \* adoption (dodag.py:440-443): newer, or any other version when detached
@@ -770,6 +833,8 @@ Effect(s, H, dio, SS, SF, ann) ==
         older(k) == Versions > 1 /\ fin /\ vs < ver[k]
         solicit == Versions > 1 /\ ~fin /\ ~SS.hold
         V  == [k \in Nodes |-> IF k \in H THEN [view[k] EXCEPT ![s] = rank[s]] ELSE view[k]]
+        SV == IF ~sc THEN sv
+              ELSE [k \in Nodes |-> IF k \in H THEN [sv[k] EXCEPT ![s] = sq[s]] ELSE sv[k]]
         VV == IF Versions = 1 \/ ~fin THEN vview
               ELSE [k \in Nodes |-> IF k \in H THEN [vview[k] EXCEPT ![s] = vs] ELSE vview[k]]
         Dr == [k \in Nodes |-> IF k \in H
@@ -784,12 +849,12 @@ Effect(s, H, dio, SS, SF, ann) ==
         R(k) == IF adopt(k)
                 THEN [rank |-> INF, pref |-> NONE, low |-> NONE, hold |-> FALSE,
                       poisoned |-> Rejoin # "first" /\ rank[k] = INF /\ poisoned[k],
-                      toSend |-> 0, ver |-> vs, behind |-> FALSE, win |-> win[k]]
+                      toSend |-> 0, ver |-> vs, behind |-> FALSE, win |-> win[k], sq |-> sq[k]]
                 ELSE [Rec(k) EXCEPT !.behind = behind[k] \/ newer(k)]
         \* Rejoin "window_rejoin": an adoption selects at once, window or not.
         SelK(k) == IF adopt(k) /\ Rejoin = "window_rejoin"
-                   THEN SelCore(k, V, VV, Dr, Fr, R(k))
-                   ELSE Sel(k, V, VV, Dr, Fr, R(k))
+                   THEN SelCore(k, V, VV, Dr, Fr, SV, R(k))
+                   ELSE Sel(k, V, VV, Dr, Fr, SV, R(k))
         \* TLCEval: computed once (a function constructor is otherwise evaluated at each use)
         S  == TLCEval([k \in Nodes |-> IF k = s THEN SS
                                         ELSE IF k \in H THEN SelK(k)
@@ -801,15 +866,15 @@ Effect(s, H, dio, SS, SF, ann) ==
                          \/ k \in H /\ (adopt(k) \/ older(k) \/ solicit)]
         SO == IF Behind = "keep" \/ Versions = 1 THEN sol
               ELSE [k \in Nodes |-> S[k].behind /\ (sol[k] \/ (k = s /\ ann))]
-    IN  [V |-> V, VV |-> VV, Dr |-> Dr, Fr |-> Fr, S |-> S, OW |-> OW, SO |-> SO]
+    IN  [V |-> V, VV |-> VV, Dr |-> Dr, Fr |-> Fr, S |-> S, OW |-> OW, SO |-> SO, SV |-> SV]
 
 \* A frame without class 1 message.
 HeaderFrame(s, SS, SF, dio, ann) ==
     \E L \in SUBSET Receivers(s) :
         LET H == Receivers(s) \ L
-            E == Effect(s, H, dio, SS, SF, ann)
+            E == Effect(s, H, dio, SS, SF, ann, TRUE)
         IN  /\ LossOK(s, L, 0)
-            /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, s, H)
+            /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, E.SV, s, H)
             /\ FrameCounters(s, L, H, 0)
             /\ cp' = [m \in Msgs |-> [k \in Nodes |-> Reshape(cp[m][k], E.S[k])]]
             /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
@@ -859,7 +924,7 @@ HoldEnd(s) ==
     \* far less than the 2 Imin hold; every neighbour's first poison is out.
     /\ \A k \in Nbr(s) : alive[k] => toSend[k] < Poisons
     /\ LET free == [Keep(s) EXCEPT !.hold = FALSE, !.win = Track]
-           S0 == SelCore(s, view, vview, dropped, fresh, Rec(s))
+           S0 == SelCore(s, view, vview, dropped, fresh, sv, Rec(s))
            S == [k \in Nodes |-> IF k = s THEN S0 ELSE Keep(k)]
        IN  IF Fix5 = "solicit"
            THEN HeaderFrame(s, free, AllF, FALSE, TRUE)
@@ -879,7 +944,7 @@ BehindEnd(k) ==
     /\ Behind = "detach" /\ Versions > 1
     /\ alive[k] /\ behind[k] /\ sol[k]
     /\ \A s \in Nbr(k) : (alive[s] /\ ver[s] > ver[k]) => ~owe[s]
-    /\ LET S0 == SelCore(k, view, vview, dropped, fresh, [Rec(k) EXCEPT !.behind = FALSE])
+    /\ LET S0 == SelCore(k, view, vview, dropped, fresh, sv, [Rec(k) EXCEPT !.behind = FALSE])
            S == [x \in Nodes |-> IF x = k THEN S0 ELSE Keep(x)]
        IN  /\ Commit(S, view, vview, dropped, fresh, OwKeep(S), SoKeep(S))
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S0)]]
@@ -897,7 +962,7 @@ WindowClose(k) ==
     /\ Track /\ alive[k] /\ win[k]
     /\ LET R  == [Rec(k) EXCEPT !.win = FALSE]
            S0 == IF Rejoin # "first" /\ rank[k] = INF
-                 THEN SelCore(k, view, vview, dropped, fresh, R) ELSE KeepR(R)
+                 THEN SelCore(k, view, vview, dropped, fresh, sv, R) ELSE KeepR(R)
            S  == [x \in Nodes |-> IF x = k THEN S0 ELSE Keep(x)]
        IN  /\ Commit(S, view, vview, dropped, fresh, OwKeep(S), SoKeep(S))
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S0)]]
@@ -911,7 +976,7 @@ NewVersion ==
     /\ owe' = [owe EXCEPT ![Root] = TRUE]
     /\ UNCHANGED <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
                    vview, behind, sol, win, wh, rj, lost, consec, msgvars, loops, rl, rerr, xv,
-                   dc, rises, air, inc, linkvars>>
+                   dc, rises, air, inc, linkvars, sq, sv, fl>>
 
 (***************************************************************************)
 (* Silence (parents.py:164, dodag.py:536-549): the entry of a dead        *)
@@ -921,7 +986,7 @@ NewVersion ==
 Expire(k, c) ==
     /\ alive[k] /\ c \in Nbr(k) /\ (~alive[c] \/ Severed(c, k)) /\ view[k][c] # NONE
     /\ LET V == [view EXCEPT ![k][c] = NONE]
-           S == [x \in Nodes |-> IF x = k THEN Sel(k, V, vview, dropped, fresh, Rec(k)) ELSE Keep(x)]
+           S == [x \in Nodes |-> IF x = k THEN Sel(k, V, vview, dropped, fresh, sv, Rec(k)) ELSE Keep(x)]
        IN  /\ Commit(S, V, vview, dropped, fresh, OwKeep(S), SoKeep(S))
            /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], S[k])]]
     /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
@@ -934,7 +999,71 @@ Die ==
     /\ alive' = [alive EXCEPT ![Victim] = FALSE]
     /\ UNCHANGED <<rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
                    ver, vview, behind, sol, owe, win, wh, rj, lost, consec, msgvars, loops, rl,
-                   rerr, xv, dc, rises, air, inc, linkvars>>
+                   rerr, xv, dc, rises, air, inc, linkvars, sq, sv, fl>>
+
+(***************************************************************************)
+(* Root sequence (Seq). The root increments its sequence at each beacon   *)
+(* (half a presence period), MaxSeq times in the model (no wrap-around;   *)
+(* the code compares in serial arithmetic, MESH_DESIGN §9). Seq "none":   *)
+(* the sequence is a ghost (what the node would hold), read only by        *)
+(* NoStaleRejoin; MaxSeq = 0 in every configuration before this option.   *)
+(*                                                                         *)
+(* Floating (Seq "babel"): an attached node becomes ungrounded when its    *)
+(* sequence has not advanced for the grounding limit G. What the           *)
+(* abstraction keeps of that timer: G exceeds the longest gap between two  *)
+(* advances at a node that the root's sequence still reaches down its      *)
+(* chain of preferred parents (MESH_DESIGN §9), so only a node it no       *)
+(* longer reaches floats (Float), at any later moment: a dead or detached  *)
+(* node on the chain, or a parent whose frames no longer reach its child   *)
+(* (Cut "both"; a dead uplink, Cut "up" or "relayup", still lets the       *)
+(* sequence down: no float, its reachability leaves it); a detach makes    *)
+(* the node ungrounded as well (CommitH). A newer sequence of its          *)
+(* preferred parent grounds it again. An ungrounded node keeps its routing *)
+(* state but holds its upward messages (queued ones at once, waiting ones  *)
+(* at their timeout, new ones on arrival, explicitly acknowledged) and     *)
+(* may fail them (HoldExpire); the hold is counted from the loss of        *)
+(* grounding, not renewed at a hand-over (a time bound, outside this       *)
+(* untimed model). The floating flag of the frame header (neighbours not  *)
+(* taking a floating node as parent, its children floating at once) is a   *)
+(* speed-up left out: the model's Float may come at any moment.            *)
+(***************************************************************************)
+\* MaxSeq >= 2: the root increments without end, the values renormalised. Once the
+\* root is at MaxSeq and every sequence that may still be compared (every node's, the
+\* views of live nodes other than the root of their neighbours: the root selects no
+\* parent, and its view of a node over a dead uplink would hold the root back for ever)
+\* is at least 1, all go down by one and the
+\* root stays at MaxSeq: the order of every pair is kept, so the step is the root's
+\* next increment; a node MaxSeq behind holds it back. Weakly fair then (FairSpec):
+\* the root keeps issuing sequences, as its beacons do.
+SeqVals == {sq[n] : n \in Nodes}
+           \cup UNION {{sv[k][c] : c \in Nbr(k)} : k \in {x \in Nodes \ {Root} : alive[x]}}
+Dec(x) == IF x > 0 THEN x - 1 ELSE 0
+
+NewSeq ==
+    /\ \/ /\ sq[Root] < MaxSeq
+          /\ sq' = [sq EXCEPT ![Root] = sq[Root] + 1]
+          /\ UNCHANGED sv
+       \/ /\ MaxSeq >= 2 /\ sq[Root] = MaxSeq /\ \A x \in SeqVals : x >= 1
+          /\ sq' = [n \in Nodes |-> IF n = Root THEN MaxSeq ELSE Dec(sq[n])]
+          /\ sv' = [k \in Nodes |-> [c \in Nodes |-> Dec(sv[k][c])]]
+    /\ UNCHANGED <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
+                   ver, vview, behind, sol, owe, win, wh, rj, fl, lost, consec, msgvars,
+                   loops, rl, rerr, xv, dc, rises, air, inc, linkvars>>
+
+\* The root's sequence reaches n down its chain of preferred parents.
+RECURSIVE SeqDown(_, _)
+SeqDown(n, k) == n = Root \/ (k > 0 /\ alive[n] /\ pref[n] # NONE /\ ~Severed(pref[n], n)
+                              /\ SeqDown(pref[n], k - 1))
+
+Float(n) ==
+    /\ Seq = "babel" /\ n # Root /\ alive[n] /\ ~fl[n] /\ rank[n] # INF
+    /\ ~SeqDown(n, Cardinality(Nodes))
+    /\ fl' = [fl EXCEPT ![n] = TRUE]
+    /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![n] = IF cp[m][n].st = "q" THEN WithLate(Held, cp[m][n])
+                                                 ELSE cp[m][n]]]
+    /\ UNCHANGED <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
+                   ver, vview, behind, sol, owe, win, wh, rj, sq, sv, lost, consec, sub, giver,
+                   delivered, err, errFrom, loops, rl, rerr, xv, dc, rises, air, inc, linkvars>>
 
 \* The link CutChild - CutParent dies (Cut), once, at any moment.
 CutLink ==
@@ -965,7 +1094,7 @@ Submit(m) ==
     LET o == Orig(m) IN
     /\ ~sub[m] /\ alive[o]
     /\ sub' = [sub EXCEPT ![m] = TRUE]
-    /\ cp' = [cp EXCEPT ![m][o] = IF pref[o] # NONE THEN Queued(pref[o]) ELSE Held]
+    /\ cp' = [cp EXCEPT ![m][o] = IF pref[o] # NONE /\ ~fl[o] THEN Queued(pref[o]) ELSE Held]
     /\ giver' = [giver EXCEPT ![m][o] = o]
     /\ UNCHANGED <<routing, lost, consec, delivered, err, errFrom, loops, rl, rerr, xv, linkvars>>
 
@@ -1011,13 +1140,13 @@ Dup(m, d, s) ==
       [] OTHER            -> FALSE                  \* custody: decided below
 
 SendData(s, m) ==
-    /\ alive[s] /\ cp[m][s].st = "q"
+    /\ alive[s] /\ cp[m][s].st = "q" /\ ~fl[s]
     /\ LET d == cp[m][s].hop IN
        \E L \in SUBSET Receivers(s), ackLost \in (IF Acks = "atomic" THEN BOOLEAN ELSE {FALSE}) :
          LET H  == Receivers(s) \ L
              got == d \in H
              extra == IF ackLost THEN 1 ELSE 0
-             E  == Effect(s, H, FALSE, Keep(s), fresh[s], FALSE)
+             E  == Effect(s, H, FALSE, Keep(s), fresh[s], FALSE, FALSE)
              S  == E.S
              \* passive acknowledgements of the copies waiting for s
              waits(k) == cp[m][k].st = "p" /\ cp[m][k].acc = "pas" /\ cp[m][k].hop = s
@@ -1028,7 +1157,8 @@ SendData(s, m) ==
              incons == got /\ d # Root /\ rank[d] # INF /\ ver[s] = ver[d] /\ rank[s] <= rank[d]
              old  == C1[d]
              seen == giver[m][d] # NONE
-             take == IF S[d].pref # NONE THEN Queued(S[d].pref) ELSE Held
+             \* an ungrounded node (Seq "babel") holds what it takes, as a node without route
+             take == IF S[d].pref # NONE /\ ~fl[d] THEN Queued(S[d].pref) ELSE Held
              \* outcome at d: "dup" (acknowledged, dropped), "new", "retake"
              out  == CASE d = Root -> "root"
                        [] Fix3 = "custody" -> IF old.st # "no" THEN "dup" ELSE "new"
@@ -1044,7 +1174,7 @@ SendData(s, m) ==
                        [] OTHER          -> Reshape(old, S[d])
              \* QUEUED: acknowledged by the forward; a duplicate taken again is
              \* acknowledged explicitly (link.py of the fix: "if dup or outcome != QUEUED")
-             passive == out = "new" /\ ~seen /\ pref[d] # NONE
+             passive == out = "new" /\ ~seen /\ pref[d] # NONE /\ ~fl[d]
              mine == [st |-> "p", hop |-> d, att |-> cp[m][s].att + 1,
                       acc |-> IF ~got THEN "no" ELSE IF passive THEN "pas"
                               ELSE IF Acks = "frame" THEN "exp" ELSE "no",
@@ -1052,7 +1182,7 @@ SendData(s, m) ==
              released == Acks = "atomic" /\ got /\ ~passive /\ ~ackLost
          IN  /\ ackLost => (got /\ ~passive)
              /\ LossOK(s, L, extra)
-             /\ CommitH(S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, s, H)
+             /\ CommitH(S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, E.SV, s, H)
              /\ FrameCounters(s, L, H, extra)
              /\ cp' = [mm \in Msgs |-> [k \in Nodes |->
                           IF mm = m /\ k = s THEN (IF released THEN NoCopy ELSE mine)
@@ -1084,8 +1214,8 @@ AckOnAir(h, k, m, lostIt, NC) ==
          /\ inc' = [inc EXCEPT ![h] = FALSE]
          /\ cp' = [cp EXCEPT ![m][k] = NC]
          /\ UNCHANGED <<routing0, dc, rises, loops, rl>>
-    ELSE LET E == Effect(h, {k}, FALSE, Keep(h), fresh[h], FALSE)
-         IN  /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, h, {k})
+    ELSE LET E == Effect(h, {k}, FALSE, Keep(h), fresh[h], FALSE, FALSE)
+         IN  /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, E.SV, h, {k})
              /\ FrameCounters(h, {}, {k}, 0)
              /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![k] =
                           IF mm = m THEN NoCopy ELSE Reshape(cp[mm][k], E.S[k])]]
@@ -1163,14 +1293,14 @@ LateAckFrame(k, m) ==
 (***************************************************************************)
 \* h is still a candidate of s apart from drops (heard, eligible, of s's version or
 \* its kept parent behind a version, within the bound).
-Usable(s, h) == CandCost(s, h, view, vview, [dropped EXCEPT ![s][h] = FALSE], fresh, Rec(s)) # NONE
+Usable(s, h) == CandCost(s, h, view, vview, [dropped EXCEPT ![s][h] = FALSE], fresh, sv, Rec(s)) # NONE
 
 \* h is s's preferred parent, still a candidate apart from drops, and its last
 \* candidate: no other neighbour is a candidate (drops included), the drop of h
 \* would detach s.
 LastCand(s, h) ==
     /\ h = pref[s] /\ Usable(s, h)
-    /\ \A c \in Nbr(s) \ {h} : CandCost(s, c, view, vview, dropped, fresh, Rec(s)) = NONE
+    /\ \A c \in Nbr(s) \ {h} : CandCost(s, c, view, vview, dropped, fresh, sv, Rec(s)) = NONE
 
 KeepHop(s, h) ==
     CASE Exhaust = "keeproot" -> h = Root /\ Usable(s, h)
@@ -1190,7 +1320,11 @@ Timeout(s, m) ==
            /\ LET failed == IF Elig = "none" THEN cut /\ s = CutChild /\ h = CutParent
                             ELSE Counted(h) /\ (c.acc = "no" \/ (LateAck = "ignore" /\ inflight))
               IN  rfail' = IF failed THEN Fail(s, h) ELSE rfail
-           /\ IF c.att < ATTEMPTS
+           \* an ungrounded node (Seq "babel") holds the copy: no retry, no drop
+           /\ IF fl[s]
+              THEN /\ cp' = [cp EXCEPT ![m][s] = [Held EXCEPT !.late = LateAck = "accept" /\ inflight]]
+                   /\ UNCHANGED <<routing, loops, rl, kp>>
+              ELSE IF c.att < ATTEMPTS
               THEN /\ cp' = [cp EXCEPT ![m][s] = [c EXCEPT !.st = "q", !.acc = "no",
                                                           !.late = (LateAck = "accept" /\ inflight)]]
                    /\ UNCHANGED <<routing, loops, rl, kp>>
@@ -1199,7 +1333,7 @@ Timeout(s, m) ==
                    /\ kp' = IF Ghosts /\ h # Root THEN [kp EXCEPT ![s] = h] ELSE kp
                    /\ UNCHANGED <<routing, loops, rl>>
               ELSE LET Dr == [dropped EXCEPT ![s][h] = TRUE]
-                       S  == [x \in Nodes |-> IF x = s THEN SelDrop(s, view, vview, Dr, fresh, Rec(s))
+                       S  == [x \in Nodes |-> IF x = s THEN SelDrop(s, view, vview, Dr, fresh, sv, Rec(s))
                                               ELSE Keep(x)]
                        p  == S[s].pref
                    IN  /\ Commit(S, view, vview, Dr, fresh, OwKeep(S), SoKeep(S))
@@ -1209,17 +1343,19 @@ Timeout(s, m) ==
                                    ELSE Reshape(cp[mm][s], S[s])]]
     /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, cut>>
 
-\* A held copy resumes once there is a route (Reliable._resume_held, reliable.py:664-689).
+\* A held copy resumes once there is a route (Reliable._resume_held, reliable.py:664-689),
+\* and with Seq "babel" once the node is grounded again.
 Resume(s, m) ==
-    /\ alive[s] /\ cp[m][s].st = "h" /\ pref[s] # NONE
+    /\ alive[s] /\ cp[m][s].st = "h" /\ pref[s] # NONE /\ ~fl[s]
     /\ cp' = [cp EXCEPT ![m][s] = WithLate(Queued(pref[s]), cp[m][s])]
     /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, err, errFrom, loops, rl, rerr, xv,
                    linkvars>>
 
-\* Holding expired without route (reliable.py:677-679): failure (reliable.py:691-712):
-\* the origin's own message fails to its application, a relay's makes an error.
+\* Holding expired without route (reliable.py:677-679), or ungrounded (Seq "babel"):
+\* failure (reliable.py:691-712): the origin's own message fails to its application, a
+\* relay's makes an error.
 HoldExpire(s, m) ==
-    /\ alive[s] /\ cp[m][s].st = "h" /\ pref[s] = NONE
+    /\ alive[s] /\ cp[m][s].st = "h" /\ (pref[s] = NONE \/ fl[s])
     \* the owed acknowledgements (half a timeout) precede the holding (2 periods)
     /\ \A k \in Nodes : ~(cp[m][k].st = "p" /\ cp[m][k].acc = "pas" /\ cp[m][k].hop = s)
     /\ cp' = [cp EXCEPT ![m][s] = NoCopy]
@@ -1268,6 +1404,8 @@ Init ==
     /\ air = InitRank /\ inc = [n \in Nodes |-> FALSE]
     /\ cut = FALSE /\ rfail = [k \in Nodes |-> [c \in Nodes |-> 0]]
     /\ kp = [n \in Nodes |-> NONE]
+    /\ sq = [n \in Nodes |-> 0] /\ sv = [k \in Nodes |-> [c \in Nodes |-> 0]]
+    /\ fl = [n \in Nodes |-> FALSE]
 
 Protocol ==
     \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s) \/ WindowClose(s)
@@ -1285,6 +1423,7 @@ Next ==
     THEN \E k \in Owed : Announce(k)
     ELSE \/ Protocol \/ Die \/ CutLink \/ NewVersion \/ \E m \in Msgs : Submit(m)
          \/ \E k, c \in Nodes : CostUp(k, c)
+         \/ NewSeq \/ \E n \in Nodes : Float(n)
 
 \* The class 1 actions of one copy are enabled in disjoint states of that copy
 \* ("q", "p"/"pas", "p"/"no", "h" with or without route): weak fairness of their
@@ -1311,6 +1450,7 @@ Fairness ==
     /\ \A k \in BNodes : WF_vars(BehindEnd(k))
     /\ \A k \in WNodes : WF_vars(WindowClose(k))
     /\ \A k \in LNodes, m \in Msgs : WF_vars(LateAckFrame(k, m))
+    /\ (Seq = "babel" /\ MaxSeq >= 2) => WF_vars(NewSeq)
 
 Spec == Init /\ [][Next]_vars
 FairSpec == Spec /\ Fairness
@@ -1347,6 +1487,19 @@ RootReachable == \A n \in Nodes : Inel(n, Root) => cut /\ CutPair(n, Root)
 \* neighbour over a live link is made ineligible. With "reachetx" collisions on a
 \* relay link suffice (MaxLoss >= INELIG); with "reachall" a run beyond the budget.
 LinksReachable == \A n, c \in Nodes : Inel(n, c) => LinkDead(n, c)
+
+\* Rejoin through a stale node (rootless DODAG): no node rejoins (attaches from rank 255) through a
+\* neighbour whose chain of preferred parents no longer reaches the root (a dead node,
+\* a detached node or a cycle on it) and which holds no root sequence newer than the
+\* node's own, i.e. knows nothing of the root the node did not know already (with Seq
+\* "none" the sequence is a ghost). The chain is read after the step, over live nodes;
+\* a dead link not yet detected (Cut) does not make it stale: no node can tell it yet,
+\* and its detection is the link's reachability (Elig).
+RECURSIVE ToRootP(_, _, _)
+ToRootP(n, P, k) == n = Root \/ (k > 0 /\ alive[n] /\ P[n] # NONE /\ ToRootP(P[n], P, k - 1))
+NoStaleRejoin ==
+    [][\A k \in Nodes : (k # Root /\ rank[k] = INF /\ rank'[k] # INF)
+                        => (ToRootP(pref'[k], pref', Cardinality(Nodes)) \/ sq[pref'[k]] > sq[k])]_vars
 
 \* MP11.
 NoCycle == ~Cycle(LiveP(pref))
@@ -1427,7 +1580,7 @@ KeepOnlyLast ==
          LET h == cp[m][n].hop IN
          (/\ cp[m][n].st = "p" /\ h \notin {Root, NONE} /\ cp[m][n].att = ATTEMPTS
           /\ cp'[m][n] = Queued(h) /\ \A k \in Nodes \ {n} : cp'[m][k] = cp[m][k])
-         => \A c \in Nbr(n) \ {h} : CandCost(n, c, view, vview, dropped, fresh, Rec(n)) = NONE]_vars
+         => \A c \in Nbr(n) \ {h} : CandCost(n, c, view, vview, dropped, fresh, sv, Rec(n)) = NONE]_vars
 NoLagDetach ==
     [][\A n \in Nodes : (Detaches(n) /\ ~PLost(n)) => vview'[n][pref[n]] = ver[n]]_vars
 
@@ -1493,6 +1646,9 @@ NoLagParent ==
     ~\E n \in Nodes : /\ alive[n] /\ pref[n] # NONE /\ view[n][pref[n]] \notin {NONE, INF}
                       /\ vview[n][pref[n]] > ver[n]
 NoCrossVersion == ~xv
+\* Seq "babel": no ungrounded node holds a message while it has a parent (the floating
+\* hold is reached).
+NeverFloatHold == \A n \in Nodes, m \in Msgs : ~(alive[n] /\ fl[n] /\ pref[n] # NONE /\ cp[m][n].st = "h")
 \* Answer window: no node rejoins in its window (Best).
 NoWindowRejoin == [][\A k \in Nodes : (win[k] /\ ~win'[k]) => rj'[k] = NONE]_vars
 =============================================================================
