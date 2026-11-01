@@ -71,7 +71,7 @@ help:
 	@echo "make simbench             simulator benchmark: wall clock, digest (NODES, MINUTES, SEED)"
 	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
 	@echo "make trace TEST=M[.C]|RUN=\"...\" record traces of a test class or a large run [OUT=build/trace]"
-	@echo "make lint                 ruff (check, format) and codespell"
+	@echo "make lint                 ruff (check, format), codespell, no logbook references"
 	@echo "make check                lint + test"
 	@echo "make firmware             build the $(BOARD) firmware"
 	@echo "make flash PORT=<dev>     flash the $(BOARD) firmware"
@@ -113,6 +113,7 @@ lint:
 	$(RUFF) check .
 	$(RUFF) format --check .
 	$(CODESPELL) $(LINT_PATHS)
+	sh tools/public_text.sh
 
 firmware:
 	$(MAKE) -C $(T3S3) build BOARD=$(BOARD) BOARD_DIR=$(BOARD_DIR)
