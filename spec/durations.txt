@@ -1,0 +1,65 @@
+# Wall-clock seconds of the TLC configurations of cfg/, one line per
+# configuration: NAME SECONDS MACHINE. run.sh rewrites the line of each
+# configuration it runs (">N": stopped by MAXSECS=N); `run.sh quick` runs
+# those recorded at most QUICK_SECS seconds. MACHINE is <processors>cpu-
+# <memory>G unless set: an 8-core laptop (8cpu-8G) or a rented 16-vCPU
+# server (16cpu-31G or so). "laptop-readme": durations stated in README.md
+# for an 8-core laptop, measured on earlier versions of the models.
+DODAG_chain_low_live 540 laptop-readme
+DODAG_chain_low_nocycle 7 laptop-readme
+DODAG_diamond_babel_MP5 463 laptop-readme
+DODAG_diamond_babel_cutuplive 660 laptop-readme
+DODAG_diamond_keeplast_MP5 42 laptop-readme
+DODAG_diamond_keeplast_cutlive 240 laptop-readme
+DODAG_diamond_keeproot_MP5 56 laptop-readme
+DODAG_diamond_keeproot_cutlive 240 laptop-readme
+DODAG_diamond_keeproot_cutuplive 61 laptop-readme
+DODAG_diamond_lateack_MP5 280 laptop-readme
+DODAG_diamond_reach_MP5 51 laptop-readme
+DODAG_diamond_reach_cutlive 240 laptop-readme
+DODAG_diamond_reach_cutuplive 42 laptop-readme
+DODAG_diamond_reachall_MP5 63 laptop-readme
+DODAG_diamond_reachall_cutlive 1020 laptop-readme
+DODAG_diamond_reachall_cutuplive 61 laptop-readme
+DODAG_diamond_reachall_nocycle 600 laptop-readme
+DODAG_diamond_reachall_relaycut 19 laptop-readme
+DODAG_line_babel_live 163 laptop-readme
+DODAG_line_babel_safety 430 laptop-readme
+DODAG_line_drop_rootloss 4 laptop-readme
+DODAG_line_etx_detach 74 laptop-readme
+DODAG_line_etx_rootloss 58 laptop-readme
+DODAG_line_keepboth_relaycut 2 laptop-readme
+DODAG_line_keepbothetx_detach 69 laptop-readme
+DODAG_line_keeplast_MP5 8 laptop-readme
+DODAG_line_keeplast_cutlive 82 laptop-readme
+DODAG_line_keeplast_live 17 laptop-readme
+DODAG_line_keeplast_nocycle 37 laptop-readme
+DODAG_line_keeproot_MP5 10 laptop-readme
+DODAG_line_keeproot_cutlive 540 laptop-readme
+DODAG_line_keeproot_live 19 laptop-readme
+DODAG_line_keeproot_nocycle 45 laptop-readme
+DODAG_line_low_live 1320 laptop-readme
+DODAG_line_low_safety 1380 laptop-readme
+DODAG_line_reach_MP5 10 laptop-readme
+DODAG_line_reach_cutlive 420 laptop-readme
+DODAG_line_reach_live 13 laptop-readme
+DODAG_line_reach_nocycle 41 laptop-readme
+DODAG_line_reach_rootloss 120 laptop-readme
+DODAG_line_reachall_MP5 22 laptop-readme
+DODAG_line_reachall_consec2 2 laptop-readme
+DODAG_line_reachall_cutlive 720 laptop-readme
+DODAG_line_reachall_live 14 laptop-readme
+DODAG_line_reachall_nocycle 86 laptop-readme
+DODAG_line_reachall_relaycut 34 laptop-readme
+DODAG_line_reachall_relayloss 88 laptop-readme
+DODAG_line_reachall_witness_run 6 laptop-readme
+DODAG_line_reachetx_relaydrop 3 laptop-readme
+DODAG_star2_babel_safety 551 laptop-readme
+DODAG_star2_reachall_stalerejoin 7 laptop-readme
+DODAG_star_babel_live 600 laptop-readme
+DODAG_star_babel_safety 254 laptop-readme
+DODAG_star_babel_witness_floathold 2 laptop-readme
+DODAG_star_reachall_stalerejoin 2 laptop-readme
+DODAG_subtree_low_live 120 laptop-readme
+DODAG_subtree_low_nocycle 2160 laptop-readme
+DODAG_switch_reachall_witness_switch 29 laptop-readme

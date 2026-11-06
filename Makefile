@@ -27,8 +27,34 @@ TEST_PATH = .frozen:$(CURDIR)/src:$(CURDIR):$(MPY_LIB)/python-stdlib/unittest
 # multi-node traffic keep their traces in memory.
 TEST_HEAP ?= 32M
 
-# TLA+ models of spec/ (TLC from tla2tools.jar, Java 11 or later).
+# TLA+ models of spec/ (TLC from tla2tools.jar, Java 11 or later), run by
+# spec/run.sh: JOBS configurations at a time, each with WORKERS TLC workers
+# and a Java heap of HEAP (-Xmx; with JOBS > 1 both default to a share of
+# the processors and memory), MAXSECS a time limit per configuration, the
+# quick tier the configurations recorded in spec/durations.txt at most
+# QUICK_SECS seconds. NICE prefixes local runs (NICE="nice -n 19").
 TLA_JAR ?= $(HOME)/.local/lib/tla2tools.jar
+JOBS ?= 1
+WORKERS ?=
+HEAP ?=
+MAXSECS ?=
+QUICK_SECS ?= 60
+NICE ?=
+SPEC = $(NICE) env TLA_JAR=$(TLA_JAR) JOBS=$(JOBS) WORKERS=$(WORKERS) HEAP=$(HEAP) \
+	MAXSECS=$(MAXSECS) QUICK_SECS=$(QUICK_SECS) sh spec/run.sh
+
+# Full tier on a remote Linux machine (spec/remote.sh): SPEC_HOST=user@host,
+# SPEC_DIR the remote directory, SPEC_JOBS configurations at a time there,
+# SPEC_NAMES what to run (all, quick or configuration names), the results
+# fetched into SPEC_FETCH.
+SPEC_HOST ?=
+SPEC_DIR ?= sily-spec
+SPEC_JOBS ?= 8
+SPEC_NAMES ?= all
+SPEC_FETCH ?= build/spec-remote
+SPEC_REMOTE = env TLA_JAR=$(TLA_JAR) REMOTE_DIR=$(SPEC_DIR) FETCH=$(SPEC_FETCH) \
+	JOBS=$(SPEC_JOBS) WORKERS=$(WORKERS) HEAP=$(HEAP) MAXSECS=$(MAXSECS) \
+	QUICK_SECS=$(QUICK_SECS) sh spec/remote.sh
 
 # Top-level entries of src/ copied to the board's filesystem root.
 DEPLOY_ITEMS = $(notdir $(wildcard src/*))
@@ -63,7 +89,8 @@ TEST ?=
 OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
-.PHONY: help check test seeds simbench large trace lint firmware flash deploy spec spec-pass spec-defects
+.PHONY: help check test seeds simbench large trace lint firmware flash deploy \
+	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
 	@echo "make test                 host tests on the MicroPython unix port"
@@ -76,9 +103,14 @@ help:
 	@echo "make firmware             build the $(BOARD) firmware"
 	@echo "make flash PORT=<dev>     flash the $(BOARD) firmware"
 	@echo "make deploy PORT=<dev>    copy src/ to the board and reset it"
-	@echo "make spec                 TLC: every model, each against its expected outcome"
+	@echo "make spec                 TLC: every model, each against its expected outcome (full tier)"
+	@echo "make spec-quick           TLC: the models recorded at most QUICK_SECS=60 s (quick tier)"
 	@echo "make spec-pass            TLC: the models that must hold"
 	@echo "make spec-defects         TLC: the models that must fail (defects, limits)"
+	@echo "make spec-calibrate       TLC: every model with MAXSECS=QUICK_SECS, to record durations"
+	@echo "  spec options: JOBS=1 WORKERS HEAP MAXSECS QUICK_SECS=60 NICE=\"nice -n 19\""
+	@echo "make spec-remote SPEC_HOST=user@host  start the full tier there, detached [SPEC_JOBS=8]"
+	@echo "make spec-remote-fetch SPEC_HOST=user@host  its state; when done, logs and durations"
 
 check: lint test
 
@@ -125,10 +157,25 @@ deploy:
 	cd src && $(MPREMOTE) connect $(PORT) resume fs cp -r $(DEPLOY_ITEMS) : + reset
 
 spec:
-	TLA_JAR=$(TLA_JAR) sh spec/run.sh all
+	$(SPEC) all
+
+spec-quick:
+	$(SPEC) quick
 
 spec-pass:
-	TLA_JAR=$(TLA_JAR) sh spec/run.sh pass
+	$(SPEC) pass
 
 spec-defects:
-	TLA_JAR=$(TLA_JAR) sh spec/run.sh defects
+	$(SPEC) defects
+
+spec-calibrate:
+	$(NICE) env TLA_JAR=$(TLA_JAR) JOBS=$(JOBS) WORKERS=$(WORKERS) HEAP=$(HEAP) \
+		MAXSECS=$(QUICK_SECS) QUICK_SECS=$(QUICK_SECS) sh spec/run.sh all
+
+spec-remote:
+	@test -n "$(SPEC_HOST)" || { echo "make spec-remote SPEC_HOST=user@host"; exit 2; }
+	$(SPEC_REMOTE) start $(SPEC_HOST) $(SPEC_NAMES)
+
+spec-remote-fetch:
+	@test -n "$(SPEC_HOST)" || { echo "make spec-remote-fetch SPEC_HOST=user@host"; exit 2; }
+	$(SPEC_REMOTE) fetch $(SPEC_HOST)

@@ -33,30 +33,83 @@ are tight).
 ## Running
 
 ```sh
-make spec            # every configuration, each against its expected outcome
+make spec-quick      # quick tier: the configurations recorded at most 60 s
+make spec            # full tier: every configuration, each against its expected outcome
 make spec-pass       # only the configurations that must hold
 make spec-defects    # only the configurations that must fail
 sh spec/run.sh NAME  # one configuration, cfg/NAME.cfg
 ```
 
-`TLA_JAR` (default `~/.local/lib/tla2tools.jar`), `WORKERS` (default
-`auto`) and `OUT` (logs and counterexample traces, default
-`$TMPDIR/sily-spec`) can be set. Each output line gives the verdict (`ok`
-when the outcome is the expected one), the configuration, the expected
-outcome, the distinct states and the time; the exit status is 1 if any
-outcome differs from its expectation. A full run takes about 75 minutes on
-8 cores, most of it in `LinkCut`, the liveness configurations of `DODAG`
-and its two-version safety configurations on the diamond (≈ 8 and 3
-minutes; with the answer window and its ghost variables ≈ 15 minutes on 4
-cores), plus about 1.5 hours for the link cost rise configurations
-(`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 35 minutes each),
-and about 65 minutes for the link death configurations (`DODAG_*_cutlive`:
-1.5 to 17 minutes each; `DODAG_diamond_reachall_cutlive` 17, its
-liveness check slow for its 24 000 states, `DODAG_line_reachall_cutlive`
-12), plus 10 minutes for `DODAG_diamond_reachall_nocycle`, and about
-52 minutes for the root sequence configurations (`DODAG_*_babel_*`: 1 s
-to 11 minutes each: `DODAG_diamond_babel_cutuplive` 11, `DODAG_star_babel_live`
-10, `DODAG_star2_babel_safety` 9).
+The quick tier suits every change of a model; the full tier closes a
+group of model changes. Each output line gives the verdict (`ok` when the
+outcome is the expected one, `UNEXPECTED`, or `TIMEOUT`), the
+configuration, the expected outcome, the distinct states and the time; it
+is printed when its configuration ends. The exit status is 1 if any
+outcome differs from its expectation or a configuration timed out.
+
+Settings (environment of `run.sh`, or variables of `make`):
+
+- `JOBS` (default 1): configurations run at a time.
+- `WORKERS`: TLC workers per configuration; default `auto` with
+  `JOBS` = 1, else the processors divided by `JOBS` (at least 1).
+- `HEAP`: Java heap per configuration (`-Xmx`, e.g. `2g`); default the
+  JVM's with `JOBS` = 1, else three quarters of the memory divided by
+  `JOBS`.
+- `MAXSECS`: time limit per configuration in seconds; a configuration
+  still running is stopped and reported `TIMEOUT`.
+- `QUICK_SECS` (default 60): bound of the quick tier.
+- `NICE` (`make` only): prefix of the local run, e.g.
+  `make spec NICE="nice -n 19" JOBS=2` for a long run that leaves the
+  machine usable.
+- `TLA_JAR` (default `~/.local/lib/tla2tools.jar`), `OUT` (`run.sh`
+  only: logs and counterexample traces, default `$TMPDIR/sily-spec`),
+  `MACHINE` (label in `durations.txt`, default
+  `<processors>cpu-<memory>G`, with `-j<JOBS>` appended when JOBS > 1:
+  configurations sharing the processors take longer, so the quick tier is
+  best calibrated with JOBS = 1).
+
+`durations.txt` holds the wall-clock seconds of each configuration, one
+line per configuration (name, seconds, machine label), rewritten by
+`run.sh` for every configuration it runs; `>N` marks a configuration
+stopped by `MAXSECS=N`. It is tracked: commit it after a run worth
+keeping. `run.sh quick` runs the configurations recorded at most
+`QUICK_SECS` seconds, and says how many it leaves out for want of a
+record: a configuration never timed belongs to the full tier only, so the
+quick tier holds only configurations timed before. The lines labelled
+`laptop-readme` are durations taken from the results below, measured on
+an 8-core laptop on earlier versions of the models. `make spec-calibrate` runs
+every configuration with `MAXSECS=QUICK_SECS` (at most the number of
+configurations × `QUICK_SECS` / `JOBS`) and records each one's duration or `>QUICK_SECS`. The durations depend on
+`JOBS`: with several configurations at a time each gets fewer workers.
+Configurations without a record run first, then the others, longest
+first.
+
+A full run takes about 4 h 40 on an 8-core laptop with `JOBS` = 1, most
+of it in the configurations of `DODAG` with link cost rises
+(`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 36 minutes each),
+link deaths (`DODAG_*_cutlive`), the root sequence (`DODAG_*_babel_*`),
+and `LinkCut`.
+
+### Full tier on a rented machine
+
+The full tier can run on a rented Linux machine, for instance a 16-vCPU,
+32 GB instance (Scaleway POP2-HC-16C-32G), reached by ssh:
+
+1. Create the instance (Debian or Ubuntu) with an ssh key.
+2. On it: `apt install openjdk-21-jre-headless rsync`.
+3. Here: `make spec-remote SPEC_HOST=user@host` copies `spec/` and
+   `tla2tools.jar` into `~/sily-spec` there (`SPEC_DIR`) and starts
+   `run.sh all` under `nohup` with `JOBS=8` (`SPEC_JOBS`; `SPEC_NAMES`
+   restricts the run, e.g. `quick` or configuration names; `WORKERS`,
+   `HEAP`, `MAXSECS` are passed on). A dropped ssh session does not stop
+   it; `ssh user@host tail -f sily-spec/run.log` follows it.
+4. `make spec-remote-fetch SPEC_HOST=user@host` says whether the run is
+   still going; once it has ended, it copies `run.log`, the exit status
+   and the TLC logs into `build/spec-remote` (`SPEC_FETCH`), merges the
+   durations of the run into `durations.txt`, prints the configurations
+   not `ok` and exits with the remote run's status.
+5. Delete the instance (not only stop it: a stopped instance is still
+   billed for its volume and its IP address).
 
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
