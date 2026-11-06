@@ -70,8 +70,8 @@ duplicate cache and dropped: routing tells a loop from a retransmission), `forwa
 (routing: data-path validation, replace by newer, source routes; returns
 `QUEUED`, `HELD`, `DELIVERED` or `NOT_TAKEN`, on which class 1 acknowledges
 or not), ``next_hop`` and ``reroute`` (routing: next hop, next hop after
-failure, `mesh.reliable`), ``rank`` and ``dodag_version`` (header fields set
-by routing).
+failure, `mesh.reliable`), ``rank``, ``dodag_version`` and ``floating``
+(header fields set by routing).
 
 **Runner contract**: a submission made outside `step` (application task)
 takes effect at the next step; the runner steps the core (``step(now,
@@ -322,6 +322,7 @@ class LinkEngine(Core):
         self.reroute = reroute
         self.rank = frame.RANK_ROOT if self.is_root else frame.RANK_INFINITE
         self.dodag_version = 0
+        self.floating = False  # header bit 0: the node is ungrounded (set by routing, §9)
         self.neighbours = NeighbourTable(sf)
         self.counters = Counters()
         self.senders = SenderCounters()
@@ -479,7 +480,14 @@ class LinkEngine(Core):
         table did not record it (stale counter, table full of parents).
         """
         return self.neighbours.heard(
-            header.source, header.counter, header.rank, header.dodag_version, rssi, snr, now
+            header.source,
+            header.counter,
+            header.rank,
+            header.dodag_version,
+            rssi,
+            snr,
+            now,
+            header.floating,
         )
 
     def decoded(self, header, messages, entry, now):
@@ -677,6 +685,7 @@ class LinkEngine(Core):
         h.counter = 0
         h.rank = self.rank
         h.dodag_version = self.dodag_version
+        h.floating = 1 if self.floating else 0
         h.epoch = 0
         buf = self._txbuf
         n = frame.encode(buf, h, sel.messages, self.limit)

@@ -22,17 +22,40 @@ infinite: no route or poisoned).
   forgotten with L (at most 111 root increments meanwhile, below the 128
   of serial arithmetic): without a sequence (``sequence`` None: also
   before the first one) every sequence heard is newer, so the next one is
-  taken at any rank. Adopting a DODAG version restarts L and takes the
+  taken at any rank. A preferred parent whose frame carries the floating
+  flag (``Neighbour.floating``) gives no sequence: a floating neighbour's
+  sequence grounds no one. Adopting a DODAG version restarts L and takes the
   sequence of the information adopted (`on_new_version`): sequences are
   compared within a version. ``carried``: the sequence the node's frames
   carry, the last one held (kept when forgotten).
+- **Grounding** (§9): a node is **ungrounded** (``grounded`` False) while
+  detached (from boot to its first grounding, and from a detach on), once
+  attached its sequence has not advanced for **G** = 2.5 + h presence
+  periods, h = min(8, ceil(rank / 8)) at its advertised rank
+  (`ground_ms`, `float_at`), or at once when its preferred parent's frame
+  carries the floating flag. It is grounded again only when it takes a
+  newer sequence from a preferred parent that is not floating (the
+  selection above): a rejoin through a parent at the node's sequence
+  leaves it ungrounded until that parent's next frame with a newer one.
+  A node never grounded since boot is also grounded by a preferred parent
+  that is not floating and holds the node's sequence (the one of the
+  DODAG information it adopted since boot, less than G ago: no older
+  sequence of its own to mistake for a fresh one).
+  ``ungrounded_at``: the moment it lost grounding (the detach, the moment
+  G ran out, the selection that read the floating parent), kept until it
+  is grounded again (a detach while ungrounded does not move it); None
+  while grounded and before the first grounding since boot. The routing
+  step sets the floating flag of the node's frames while it is ungrounded
+  and holds its upward class 1/2 messages (`mesh.reliable`, §12). The root
+  is always grounded.
 - **Candidates**: neighbours of the node's DODAG version that are
   **feasible** (Babel, RFC 8966): a sequence **newer** than the node's, at
   any rank (path cost within 254: the newer sequence restarts L), or the
   same sequence and a rank strictly lower than **L**, the lowest rank the
   node has advertised with that sequence (never above its advertised
   rank; kept by a node without route); never an older sequence, nor an
-  unknown one while the node holds one. The preferred parent is one at any
+  unknown one while the node holds one; not floating (its last frame
+  without the floating flag, §9). The preferred parent is one at any
   rank (**rank following**, RPL: the node follows its preferred parent's
   rank increase within the bound below; its sequence is never older than
   the node's), heard within the silence limit
@@ -126,10 +149,12 @@ each presence period, on a timer, at the close of the answer window),
 exhausted on a parent, §12), `detach`, `solicited` and `on_new_version`
 (Trickle and DODAG version, §9). Each returns event flags
 (`PARENT_CHANGED`, `RANK_CHANGED`, `RANK_INCREASED`, `DETACHED`,
-`ATTACHED`), also accumulated until read by `events`: the caller copies
-``rank`` and ``version`` into the frame header (``LinkEngine.rank``,
-``dodag_version``), resets Trickle, sends its presence at once after a
-parent change and calls ``Reliable.route_changed``.
+`ATTACHED`, `GROUNDED`, `UNGROUNDED`), also accumulated until read by
+`events`: the caller copies ``rank``, ``version`` and the grounding into
+the frame header (``LinkEngine.rank``, ``dodag_version``, ``floating``),
+resets Trickle, sends its presence at once after a parent change and calls
+``Reliable.route_changed`` and ``Reliable.grounding``. G gets no timer
+here: the caller runs `recompute` at `float_at`.
 
 Readings where §9 is silent: a preferred parent outside the 3 lowest
 path costs has left the set even when no candidate beats it by 12; the
@@ -149,7 +174,19 @@ sequence, and a node without one compares an unknown sequence as the same
 (the rank rule alone); a sequence 128 apart from the node's is neither
 newer nor the same (not feasible); forgetting is checked at each
 selection; the members other than the preferred parent keep the rank
-rule (below L), a newer sequence above L not making one.
+rule (below L), a newer sequence above L not making one; G is read at the
+advertised rank of the moment (a rank change moves it); a node grounded
+and ungrounded within one selection (G ran out just before the parent's
+newer sequence was read) reports both events and ends grounded; the
+floating preferred parent stays followed (§9), no switch is made to leave
+it; adopting a new version keeps the grounding as it was (the sequence
+taken there restarts G, an ungrounded node stays so until an advance) and
+the preferred parent's following: floating, it is still taken in the new
+version (a node adopting from its floating parent would otherwise detach
+with its subtree);
+at boot, a parent at the node's sequence grounds it (above: otherwise a
+node would wait for its parent's next advance before being a candidate
+itself, and the DODAG would form one presence period per hop).
 """
 
 from mesh.frame import FIRST_HOP, RANK_INFINITE, RANK_ROOT, ROOT, UPWARD
@@ -167,6 +204,7 @@ _HALF = 8  # serial arithmetic on 4 bits: versions less than 8 apart compare
 SEQUENCE_MASK = 0xFF  # 8-bit root sequence (§9)
 _SEQ_HALF = 128  # serial arithmetic on 8 bits: sequences less than 128 apart compare
 FORGET_PERIODS = 50  # presence periods without advance: sequence and L forgotten
+GROUND_HOPS = 8  # G = 2.5 + min(GROUND_HOPS, ceil(rank / 8)) presence periods (§9)
 
 # Event flags.
 PARENT_CHANGED = 1  # preferred parent changed (presence report at once)
@@ -174,6 +212,8 @@ RANK_CHANGED = 2  # advertised rank changed
 RANK_INCREASED = 4  # advertised rank increased, poisoning included (Trickle reset)
 DETACHED = 8  # poisoned: rank 255 (Trickle reset)
 ATTACHED = 16  # first parent after boot or detach (Trickle reset)
+GROUNDED = 32  # grounded again: a newer sequence from a parent not floating
+UNGROUNDED = 64  # grounding lost: detach, G without advance, floating parent
 
 
 def link_cost(etx):
@@ -224,11 +264,12 @@ class Parents:
     Read: ``rank`` (advertised), ``version``, ``lowest`` (L, None after a
     new version or forgotten), ``sequence`` (root sequence held, None
     before the first or forgotten), ``sequence_at`` (time it last
-    advanced), ``carried`` (the one the frames carry), ``preferred``
-    (address or None), ``cost``
+    advanced), ``carried`` (the one the frames carry), ``grounded``,
+    ``ungrounded_at``, ``preferred`` (address or None), ``cost``
     (path cost through it at the last selection), `members`,
     ``hold_until``, ``soliciting``, ``poisoned_at``, ``window_until``;
-    counters ``switches``, ``detaches``, ``drops``. Read and set:
+    counters ``switches``, ``detaches``, ``drops``, ``floats`` (losses
+    of grounding). Read and set:
     ``behind`` (a newer version heard, not adopted yet).
     """
 
@@ -247,6 +288,8 @@ class Parents:
         self.sequence = None  # root sequence held (of the preferred parent)
         self.sequence_at = None  # time it last advanced
         self.carried = None  # the one the frames carry: the last held
+        self.grounded = root  # §9: a node is ungrounded from boot to its first grounding
+        self.ungrounded_at = None  # moment grounding was lost (None: grounded, or since boot)
         self.preferred = None
         self.cost = None
         self.poisoned_at = None  # last detach, then the solicitation ending its hold
@@ -258,8 +301,10 @@ class Parents:
         self.switches = 0
         self.detaches = 0
         self.drops = 0
+        self.floats = 0
         self._members = []
         self._dropped = {}  # address -> frame counter when dropped
+        self._kept = None  # preferred parent before a version adopted: followed if floating
         self._events = 0
 
     def members(self):
@@ -285,8 +330,8 @@ class Parents:
         The preferred parent is one at any rank (its increase is followed,
         within the bound), the others when feasible: a newer sequence at any
         rank (path cost within 254), or the same and a rank below L (any
-        finite rank once L is restarted), within the bound. While the node
-        is behind, the preferred parent moved to a
+        finite rank once L is restarted), within the bound, and not
+        floating. While the node is behind, the preferred parent moved to a
         newer version is one at the node's own rank. drops: False to ignore
         a drop of n after failed attempts (`next_parent`; the other
         neighbours' drops still count). The preferred parent's link is
@@ -294,6 +339,8 @@ class Parents:
         candidate (`last`).
         """
         address = n.address
+        if n.floating and address != self.preferred and address != self._kept:
+            return None  # a floating neighbour is no candidate, the preferred parent followed
         across = n.version != self.version
         newer = False
         if across:
@@ -331,6 +378,26 @@ class Parents:
         cost = n.rank + link_cost(n.link_etx(reach))
         return cost if cost <= (MAX_COST if newer else self.bound()) else None
 
+    def ground_ms(self):
+        """Return G (ms): 2.5 + min(8, ceil(rank / 8)) presence periods at the advertised rank."""
+        h = (self.rank + MIN_HOP - 1) // MIN_HOP
+        if h > GROUND_HOPS:
+            h = GROUND_HOPS
+        return (5 + 2 * h) * self.table.period_ms // 2
+
+    def float_at(self):
+        """Return the time a grounded attached node becomes ungrounded without advance, else None.
+
+        G after the last advance of its sequence (`ground_ms`); None on the
+        root, on a node ungrounded or detached.
+        """
+        if self.root or not self.grounded or self.rank == RANK_INFINITE:
+            return None
+        at = self.sequence_at
+        if at is None:
+            return self.now  # no sequence held: nothing comes down (not reached: G < 50)
+        return at + self.ground_ms()
+
     def last(self, address, now):
         """Return True if no neighbour but address is a candidate at now (drops included)."""
         for m in self.table.entries():
@@ -344,7 +411,11 @@ class Parents:
         """Select the parent set and the advertised rank at now; return the events."""
         if self.root:
             return 0
-        events = self._select(now)
+        events = 0
+        due = self.float_at()
+        if due is not None and now >= due:
+            events = self._unground(due)  # G without advance
+        events |= self._select(now)
         self._events |= events
         return events
 
@@ -392,6 +463,7 @@ class Parents:
             self.version = version
             return 0
         old = self.rank
+        self._kept = self.preferred
         self.version = version
         self._set_members([])
         self.cost = None
@@ -404,6 +476,7 @@ class Parents:
         self.behind = False
         self._dropped.clear()
         events = self._select(now)
+        self._kept = None
         if self.rank == RANK_INFINITE:
             events = 0
             if old != RANK_INFINITE:
@@ -459,6 +532,7 @@ class Parents:
         table = self.table
         table.expire(now)
         self._prune()
+        events = 0
         at = self.sequence_at
         if at is not None and now - at >= FORGET_PERIODS * table.period_ms:
             self.sequence = None  # forgotten with L: the next one taken at any rank
@@ -466,27 +540,27 @@ class Parents:
             self.lowest = None
         if self.hold_until is not None:
             if now < self.hold_until:
-                return 0
+                return events
             self.hold_until = None
             self.soliciting = True
         if self.soliciting:
-            return 0  # until `solicited`
+            return events  # until `solicited`
         if self.window_until is not None:
             if now < self.window_until:
-                return 0  # answers still to come
+                return events  # answers still to come
             self.window_until = None
-        best = []  # (path cost, -margin, address, rank, sequence), lowest first
+        best = []  # (path cost, -margin, address, rank, sequence, floating), lowest first
         for n in table.entries():
             cost = self.candidate_cost(n, now)
             if cost is not None:
                 # A preferred parent of another version: never a secondary
                 # member, its sequence never taken.
                 rank = n.rank if n.version == self.version else RANK_INFINITE
-                _insert(best, (cost, -n.margin(), n.address, rank, n.sequence))
+                _insert(best, (cost, -n.margin(), n.address, rank, n.sequence, n.floating))
         if not best:
             if self.rank != RANK_INFINITE:
-                return self._detach(now)
-            return 0
+                return events | self._detach(now)
+            return events
         old_pref = self.preferred
         old_rank = self.rank
         chosen = best[0]
@@ -497,7 +571,6 @@ class Parents:
                         chosen = key
                     break
         cost = chosen[0]
-        events = 0
         if chosen[2] != old_pref:
             events |= PARENT_CHANGED
             if old_pref is not None:
@@ -519,13 +592,28 @@ class Parents:
             self.poisoned_at = None
         lowest = self.lowest
         seq = chosen[4]
-        if chosen[3] != RANK_INFINITE and sequence_newer(seq, self.sequence):
-            # The preferred parent's newer sequence: taken, L restarted.
+        floating = chosen[5]
+        if chosen[3] != RANK_INFINITE and not floating and sequence_newer(seq, self.sequence):
+            # The preferred parent's newer sequence: taken, L restarted, the
+            # node grounded (§9).
             self.sequence = self.carried = seq
             self.sequence_at = now
             lowest = self.lowest = rank
-        elif lowest is None or rank < lowest:
-            lowest = self.lowest = rank
+            if not self.grounded:
+                events |= self._ground()
+        else:
+            if lowest is None or rank < lowest:
+                lowest = self.lowest = rank
+            if not self.grounded and self.ungrounded_at is None and not floating:
+                # Never grounded since boot: a parent that is not floating
+                # and holds the node's sequence (adopted from a DODAG
+                # information since boot, less than G ago) grounds it.
+                at = self.sequence_at
+                if chosen[3] != RANK_INFINITE and seq is not None and seq == self.sequence:
+                    if at is not None and now - at < self.ground_ms():
+                        events |= self._ground()
+        if floating and self.grounded:
+            events |= self._unground(now)  # the preferred parent floats: at once
         self.cost = cost
         seq = self.sequence
         members = [chosen[2]]
@@ -550,7 +638,20 @@ class Parents:
         events = DETACHED
         if was != RANK_INFINITE:
             events |= PARENT_CHANGED | RANK_CHANGED | RANK_INCREASED
+        if self.grounded:
+            events |= self._unground(now)
         return events
+
+    def _unground(self, at):
+        self.grounded = False
+        self.ungrounded_at = at
+        self.floats += 1
+        return UNGROUNDED
+
+    def _ground(self):
+        self.grounded = True
+        self.ungrounded_at = None
+        return GROUNDED
 
     def _set_members(self, members):
         table = self.table

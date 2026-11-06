@@ -667,11 +667,12 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   ETX ≤ 4. `"reachall"` (A extended to relays): every link by
   reachability; the code limits it to the preferred parent while it is
   the last candidate (open points).
-- **Root sequence with feasibility** (`Seq = "babel"`, remedy C, to be
-  implemented): candidates other than the preferred parent feasible in
+- **Root sequence with feasibility** (`Seq = "babel"`, remedy C, the
+  code): candidates other than the preferred parent feasible in
   Babel's sense against the root sequence and L, L and the sequence kept
   across a detach; ungrounded nodes (detached, or floating) hold their
-  upward messages. `"none"`: the code, L restarting at each rejoin.
+  upward messages. `"none"`: the code before remedy C, L restarting at
+  each rejoin.
 
 ## Results
 
@@ -1031,44 +1032,65 @@ How each fix is implemented, what it costs, and the limits accepted.
   `LocalRepair.test_only_relay_parent_kept_after_exhausted_attempts_until_its_link_is_unreachable`
   (tests/test_routing.py), `PresenceAcknowledgement`
   (tests/test_reports.py).
-- **Code changes for remedy C** (`Seq = "babel"`, to implement): the root
-  increments an 8-bit sequence at each beacon (`Dodag`); port 9 DODAG
-  information and the node's own presence (always in mode 6, also beside
-  a bundle of forwarded reports) carry the sequence the node holds
-  (`reports.py`, `dodag.py` codecs; MESH_DESIGN §11), a solicitation
-  none; the sequence is read from every frame heard, overheard ones
-  included (today a frame addressed to another node only feeds
-  `overheard`, passive acknowledgements, `link.py` receive path: the
-  parent's presence goes to the grandparent, a neighbour's to its own
-  parent, so a node at hop 2 or more would never read it and would float
-  after G), and the neighbour table keeps each neighbour's last sequence,
-  the parent's included (`neighbours.py`); `Parents` keeps
-  the sequence of its preferred parent, takes a newer one from the
-  parent's frame unless the frame carries the floating flag (a floating
-  neighbour's sequence grounds no one) and then restarts ``lowest``, keeps both across
-  `_detach`, and `candidate_cost` tests feasibility (newer sequence at
-  any rank within 254, or the same and a rank below ``lowest``; never
-  older; the preferred parent followed as now) and excludes neighbours
-  heard with the floating flag; grounding: ungrounded while detached, or
+- **Code changes for remedy C** (`Seq = "babel"`, implemented): the root
+  increments an 8-bit sequence at each beacon (`Dodag._tick`); port 9
+  DODAG information and the node's own presence (always in mode 6, also
+  beside a bundle of forwarded reports) carry the sequence the node holds
+  (`dodag.py` `encode_info`, `frame_sequence`; `reports.py` presence
+  codec; MESH_DESIGN §11), a solicitation none; the sequence is read from
+  every frame heard, overheard ones included (`LinkEngine.decoded`,
+  `Dodag._decoded`: the parent's presence goes to the grandparent, a
+  neighbour's to its own parent, so a node at hop 2 or more reading only
+  the frames addressed to it would float after G), and the neighbour
+  table keeps each neighbour's last sequence and the floating flag of its
+  last frame (`neighbours.py` `Neighbour.sequence`, `floating`).
+  `Parents` (`parents.py`) keeps the sequence of its preferred parent,
+  takes a newer one from the parent's frame unless the frame carries the
+  floating flag (a floating neighbour's sequence grounds no one) and then
+  restarts ``lowest``, keeps both across `_detach`; `candidate_cost` tests
+  feasibility (newer sequence at any rank within 254, or the same and a
+  rank below ``lowest``; never older; the preferred parent followed as
+  before) and excludes the neighbours last heard with the floating flag,
+  the preferred parent excepted. Grounding (`Parents.grounded`,
+  ``ungrounded_at``, `ground_ms`, `float_at`): ungrounded while detached,
   once the sequence has not advanced for (2.5 + min(8, ⌈rank / 8⌉))
-  presence periods, or while the preferred parent's frames carry the
-  flag; header bit 0 set while ungrounded (`frame.py`); `Reliable` holds
-  upward class 1/2 messages while ungrounded (no forward, no retry, no
-  drop of the parent; arrivals held and acknowledged explicitly) and fails
-  them 2 presence periods after the loss of grounding, the deadline not
-  restarted by an arrival nor a rejoin, cleared when grounded again; a
-  sequence not advanced for 50 periods (at most 111 increments) is
-  forgotten with ``lowest``; the
-  root at boot takes the sequence after the newest heard while it
-  listens; a new DODAG version restarts the comparison. What the model
-  does not check and the simulator must: the hold bound (a message in a
-  rootless part is delivered or failed within about 2 G + 2 periods of
-  the cut for the Nodes of a dead relay, one more G per further frame of
-  the relay lost, MESH_DESIGN §12, whatever the hand-overs), the
-  dissolution of a cut-off structure as its nodes float, the absence of
-  false floats on grounded paths (the sequence read from overheard
-  frames), the grounding delay after a rejoin at the same sequence, and
-  a node ungrounded, grounded again, its held message delivered.
+  presence periods (a selection at `float_at`, `Dodag._routing`), or at
+  once when the preferred parent's frame carries the flag; grounded again
+  only by a newer sequence from a preferred parent that is not floating
+  (a rejoin at the node's sequence stays ungrounded until the parent's
+  next newer one), and, before the first grounding since boot, by a
+  parent that is not floating and holds the sequence the node adopted
+  less than G ago (outside the model, which starts grounded). Header bit 0 set in every
+  frame while ungrounded (`frame.py` `Header.floating`,
+  `LinkEngine.floating`, set by `Dodag._apply`). `Reliable.grounding`
+  (`reliable.py`) holds upward class 1/2 messages while ungrounded (the
+  queued ones at the loss, a waiting one at its timeout, its retry delay
+  or last root timeout: no forward, no retry, no drop of the parent;
+  arrivals held and acknowledged explicitly, `Dodag.next_hop` giving
+  them no next hop) and fails a received one 2 presence periods after
+  the loss of grounding (`Reliable.deadline`), the deadline not restarted
+  by an arrival, a hand-over nor a rejoin; the node's own messages (its
+  submissions, its errors) count 2 periods from their own hold, as do
+  the messages of a node ungrounded since boot (no hand-over reaches a
+  floating node); grounded again, the held messages leave
+  (`route_changed`). A sequence not advanced for 50 periods (at most 111
+  increments) is forgotten with ``lowest``; the root at boot takes the
+  sequence after the newest heard while it listens; a new DODAG version
+  restarts the comparison. Host tests: `Grounding` (tests/test_parents.py),
+  `Ungrounded` (tests/test_reliable.py),
+  `Fields.test_floating_flag_is_bit_0` (tests/test_frame.py),
+  `RootSequence.test_no_false_float_under_load`
+  (tests/test_dodag_scenario.py: no float on a 4-hop line under class 1
+  load, the sequence read from overheard frames), `FloatAndGround` and
+  `RootlessPart` (tests/test_routing_scenario.py: a node ungrounded,
+  grounded again, its held messages delivered; an arrival not restarting
+  the hold; after a relay's death, every message delivered or failed
+  within 2 G + 2 periods of the cut whatever the hand-overs, nothing left
+  in a queue or on air after it, same-sequence moves only below L, the
+  cut-off structure ungrounded and detached). In the simulator such a
+  same-sequence move inside a cut-off part ends with the sibling's own
+  detach, before G: floating is the bound when frames keep coming without
+  an advance (`FloatAndGround`).
 - **Abstractions to keep in mind**: no timing bound is checked (events
   only); losses bounded by counts, not probabilities; errors not routed;
   two versions only, issued once, Trickle suppression and the DODAG
@@ -1147,8 +1169,8 @@ How each fix is implemented, what it costs, and the limits accepted.
   and solicitation included) takes part in a loop after the rejoin, and L,
   restarted, no longer excludes it. With remedy C (`Seq = "babel"`) L is
   kept across the detach and a descendant's sequence is never newer: no
-  loop with up to 3 (line) or 2 (`star`) losses in any pattern; closed in
-  the code once C is implemented.
+  loop with up to 3 (line) or 2 (`star`) losses in any pattern; in the
+  code since remedy C (`parents.py`).
 - **Global repair wave**: a solicitation of finite rank (only a node behind
   a newer version sends one) answered by newer neighbours only, so that the
   node's own children no longer answer it in the window of its parent's

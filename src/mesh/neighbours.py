@@ -10,6 +10,8 @@ link destination (the channel is shared, §9). Per neighbour:
   heard), set by routing (`set_sequence`) from every frame, overheard ones
   included. Sequences are compared within a version: a frame of another
   version than the entry's clears it;
+- **floating flag** of its last frame (``floating``, frame header bit 0:
+  the neighbour is ungrounded, §9), whatever the frame;
 - **inbound delivery ratio** ``d_in``: frames received / counter values
   spent by the neighbour over its last 16 frame counter values (a 16-bit
   window shifted by the counter gap). A gap above 16 (long silence, reboot)
@@ -151,7 +153,8 @@ class Neighbour:
 
     address; heard (ms, last frame); rank, version (of its last frame);
     sequence (root sequence of its last frame carrying one, of that
-    version, or None); counter (last frame counter); parent (set by
+    version, or None); floating (its last frame carried the floating
+    flag); counter (last frame counter); parent (set by
     routing); rx_bits,
     rx_span (reception window); ack_bits, ack_count (acknowledgement
     window), fail_at (ms, newest failure still in it, or None), latched
@@ -172,6 +175,7 @@ class Neighbour:
         self.rank = rank
         self.version = version
         self.sequence = None
+        self.floating = False
         self.counter = counter
         self.parent = False
         self.rx_bits = 1
@@ -455,11 +459,11 @@ class NeighbourTable:
         n.answered = now
         return True
 
-    def heard(self, address, counter, rank, version, rssi, snr, now):
+    def heard(self, address, counter, rank, version, rssi, snr, now, floating=False):
         """Record an authenticated frame of address; return its entry or None.
 
-        counter, rank, version: from the frame header; rssi (dBm), snr (dB,
-        None if not measured): link measurements; now: ms.
+        counter, rank, version, floating: from the frame header; rssi (dBm),
+        snr (dB, None if not measured): link measurements; now: ms.
         """
         self.expire(now)
         n = self.get(address)
@@ -469,6 +473,7 @@ class NeighbourTable:
                 self.refused += 1
                 return None
             n.reset(address, counter, rank, version, now)
+            n.floating = bool(floating)
         elif counter <= n.counter:
             self.stale += 1
             return None
@@ -476,6 +481,7 @@ class NeighbourTable:
             n._counter(counter)
             n.heard = now
             n.rank = rank
+            n.floating = bool(floating)
             if version != n.version:
                 n.version = version
                 n.sequence = None  # compared within a version only

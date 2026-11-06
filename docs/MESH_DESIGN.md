@@ -874,7 +874,12 @@ acknowledgement window and the time of its newest failure.
   delay variation, as the silence limit) and about 2 periods, two lost
   presences, at hop 8. An ungrounded node keeps its routing state (RPL's
   floating DODAG) but **holds its upward messages** (§12); it is grounded
-  again when its preferred parent's frame carries a newer sequence.
+  again when its preferred parent's frame carries a newer sequence. A node
+  never grounded since boot is also grounded by a preferred parent that is
+  not floating and holds the sequence the node took from a DODAG
+  information since boot, less than G ago: it has no older sequence of
+  its own to mistake for a fresh one, and waiting for its parent's next
+  advance would form the DODAG one presence period per hop.
   Grounding tells that the root's sequence still comes down, not that the
   way up works: over a dead uplink the node still hears its parent and
   stays grounded, its messages keep probing the link and its
@@ -1586,7 +1591,13 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   included, are held; queued class 0 messages are dropped. An ungrounded
   node forwards no upward message: its queued ones are held, a waiting one
   is held at its timeout (no retry, no drop of the parent), one it receives
-  is held and acknowledged explicitly.
+  is held and acknowledged explicitly. The node's own upward messages (its
+  submissions and its errors) count their 2 periods from their own hold:
+  they are no hand-over, and an error queued at the end of a hold would
+  otherwise fail at once, without a chance to reach the root once the
+  node is grounded again; so do all the messages of a node never grounded
+  since boot (no loss of grounding to count from; floating, it is no
+  candidate parent and receives no hand-over).
 - **The hold is not renewed** at a hand-over nor at a rejoin: a message
   received by an ungrounded node is held until that node's deadline, set
   when it lost grounding, before the message arrived; only grounding

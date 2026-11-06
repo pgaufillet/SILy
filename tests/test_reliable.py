@@ -1054,3 +1054,103 @@ class Rules(unittest.TestCase):
         own = encode_error(4, R, N, ROOT, 20, 6)
         rel.on_error(ROOT, Message(DOWNWARD, 1, ports.ERROR, own, dest=N, seq=3), h)
         self.assertEqual(failures, [(ROOT, 20, 6, 4)])
+
+
+def _grounded_hop(hop):
+    # next_hop of routing (`Dodag.next_hop`): none for an upward class 1/2
+    # message while the node is ungrounded.
+    box = {}
+
+    def next_hop(msg):
+        rel = box["engine"].reliable
+        if msg.cls and (msg.mode == UPWARD or msg.mode == FIRST_HOP) and rel.ungrounded:
+            return None
+        return hop
+
+    return box, next_hop
+
+
+class Ungrounded(unittest.TestCase):
+    """§9, §12: an ungrounded node holds its upward class 1/2 messages (no
+    forward, no retry, no drop of the parent) and fails a received one 2
+    presence periods after the loss of grounding, whatever its arrival;
+    grounded again, it sends them (`Reliable.grounding`)."""
+
+    def _node(self, address, hop, seed=1):
+        box, next_hop = _grounded_hop(hop)
+        drops = []
+        e = _engine(address, next_hop, seed, reroute=lambda msg, h: drops.append(h) or HOLD)
+        box["engine"] = e
+        return e, drops
+
+    def test_queued_messages_held_at_the_loss_of_grounding(self):
+        e, drops = self._node(N, R)
+        rel = e.reliable
+        e.submit(20, 1, ROOT, b"x")
+        e.submit(20, 0, ROOT, b"report")  # class 0: still sent
+        rel.grounding(False, 5, 5)
+        frames, now = _run(e, 5, 5 + rel.hold_ms() // 2)
+        ports_sent = [m.port for f in frames for m in _messages(_KEY, f)[1]]
+        self.assertEqual(ports_sent, [20])
+        self.assertEqual(_messages(_KEY, frames[0])[1][0].cls, 0)
+        self.assertEqual((rel.held(), len(e.queue), drops), (1, 1, []))
+        # Grounded again: sent at once.
+        rel.grounding(True, None, now + 1)
+        frames, _ = _run(e, now + 1)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual((rel.held(), rel.pending()), (0, 1))
+
+    def test_waiting_message_held_at_its_timeout_no_retry_no_drop(self):
+        e, drops = self._node(N, R)
+        rel = e.reliable
+        e.submit(20, 1, ROOT, b"x")
+        (f,), now = _run(e, 0)
+        self.assertEqual(rel.pending(), 1)
+        rel.grounding(False, now, now)
+        self.assertEqual(rel.pending(), 1)  # waiting: held at its timeout only
+        frames, now = _run(e, now, now + 3 * rel.timeout_ms(R) + 8 * rel.retry_ms)
+        self.assertEqual((frames, rel.pending(), rel.held()), ([], 0, 1))
+        self.assertEqual((e.counters.retries, drops), (0, []))
+
+    def test_received_message_fails_two_periods_after_the_loss_not_its_arrival(self):
+        n, _ = self._node(N, R)
+        r, _ = self._node(R, ROOT, seed=2)
+        rr = r.reliable
+        period = r.neighbours.period_ms
+        lost = 100
+        rr.grounding(False, lost, lost)
+        failed = []
+        fail = rr.fail
+        rr.fail = lambda slot, msg, reason, hop, now: (
+            failed.append((now, msg.port, reason)),
+            fail(slot, msg, reason, hop, now),
+        )
+        n.submit(20, 1, ROOT, b"x")
+        (f,), now = _run(n, period)  # arrives one period after the loss
+        actions = _rx(r, now, f)
+        frames, now = _run(r, now, now + 2 * r.slot_ms, actions)
+        ports_sent = [m.port for g in frames for m in _messages(_KEY, g)[1]]
+        self.assertEqual(ports_sent, [ports.ACK])  # held and acknowledged, not forwarded
+        self.assertEqual(rr.held(), 1)
+        _rx(n, now, frames[0])
+        self.assertEqual(len(n.queue), 0)
+        _, now = _run(r, now, lost + 4 * period)
+        # Failed at the loss of grounding + 2 periods; its error, an own
+        # message, is held 2 periods from its own hold, then dropped (no
+        # path: never an error about an error).
+        self.assertEqual(failed[0], (lost + 2 * period, 20, 3))
+        self.assertEqual(failed[1], (lost + 4 * period, ports.ERROR, 3))
+        self.assertEqual((r.counters.errors_sent, r.counters.errors_dropped), (1, 1))
+
+    def test_own_message_held_two_periods_from_its_hold(self):
+        e, _ = self._node(N, R)
+        rel = e.reliable
+        period = e.neighbours.period_ms
+        failures = []
+        e.on_failure(lambda *f: failures.append((e.now,) + f))
+        rel.grounding(False, 0, 0)
+        e.submit(20, 1, ROOT, b"x")
+        _run(e, period, 4 * period)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], period + 2 * period)
+        self.assertEqual(failures[0][4], 3)

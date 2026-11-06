@@ -33,6 +33,20 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   selection then takes the preferred parent's when newer
   (`mesh.parents`). Frames of rank 255 too: a neighbour of rank 255 is no
   candidate, its next frames replace the value.
+- **Grounding** (§9 root sequence and grounding, `mesh.parents`): a node is
+  ungrounded while detached, once its sequence has not advanced for G
+  (a selection runs at `Parents.float_at`), or at once when its preferred
+  parent's frame carries the floating flag (the neighbour table records
+  the flag of every frame heard); it is grounded again by a newer sequence
+  from a preferred parent that is not floating. While it is ungrounded,
+  every frame it sends carries the floating flag (``engine.floating``,
+  frame header bit 0, §11), ``next_hop`` gives no next hop to its upward
+  class 1/2 messages, and ``engine.reliable`` holds them
+  (`Reliable.grounding`: no forward, no retry, no drop of the parent,
+  arrivals held and acknowledged explicitly; failed 2 presence periods
+  after the loss of grounding; resumed when grounded again, §12). Its
+  class 0 messages, its own presence included, still go to the preferred
+  parent. The root is always grounded.
 - **Selection**: the parent set is recomputed after every step in which a
   frame was heard (after the frame's messages, so that a DODAG information
   message of a new version is adopted first), when a member falls silent
@@ -136,8 +150,9 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   presence period belongs with the global repair policy), unless a first
   sequence is given (``sequence``).
 
-``next_hop`` gives the preferred parent for upward messages (the link
-engine's ``next_hop``, set by `mesh.routing.Routing`).
+``next_hop`` gives the preferred parent for upward messages, none for an
+upward class 1/2 message while the node is ungrounded (the link engine's
+``next_hop``, set by `mesh.routing.Routing`).
 
 **Events**: every change of the parent set is applied from
 `Parents.events`, the events accumulated since the last step included: a
@@ -163,10 +178,12 @@ from mesh.neighbours import presence_ms, silence_ms
 from mesh.parents import (
     ATTACHED,
     DETACHED,
+    GROUNDED,
     MAX_RANK_INCREASE,
     PARENT_CHANGED,
     RANK_INCREASED,
     SEQUENCE_MASK,
+    UNGROUNDED,
     VERSION_MASK,
     Parents,
     sequence_newer,
@@ -369,6 +386,8 @@ class Dodag:
         parents.on_new_version(self.version, 0)
         engine.dodag_version = self.version
         engine.rank = parents.rank
+        engine.floating = not parents.grounded
+        engine.reliable.grounding(parents.grounded, parents.ungrounded_at, None)
         self._started = False
         self._dirty = False  # a frame was heard: select again in this step's tick
         self._check_at = None  # a member falls silent or its failures age out
@@ -427,9 +446,16 @@ class Dodag:
     # --- Entry points ------------------------------------------------------------------
 
     def next_hop(self, msg):
-        """Return the preferred parent for an upward message, else None."""
+        """Return the preferred parent for an upward message, else None.
+
+        None too for an upward class 1/2 message while the node is
+        ungrounded: held (§12).
+        """
         if msg.mode == UPWARD or msg.mode == FIRST_HOP:
-            return self.parents.preferred
+            p = self.parents
+            if msg.cls and not p.grounded:
+                return None
+            return p.preferred
         return None
 
     def reset(self, now, need_info=False):
@@ -586,6 +612,7 @@ class Dodag:
             self.trickle.timer(),
             self._beacon_at,
             self._check_at,
+            self.parents.float_at(),
             self._solicit_at,
             self._poison_at,
             self._ask_at,
@@ -631,6 +658,9 @@ class Dodag:
             due = True
         if p.window_until is not None and now >= p.window_until:
             due = True
+        t = p.float_at()
+        if t is not None and now >= t:
+            due = True  # G without advance: ungrounded
         if due and self.configured:
             self._dirty = False
             p.recompute(now)
@@ -655,6 +685,9 @@ class Dodag:
                 self.trickle.reset(now, True)
             elif events & (ATTACHED | RANK_INCREASED):
                 self.trickle.reset(now)
+        if events & (GROUNDED | UNGROUNDED):
+            self.engine.floating = not p.grounded
+            self.engine.reliable.grounding(p.grounded, p.ungrounded_at, now)
         if events & PARENT_CHANGED:
             self.engine.reliable.route_changed(now)
         self._watch()

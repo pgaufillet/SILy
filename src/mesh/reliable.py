@@ -83,9 +83,23 @@ route for now: held) or None (no alternative: the message fails, reason
 
 **Holding during repair** (MP15): a class 1/2 message without next hop
 (``engine.next_hop`` returns None, or `HOLD` above) keeps its queue entry
-for `HOLD_PERIODS` (2) presence periods from the first time it is held; the
-route is queried again every `POLL_SLOTS` slots (Imin) and at once on
-`route_changed`. Then it fails with reason 3 (no route).
+for `HOLD_PERIODS` (2) presence periods; the route is queried again every
+`POLL_SLOTS` slots (Imin) and at once on `route_changed`. Then it fails
+with reason 3 (no route).
+
+**Ungrounded** (§9 root sequence and grounding, §12; routing calls
+`grounding`): while the node is ungrounded (detached, or floating), its
+upward class 1/2 messages are held: those queued at the loss of grounding
+at once, a waiting one at its timeout (no retry, no drop of the parent:
+its retry delay and its last root timeout end held too), new ones on
+arrival (``engine.next_hop`` gives them none: a received one is held and
+acknowledged explicitly). The 2 periods of a received (forwarded)
+message are counted from the **loss of grounding** (``ungrounded_at``),
+not from its arrival: neither an arrival, a hand-over nor a rejoin
+restarts them, so that a message handed over inside a rootless structure
+is delivered or failed within a bound (§12), instead of getting a new
+hold at every holder. Grounding again resumes the held messages
+(`route_changed`).
 
 **Failure** of a message: an own message is reported to the application
 (``engine.failed``: destination, port, sequence, reason); for a forwarded
@@ -122,9 +136,17 @@ leaves the frame to its other messages); the identity of a link-local message
 (`identity`), no explicit acknowledgement for a frame with a refused
 message (above), errors of a relay without route held like any class 1
 message (`Reliable.fail`), a held message's holding counted from the first
-time it is held, across resumptions. Class 1 alone cannot survive a relay
-reboot after the relay acknowledged (explicitly, or by forwarding a frame
-then lost): class 2 recovers it (§12).
+time it is held, across resumptions, unless it is a received upward
+message held while the node is ungrounded since a known loss of grounding
+(above); the node's own upward messages (its submissions and its errors,
+first-hop mode) keep that per-message count: they are no hand-over, and
+an error created at the end of a hold would otherwise fail at once,
+without a chance to reach the root once the node is grounded again; a
+node ungrounded since boot (never grounded) counts every message from its
+first hold (no loss of grounding to count from; being floating, it is no
+candidate parent, so it receives no hand-over). Class 1 alone cannot
+survive a relay reboot after the relay acknowledged (explicitly, or by
+forwarding a frame then lost): class 2 recovers it (§12).
 
 Bounded memory: per-slot state arrays of the queue size (`ATTEMPTS`
 counters per slot towards the root), a queue-size table of pending root
@@ -173,6 +195,14 @@ _DELAY = 4  # timed out, queued: its retry waits its random delay
 
 def _classed(msg):
     return msg.cls != 0
+
+
+def _upward(msg):
+    return msg.mode == UPWARD or msg.mode == FIRST_HOP
+
+
+def _upward_classed(msg):
+    return msg.cls != 0 and (msg.mode == UPWARD or msg.mode == FIRST_HOP)
 
 
 def encode_acks(entries):
@@ -361,6 +391,8 @@ class Reliable:
         self._streak = 0  # frames timed out since the last acknowledgement (retry backoff)
         self._poll = None
         self._next = None
+        self.ungrounded = False  # routing: the node is ungrounded (`grounding`)
+        self.ungrounded_at = None  # ... since this loss of grounding (None: since boot)
 
     # --- Parameters --------------------------------------------------------------
 
@@ -602,11 +634,17 @@ class Reliable:
         self._due[slot] = None
         if self._state[slot] == _DELAY:
             self._state[slot] = _IDLE
+            if self._floating(msg):
+                self.hold(slot, msg, now)  # ungrounded: no retry
+                return
             queue.retry(slot, msg)
             self.engine.access_at(now)
             return
         if self._state[slot] == _LATE:
             self._state[slot] = _IDLE
+            if self._floating(msg):
+                self.hold(slot, msg, now)  # ungrounded: no drop of the parent
+                return
             self._exhausted(slot, msg, hop, now)
             return
         failed = not self._sampled[slot] and not self._same_frame(slot)
@@ -620,7 +658,9 @@ class Reliable:
         if hop == ROOT:
             self._sampled[slot] = 1  # its sample: deferred, or by the frame's last message
         self._state[slot] = _IDLE
-        if queue.attempts(slot, msg) < ATTEMPTS:
+        if self._floating(msg):
+            self.hold(slot, msg, now)  # ungrounded: no retry, no drop of the parent
+        elif queue.attempts(slot, msg) < ATTEMPTS:
             self._retry(slot, msg, False, now)
         elif hop == ROOT:
             # The last attempt: one more root timeout for its late acknowledgement.
@@ -730,6 +770,50 @@ class Reliable:
 
     # --- Holding -----------------------------------------------------------------
 
+    def _floating(self, msg):
+        # An upward class 1/2 message of an ungrounded node: held (§12).
+        return self.ungrounded and _upward(msg)
+
+    def grounding(self, grounded, at, now):
+        """Routing: the node is grounded, or ungrounded since at (§9, §12).
+
+        at: the moment grounding was lost (None: ungrounded since boot).
+        Losing grounding holds the queued upward class 1/2 messages not
+        waiting (the waiting ones at their timeout); grounding again
+        queries the route of the held messages (`route_changed`). now: None
+        outside a step (no message is touched).
+        """
+        if grounded:
+            if not self.ungrounded:
+                return
+            self.ungrounded = False
+            self.ungrounded_at = None
+            if now is not None:
+                self.route_changed(now)
+            return
+        if self.ungrounded and at == self.ungrounded_at:
+            return
+        self.ungrounded = True
+        self.ungrounded_at = at
+        if now is None:
+            return
+        for slot, msg in self.queue.select(_upward_classed):
+            self.hold(slot, msg, now)
+        self.route_changed(now)  # deadlines counted from at
+
+    def deadline(self, slot):
+        """Return the end of the holding of the message held in slot (ms), None if unknown.
+
+        2 presence periods from the loss of grounding for a received upward
+        message held while the node is ungrounded since a known moment,
+        otherwise from the first time it was held (module docstring).
+        """
+        at = self.ungrounded_at
+        if self.ungrounded and at is not None and self._msg[slot].mode == UPWARD:
+            return at + self.hold_ms()
+        since = self._since[slot]
+        return None if since is None else since + self.hold_ms()
+
     def hold(self, slot, msg, now):
         """Hold msg (queued in slot) during repair: no next hop for now (MP15).
 
@@ -753,7 +837,7 @@ class Reliable:
             return
         if self._since[slot] is None:
             self._since[slot] = now
-        self._poll_at(min(now + self.poll_ms, self._since[slot] + self.hold_ms()))
+        self._poll_at(min(now + self.poll_ms, self.deadline(slot)))
 
     def _poll_at(self, time):
         if self._poll is None or time < self._poll:
@@ -767,7 +851,6 @@ class Reliable:
 
     def _resume_held(self, now):
         engine = self.engine
-        limit = self.hold_ms()
         self._poll = None
         for slot in range(self.queue.size):
             if self._state[slot] != _HELD:
@@ -778,13 +861,14 @@ class Reliable:
                 continue
             if self._since[slot] is None:
                 self._since[slot] = now
-            if now - self._since[slot] >= limit:
+            end = self.deadline(slot)
+            if now >= end:
                 self.counters.hold_expired += 1
                 self.fail(slot, msg, NO_ROUTE, NO_HOP, now)
                 continue
             hop = engine.next_hop(msg) if engine.next_hop is not None else None
             if hop is None:
-                self._poll_at(min(now + self.poll_ms, self._since[slot] + limit))
+                self._poll_at(min(now + self.poll_ms, end))
                 continue
             self._state[slot] = _IDLE
             self.queue.retry(slot, msg, hop, True)

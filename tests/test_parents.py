@@ -8,11 +8,13 @@ from mesh.parents import (
     ATTACHED,
     DETACHED,
     FORGET_PERIODS,
+    GROUNDED,
     MAX_RANK_INCREASE,
     PARENT_CHANGED,
     RANK_CHANGED,
     RANK_INCREASED,
     SIZE,
+    UNGROUNDED,
     Parents,
     link_cost,
     path_cost,
@@ -46,11 +48,12 @@ class Net:
         self.table = NeighbourTable(7, _PERIOD, capacity)
         self._counters = {}
 
-    def hear(self, address, rank, now, version=0, margin=100, gap=1, seq=None):
-        """Feed a frame of address; seq: the root sequence it carries (None: none)."""
+    def hear(self, address, rank, now, version=0, margin=100, gap=1, seq=None, floating=False):
+        """Feed a frame of address; seq: the root sequence it carries (None: none);
+        floating: its header's floating flag."""
         counter = self._counters.get(address, 0) + gap
         self._counters[address] = counter
-        n = self.table.heard(address, counter, rank, version, -80, _snr(margin), now)
+        n = self.table.heard(address, counter, rank, version, -80, _snr(margin), now, floating)
         if n is not None and seq is not None:
             self.table.set_sequence(address, seq)
         return n
@@ -348,7 +351,8 @@ class BoundedIncrease(unittest.TestCase):
         events = self.p.recompute(3200)
         self.assertEqual((self.p.rank, self.p.lowest, self.p.members()), (78, 78, (C,)))
         self.assertEqual(self.p.sequence, 1)
-        self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | ATTACHED)
+        # The first sequence taken grounds the node (§9).
+        self.assertEqual(events, PARENT_CHANGED | RANK_CHANGED | ATTACHED | GROUNDED)
 
     def test_bound_prefers_a_usable_candidate(self):
         # Bound 16 + 30 = 46: B (47) and C (47) beyond it, D (46) usable,
@@ -1265,6 +1269,148 @@ class RootSequence(unittest.TestCase):
             t += _PERIOD
         self.assertEqual((p.preferred, p.rank, p.lowest, p.sequence), (A, 48, 48, 10))
         self.assertEqual(p.sequence_at, FORGET_PERIODS * _PERIOD)
+
+
+class Grounding(unittest.TestCase):
+    """§9 grounding: attached through A (rank 16, sequence 10) at 0: rank 24,
+    h = 3, G = 2.5 + 3 = 5.5 periods."""
+
+    def setUp(self):
+        self.net = Net()
+        self.net.hear(A, 16, 0, seq=10)
+        self.p = Parents(self.net.table)
+        self.events = self.p.recompute(0)
+
+    def cost(self, address, now):
+        return self.p.candidate_cost(self.net.table.get(address), now)
+
+    def test_ungrounded_from_boot_to_the_first_sequence_taken(self):
+        p = Parents(Net().table)
+        self.assertEqual((p.grounded, p.ungrounded_at, p.float_at()), (False, None, None))
+        self.assertTrue(self.events & GROUNDED)
+        self.assertEqual((self.p.grounded, self.p.ungrounded_at), (True, None))
+        root = Parents(Net().table, root=True)
+        self.assertEqual((root.grounded, root.float_at(), root.recompute(10**9)), (True, None, 0))
+
+    def test_at_boot_a_parent_at_the_adopted_sequence_grounds(self):
+        # Since boot the sequence comes from the DODAG information adopted:
+        # a parent holding it, not floating, grounds the node; floating, it
+        # does not.
+        net = Net()
+        p = Parents(net.table)
+        p.on_new_version(0, 0, 10)
+        net.hear(A, 16, 100, seq=10, floating=True)
+        net.hear(B, 24, 100, seq=10, floating=True)
+        p.recompute(100)
+        self.assertEqual((p.rank, p.grounded), (RANK_INFINITE, False))
+        net.hear(A, 16, 200, seq=10)
+        self.assertTrue(p.recompute(200) & GROUNDED)
+        self.assertEqual((p.preferred, p.sequence, p.sequence_at), (A, 10, 0))
+        # Adopted G ago or more: no longer fresh, an advance is needed.
+        net = Net()
+        p = Parents(net.table)
+        p.on_new_version(0, 0, 10)
+        g = 11 * _PERIOD // 2  # at rank 24
+        net.hear(A, 16, g, seq=10)
+        p.recompute(g)
+        self.assertEqual((p.preferred, p.grounded), (A, False))
+        net.hear(A, 16, g + 100, seq=11)
+        self.assertTrue(p.recompute(g + 100) & GROUNDED)
+
+    def test_g_from_the_rank(self):
+        p = self.p
+        self.assertEqual(p.ground_ms(), 11 * _PERIOD // 2)
+        for rank, periods_x2 in ((8, 7), (16, 9), (17, 11), (64, 21), (65, 21), (254, 21)):
+            p.rank = rank
+            self.assertEqual(p.ground_ms(), periods_x2 * _PERIOD // 2, rank)
+
+    def test_ungrounded_once_the_sequence_has_not_advanced_for_g(self):
+        p = self.p
+        g = 11 * _PERIOD // 2
+        self.assertEqual(p.float_at(), g)
+        for t in range(_PERIOD, g, _PERIOD):
+            self.net.hear(A, 16, t, seq=10)  # heard, no advance
+            self.assertEqual(p.recompute(t), 0, t)
+        self.net.hear(A, 16, g - 1, seq=10)
+        self.assertEqual(p.recompute(g - 1), 0)
+        self.assertTrue(p.grounded)
+        self.assertEqual(p.recompute(g + 30), UNGROUNDED)
+        # Lost at the moment G ran out; the routing state kept.
+        self.assertEqual((p.grounded, p.ungrounded_at, p.floats), (False, g, 1))
+        self.assertEqual((p.preferred, p.rank, p.float_at()), (A, 24, None))
+
+    def test_an_advance_restarts_g(self):
+        p = self.p
+        self.net.hear(A, 16, 3000, seq=11)
+        p.recompute(3000)
+        self.assertEqual(p.float_at(), 3000 + 11 * _PERIOD // 2)
+        self.net.hear(A, 16, 5000, seq=11)
+        self.assertEqual(p.recompute(6000), 0)
+        self.assertTrue(p.grounded)
+
+    def test_grounded_again_only_by_a_newer_sequence(self):
+        p = self.p
+        g = 11 * _PERIOD // 2
+        self.net.hear(A, 16, g - 500, seq=10)
+        self.assertEqual(p.recompute(g), UNGROUNDED)
+        self.net.hear(A, 16, g + 100, seq=10)
+        self.assertEqual(p.recompute(g + 100), 0)
+        self.assertFalse(p.grounded)
+        self.net.hear(A, 16, g + 200, seq=11)
+        self.assertEqual(p.recompute(g + 200), GROUNDED)
+        self.assertEqual((p.grounded, p.ungrounded_at, p.sequence), (True, None, 11))
+
+    def test_floating_parent_ungrounds_at_once_and_gives_no_sequence(self):
+        p = self.p
+        self.net.hear(A, 16, 1000, seq=11, floating=True)
+        self.assertEqual(p.recompute(1000), UNGROUNDED)
+        # Followed, its newer sequence not taken (it grounds no one).
+        self.assertEqual((p.preferred, p.rank, p.sequence, p.lowest), (A, 24, 10, 24))
+        self.assertEqual((p.grounded, p.ungrounded_at), (False, 1000))
+        self.net.hear(A, 16, 2000, seq=11)  # grounded again: 11, not floating
+        self.assertEqual(p.recompute(2000), GROUNDED)
+        self.assertEqual((p.sequence, p.sequence_at), (11, 2000))
+
+    def test_floating_neighbour_is_no_candidate(self):
+        net = self.net
+        net.hear(B, 0, 100, seq=11, floating=True)  # newer, rank 0: floating
+        net.hear(C, 8, 100, seq=10, floating=True)  # same, below L: floating
+        self.assertEqual((self.cost(B, 100), self.cost(C, 100)), (None, None))
+        self.p.recompute(100)
+        self.assertEqual((self.p.preferred, self.p.members()), (A, (A,)))
+        net.hear(A, 16, 200, seq=10, floating=True)  # the preferred parent: followed
+        self.assertEqual(self.cost(A, 200), 24)
+        net.hear(B, 0, 300, seq=11)  # its next frame without the flag
+        self.assertEqual(self.cost(B, 300), 8)
+
+    def test_floating_preferred_parent_kept_by_a_new_version(self):
+        # The node adopts the version from its floating preferred parent:
+        # followed in the new version, not left (no detach of the subtree);
+        # another floating neighbour is still no candidate.
+        p = self.p
+        self.net.hear(A, 16, 1000, version=1, seq=3, floating=True)
+        self.net.hear(B, 0, 1000, version=1, seq=3, floating=True)
+        p.on_new_version(1, 1000, 3)
+        self.assertEqual((p.preferred, p.members(), p.rank, p.detaches), (A, (A,), 24, 0))
+        self.assertFalse(p.grounded)
+        self.net.hear(B, 0, 1100, version=1, seq=3)  # its flag gone: cheaper by 16
+        p.recompute(1100)
+        self.assertEqual(p.preferred, B)
+
+    def test_detach_ungrounds_rejoin_at_the_same_sequence_does_not_ground(self):
+        p = self.p
+        self.assertTrue(p.detach(1000) & UNGROUNDED)
+        self.assertEqual((p.grounded, p.ungrounded_at), (False, 1000))
+        self.net.hear(C, 8, 1200, seq=10)  # same sequence, below L
+        self.assertTrue(p.recompute(1200) & ATTACHED)
+        self.assertEqual((p.preferred, p.grounded, p.ungrounded_at), (C, False, 1000))
+        # A second detach while ungrounded keeps the moment of the loss.
+        self.assertFalse(p.detach(1300) & UNGROUNDED)
+        self.assertEqual(p.ungrounded_at, 1000)
+        self.net.hear(B, 30, 1400, seq=11)  # newer: grounded by the rejoin
+        events = p.recompute(1400)
+        self.assertTrue(events & ATTACHED and events & GROUNDED, events)
+        self.assertEqual((p.preferred, p.grounded, p.ungrounded_at), (B, True, None))
 
 
 class NewVersion(unittest.TestCase):

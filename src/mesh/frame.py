@@ -5,8 +5,9 @@ A frame is one LoRa packet of at most 255 B::
     header (9 B, clear, AEAD associated data) | messages (encrypted) | tag (4 B)
 
 Header: byte 0 versions (bits 7–6 protocol version, bit 5 key epoch, bits 4–1
-DODAG version, bit 0 reserved: sent 0, ignored); link destination 2 B; link
-source 2 B; frame counter 3 B; rank 1 B. Integers are little-endian.
+DODAG version, bit 0 floating: the sender is ungrounded, §9); link
+destination 2 B; link source 2 B; frame counter 3 B; rank 1 B. Integers are
+little-endian.
 
 Security boundary (§14, implemented by `mesh.security`): `aad` is the
 associated data, `body` the region encrypted in place (plaintext and
@@ -95,16 +96,19 @@ class Header:
 
     dest: link destination (next hop or `BROADCAST`); source: link source;
     counter: frame counter (24 bits); rank: sender's rank (0 root, 255 none);
-    dodag_version: 0–15 (serial arithmetic, §9); epoch: key epoch bit.
+    dodag_version: 0–15 (serial arithmetic, §9); epoch: key epoch bit;
+    floating: 1 if the sender is ungrounded (§9 root sequence and
+    grounding), else 0.
     """
 
-    def __init__(self, dest, source, counter, rank, dodag_version=0, epoch=0):
+    def __init__(self, dest, source, counter, rank, dodag_version=0, epoch=0, floating=0):
         self.dest = dest
         self.source = source
         self.counter = counter
         self.rank = rank
         self.dodag_version = dodag_version
         self.epoch = epoch
+        self.floating = floating
 
     def __eq__(self, other):
         return (
@@ -115,16 +119,22 @@ class Header:
             and self.rank == other.rank
             and self.dodag_version == other.dodag_version
             and self.epoch == other.epoch
+            and self.floating == other.floating
         )
 
     def __repr__(self):
-        return "Header(dest=0x%04x, source=0x%04x, counter=%d, rank=%d, version=%d, epoch=%d)" % (
-            self.dest,
-            self.source,
-            self.counter,
-            self.rank,
-            self.dodag_version,
-            self.epoch,
+        return (
+            "Header(dest=0x%04x, source=0x%04x, counter=%d, rank=%d, version=%d, epoch=%d, "
+            "floating=%d)"
+            % (
+                self.dest,
+                self.source,
+                self.counter,
+                self.rank,
+                self.dodag_version,
+                self.epoch,
+                self.floating,
+            )
         )
 
 
@@ -247,7 +257,10 @@ def encode_header(buf, header):
     _check_range(header.rank, 255, "rank")
     _check_range(header.dodag_version, DODAG_VERSION_MAX, "dodag_version")
     _check_range(header.epoch, 1, "epoch")
-    buf[0] = PROTOCOL_VERSION << 6 | header.epoch << 5 | header.dodag_version << 1
+    _check_range(header.floating, 1, "floating")
+    buf[0] = (
+        PROTOCOL_VERSION << 6 | header.epoch << 5 | header.dodag_version << 1 | header.floating
+    )
     buf[1] = header.dest & 0xFF
     buf[2] = header.dest >> 8
     buf[3] = header.source & 0xFF
@@ -274,6 +287,7 @@ def decode_header(buf, length, into=None):
     h = into if into is not None else Header(0, 0, 0, 0)
     h.epoch = (v >> 5) & 1
     h.dodag_version = (v >> 1) & 0x0F
+    h.floating = v & 1
     h.dest = buf[1] | buf[2] << 8
     h.source = buf[3] | buf[4] << 8
     h.counter = buf[5] | buf[6] << 8 | buf[7] << 16

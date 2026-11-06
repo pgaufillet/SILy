@@ -31,7 +31,7 @@ from mesh.reliable import ATTEMPTS, RETRY_DOUBLINGS, identity
 from mesh.replay import ReplayTable
 from mesh.routing import Routing
 from mesh.security import KeyRing, Security
-from sim.net import Network
+from sim.net import Network, Observer
 from sim.platform import FakePlatform
 from sim.prng import XorShift32
 
@@ -1057,3 +1057,338 @@ class RejoinBest(unittest.TestCase):
         self.assertEqual([x for t, x in rejoin if x != D], [], log)
         self.assertEqual([p.preferred, m.preferred(D), m.preferred(E)], [D, f, D])
         self.assertEqual(m.consistent((B, C, D, E, f)), [])
+
+
+def _carries_sequence(msg):
+    # The messages carrying the sender's root sequence (§9): its own
+    # presence (mode 6) and its DODAG information.
+    if msg.port == PRESENCE:
+        return msg.mode == frame.FIRST_HOP
+    return msg.port == DODAG_INFO and len(msg.payload) > 0
+
+
+def _flagged_frames(board):
+    """Record (time, floating) of every frame board sends, and (time, port)
+    of its application messages."""
+    out = []
+    engine = board.engine
+    base = engine.sent
+
+    def sent(sel, counter, now):
+        base(sel, counter, now)
+        out.append((now, engine.floating, [m.port for m in sel.messages]))
+
+    engine.sent = sent
+    return out
+
+
+GAP = 3300  # between class 1 submissions: away from the root's batching delay
+
+
+class FloatAndGround(unittest.TestCase):
+    """§9 grounding, §12 holding: line root — A — B — C, B with class 1
+    traffic. A's frames carrying a root sequence (its presence, its DODAG
+    information) are lost at B: B still hears A (forwarding B's messages,
+    acknowledging them) and stays attached, but its sequence no longer
+    advances. G later B is ungrounded: its frames carry the floating flag,
+    C floats at once on hearing one, B holds its messages (no forward, no
+    drop of A). A's next presence heard grounds B again with a newer
+    sequence, and its held messages are delivered."""
+
+    def test_ungrounded_then_grounded_held_message_delivered(self):
+        names = (ROOT, A, B, C)
+        links = ((ROOT, A, 10), (A, B, 10), (B, C, 10))
+        m = Mesh(7, names, links)
+        m.run(12 * m.imin + 3 * P)
+        self.assertEqual([m.preferred(n) for n in (A, B, C)], [ROOT, A, B])
+        medium = m.net.medium
+        a, b, c = m.b(A), m.b(B), m.b(C)
+        pb, pc = b.routing.parents, c.routing.parents
+        self.assertTrue(pb.grounded and pc.grounded)
+        cutting = [True]
+        base = a.engine.sent
+
+        def sent_by_a(sel, counter, now):
+            base(sel, counter, now)
+            if cutting[0] and any(_carries_sequence(x) for x in sel.messages):
+                medium.cut(A, B)
+                m.net.at(now + sel.toa_ms + 1, medium.restore, A, B)
+
+        a.engine.sent = sent_by_a
+        frames_b = _flagged_frames(b)
+        floats = []
+        unground = pb._unground
+
+        def on_unground(at):
+            floats.append((at, pb.sequence_at, pb.ground_ms()))
+            return unground(at)
+
+        pb._unground = on_unground
+        start = m.net.now
+        payloads = []
+
+        def submit(i=0):
+            payloads.append(b"b%d" % i)
+            self.assertTrue(b.submit(APP, 1, ROOT, payloads[-1]) >= 0)
+            if i < 30:
+                m.net.at(m.net.now + GAP, submit, i + 1)
+
+        m.net.at(start + 50, submit)
+        # B floats G after its last advance (G = 2.5 + ceil(rank / 8) periods).
+        while pb.grounded and m.net.now < start + 8 * P:
+            m.run(m.net.now + 100)
+        self.assertFalse(pb.grounded)
+        lost, last, g = floats[0]
+        h = min(8, (pb.rank + MIN_HOP - 1) // MIN_HOP)
+        self.assertEqual((lost - last, g), ((5 + 2 * h) * P // 2,) * 2)
+        self.assertEqual((pb.preferred, pb.detaches, pc.preferred), (A, 0, B))
+        # One period ungrounded: B's frames flagged, C ungrounded at once by
+        # the first one, nothing of B's traffic forwarded meanwhile.
+        m.run(lost + P)
+        mine = [f for f in frames_b if f[0] > lost]
+        self.assertTrue(mine and all(f[1] for f in mine), frames_b[-5:])
+        self.assertEqual([f for f in mine if APP in f[2]], [])
+        self.assertFalse(pc.grounded)
+        # C, at a rank above B's, would float later by its own G.
+        self.assertTrue(0 <= pc.ungrounded_at - mine[0][0] <= 1000, (pc.ungrounded_at, mine[0]))
+        held = b.engine.reliable.held()
+        self.assertTrue(held >= 3, held)
+        self.assertEqual((pb.preferred, pb.detaches, b.engine.counters.unreachable), (A, 0, 0))
+        # A's frames reach B again: grounded within about one period, the
+        # held messages leave.
+        cutting[0] = False
+        back = m.net.now
+        while not pb.grounded and m.net.now < back + 3 * P:
+            m.run(m.net.now + 100)
+        self.assertTrue(pb.grounded)
+        self.assertTrue(m.net.now - back <= 11 * P // 10 + 200, m.net.now - back)
+        m.run(start + 31 * GAP + 3 * P)
+        self.assertTrue(pc.grounded)
+        got = set(p for o, p in m.root.inbox_from(APP) if o == B)
+        self.assertEqual(got, set(payloads))
+        self.assertEqual((b.failures, b.engine.reliable.held(), pb.detaches), ([], 0, 0))
+        self.assertEqual(pb.floats, 1)
+
+    def test_an_arrival_does_not_restart_the_hold(self):
+        # C sends, B forwards; B's sequence stops advancing as above, and A
+        # stays cut from B. The messages B receives once ungrounded (before
+        # C hears B's floating flag) are held, acknowledged, and failed 2
+        # periods after B lost grounding, not 2 periods after their arrival.
+        names = (ROOT, A, B, C)
+        links = ((ROOT, A, 10), (A, B, 10), (B, C, 10))
+        m = Mesh(8, names, links)
+        m.run(12 * m.imin + 3 * P)
+        self.assertEqual([m.preferred(n) for n in (A, B, C)], [ROOT, A, B])
+        medium = m.net.medium
+        a, b, c = m.b(A), m.b(B), m.b(C)
+        pb = b.routing.parents
+        base = a.engine.sent
+
+        def sent_by_a(sel, counter, now):
+            base(sel, counter, now)
+            if any(_carries_sequence(x) for x in sel.messages):
+                medium.cut(A, B)
+                m.net.at(now + sel.toa_ms + 1, medium.restore, A, B)
+
+        a.engine.sent = sent_by_a
+        arrivals = []  # (time, payload) of C's messages at B
+        forward = b.engine.forward
+
+        def forwarded(msg, header, now, *rest):
+            if msg.port == APP:
+                arrivals.append((now, bytes(msg.payload)))
+            return forward(msg, header, now, *rest)
+
+        b.engine.forward = forwarded
+        fails = []
+        fail = b.engine.reliable.fail
+
+        def watched(slot, msg, reason, hop, now):
+            if msg.port == APP:
+                fails.append((now, bytes(msg.payload), reason))
+            return fail(slot, msg, reason, hop, now)
+
+        b.engine.reliable.fail = watched
+        start = m.net.now
+
+        def submit(i=0):
+            c.submit(APP, 1, ROOT, b"c%d" % i)
+            if m.net.now < start + 12 * P:
+                m.net.at(m.net.now + GAP, submit, i + 1)
+
+        m.net.at(start + 50, submit)
+        # One more message of C just after B's float (G after its last
+        # advance), B's frames lost at C meanwhile: C, still grounded (it
+        # has not heard B's floating flag), sends it.
+        while True:
+            t = pb.float_at()
+            if t is None or m.net.now >= t - 300:
+                break
+            m.run(min(t - 300, m.net.now + 1000))
+        self.assertEqual(pb.float_at(), t)
+        m.net.at(t - 200, medium.cut, B, C)
+        m.net.at(t + 1, c.submit, APP, 1, ROOT, b"late")
+        m.net.at(t + 3000, medium.restore, B, C)
+        m.run(t + 1)
+        lost = pb.ungrounded_at
+        self.assertFalse(pb.grounded)
+        m.run(lost + 2 * P + 2000)
+        late = [x for x in arrivals if x[0] > lost]
+        self.assertTrue(late, arrivals[-3:])
+        delivered = set(p for o, p in m.root.inbox_from(APP))
+        failed = dict((p, t) for t, p, r in fails)
+        for t, p in late:
+            self.assertFalse(p in delivered, p)
+            self.assertEqual(failed.get(p), lost + 2 * P, (p, t - lost, failed.get(p)))
+        self.assertEqual(c.engine.counters.unreachable, 0)
+
+
+class RootlessPart(unittest.TestCase):
+    """§9 moves into a cut-off part, §12 hold bound: root — R, R — N1, N2
+    (siblings, hearing each other), N1, N2 — N3, N3 — N4: depths 1 to 4,
+    each Node sending class 1 messages. R is switched off: the four Nodes
+    are cut off from the root. N3 may move to the sibling of its parent
+    (same sequence, below its L: feasible), and messages are handed over
+    inside the part. Whatever the hand-overs: every message is delivered or
+    failed within about 2 G + 2 periods of the cut (G at the deepest
+    rank), none is left in a queue or on air after it (no circulation),
+    and the structure dissolves: each Node ungrounded for good, then
+    detached. A move inside the part at the node's own sequence goes to a
+    neighbour below its L, which never rises at one sequence (no count-up:
+    bounded); here the sibling's own detach, a few slots later, ends it,
+    before G."""
+
+    def test_bounded_hold_and_dissolution(self):
+        relay, n1, n2, n3, n4 = A, B, C, D, E
+        names = (ROOT, relay, n1, n2, n3, n4)
+        links = (
+            (ROOT, relay, 10),
+            (relay, n1, 10),
+            (relay, n2, 10),
+            (n1, n2, 10),
+            (n1, n3, 10),
+            (n2, n3, 10),
+            (n3, n4, 10),
+        )
+        part = (n1, n2, n3, n4)
+        stale = []  # moves at the node's own sequence inside the part, all seeds
+        for seed in (21, 23):
+            m = Mesh(seed, names, links)
+            m.run(12 * m.imin + 3 * P)
+            self.assertEqual([m.preferred(n) for n in (relay, n4)], [ROOT, n3], seed)
+            fails = {}  # payload -> [(time, board)]
+            sends = []  # (time, board, payload) of each transmission of a message
+            for n in part:
+                b = m.b(n)
+                fail = b.engine.reliable.fail
+
+                def watched(slot, msg, reason, hop, now, name=n, fail=fail, fails=fails):
+                    if msg.port == APP:
+                        fails.setdefault(bytes(msg.payload), []).append((now, name))
+                    return fail(slot, msg, reason, hop, now)
+
+                b.engine.reliable.fail = watched
+                base = b.engine.sent
+
+                def sent(sel, counter, now, name=n, base=base, sends=sends):
+                    base(sel, counter, now)
+                    for x in sel.messages:
+                        if x.port == APP:
+                            sends.append((now, name, bytes(x.payload)))
+
+                b.engine.sent = sent
+            payloads = []
+
+            def submit(i=0, m=m, payloads=payloads):
+                p = b"n%d" % i
+                if m.b(part[i % 4]).submit(APP, 1, ROOT, p) >= 0:
+                    payloads.append(p)
+                if i < 30:
+                    m.net.at(m.net.now + 1500, submit, i + 1)
+
+            start = m.net.now
+            m.net.at(start + 10, submit)
+            cut = start + 20 * 1500 // 2
+            m.net.at(cut, m.b(relay).power_loss, OFF)
+            moves = _Moves(m, part, cut)
+            m.net.observers.append(moves)
+            ranks = dict((n, m.rank(n)) for n in part)
+            depth = max(ranks.values())
+            g = (5 + 2 * min(8, (depth + 7) // 8)) * P // 2
+            bound = cut + 2 * g + 2 * P
+            grounded_after = []  # (time, node) of a grounded attached Node after cut + 2G
+
+            def sample(m=m, grounded_after=grounded_after, bound=bound):
+                for n in part:
+                    p = m.b(n).routing.parents
+                    if p.grounded and p.rank != RANK_INFINITE:
+                        grounded_after.append((m.net.now, n))
+                if m.net.now < bound + 3 * P:
+                    m.net.at(m.net.now + 200, sample)
+
+            m.net.at(cut + 2 * g, sample)
+            m.run(bound + 3 * P)
+            delivered = dict((p, t) for t, o, port, p in m.root.inbox if port == APP)
+            for p in payloads:
+                if p in delivered:
+                    self.assertTrue(delivered[p] < cut + 4 * P, (seed, p, delivered[p]))
+                    continue
+                self.assertTrue(p in fails, (seed, p, "neither delivered nor failed"))
+                last = max(t for t, _ in fails[p])
+                self.assertTrue(last <= bound + 1000, (seed, p, last - cut, bound - cut))
+            # Nothing left, nothing on air after the bound; handed over in
+            # the part (forwarded after the cut) while it held them.
+            left = [
+                n for n in part for _ in m.b(n).engine.queue.select(lambda x: x.port == APP, True)
+            ]
+            self.assertEqual(left, [], seed)
+            self.assertEqual([s for s in sends if s[0] > bound + 1000], [], seed)
+            inside = [s for s in sends if s[0] > cut + 1000 and s[1] != n4]
+            self.assertTrue(inside, seed)
+            # Dissolved: no Node grounded after 2 G, all ungrounded and
+            # detached at the end.
+            self.assertEqual(grounded_after, [], seed)
+            for n in part:
+                p = m.b(n).routing.parents
+                self.assertEqual((n, p.grounded, p.rank), (n, False, RANK_INFINITE), seed)
+            self.assertEqual(moves.rises, [], seed)
+            for t, n, parent, view, lowest in moves.stale:
+                self.assertTrue(view < lowest, (seed, t, n, parent, view, lowest))
+            stale.extend(moves.stale)
+        self.assertTrue(stale)  # the case occurs on these seeds
+
+
+class _Moves(Observer):
+    """`sim.net.Observer` of the parent changes of names after start: ``stale``
+    lists (time, node, parent, parent's rank as viewed, L before) of each
+    move to a parent at the node's own sequence; ``rises`` the times L rose
+    at one sequence."""
+
+    def __init__(self, m, names, start):
+        self.m = m
+        self.names = names
+        self.start = start
+        self.stale = []
+        self.rises = []
+        self._last = {}
+
+    def stepped(self, node, event):
+        m = self.m
+        if m.net.now < self.start:
+            return
+        for n in self.names:
+            b = m.b(n)
+            if b.engine is None:
+                continue
+            p = b.routing.parents
+            state = (p.preferred, p.sequence, p.lowest)
+            old = self._last.get(n)
+            self._last[n] = state
+            if old is None or old == state:
+                continue
+            if old[1] == p.sequence and p.lowest is not None and old[2] is not None:
+                if p.lowest > old[2]:
+                    self.rises.append((m.net.now, n))
+                if p.preferred is not None and p.preferred != old[0] and old[2] is not None:
+                    view = b.engine.neighbours.get(p.preferred).rank
+                    self.stale.append((m.net.now, n, p.preferred, view, old[2]))

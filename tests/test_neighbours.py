@@ -103,6 +103,20 @@ class DeliveryRatio(unittest.TestCase):
         self.assertEqual((n.counter, n.heard, n.rank, n.version), (51, 10, 16, 3))
         self.assertEqual((n.received(), n.rx_span), (2, 2))
 
+    def test_floating_flag_of_the_last_frame(self):
+        # §9: the flag of each frame replaces the last one; a stale frame
+        # changes nothing.
+        t = _table()
+        n = t.heard(A, 7, 24, 3, -80, 5, 100, True)
+        self.assertTrue(n.floating)
+        t.heard(A, 8, 24, 3, -80, 5, 200)
+        self.assertFalse(n.floating)
+        t.heard(A, 9, 24, 3, -80, 5, 300, True)
+        self.assertTrue(n.floating)
+        self.assertEqual(t.heard(A, 9, 24, 3, -80, 5, 400, False), None)
+        self.assertTrue(n.floating)
+        self.assertFalse(t.heard(B, 1, 24, 3, -80, 5, 100).floating)
+
     def test_rank_version_and_time_of_the_last_frame(self):
         t = _table()
         n = t.heard(A, 7, 24, 3, -80, 5, 100)

@@ -162,14 +162,25 @@ class Versions(unittest.TestCase):
         h = decode_header(self._with_byte0(0x40 | 7 << 1), len(data))
         self.assertEqual((h.epoch, h.dodag_version), (0, 7))
 
-    def test_reserved_bit_sent_zero_and_ignored(self):
+    def test_floating_flag_is_bit_0(self):
+        # §11 byte 0 bit 0: the sender is ungrounded (§9); the other fields
+        # of byte 0 are untouched by it.
         for epoch in (0, 1):
             for version in (0, 9, 15):
-                data = _encode([], _header(epoch=epoch, dodag_version=version))
-                self.assertEqual(data[0], 0x40 | epoch << 5 | version << 1)
-                flipped = bytearray(data)
-                flipped[0] |= 1
-                self.assertEqual(decode_header(flipped, 13), decode_header(data, 13))
+                for floating in (0, 1):
+                    h = _header(epoch=epoch, dodag_version=version, floating=floating)
+                    data = _encode([], h)
+                    self.assertEqual(data[0], 0x40 | epoch << 5 | version << 1 | floating)
+                    d = decode_header(data, 13)
+                    self.assertEqual(
+                        (d.floating, d.epoch, d.dodag_version), (floating, epoch, version)
+                    )
+                    self.assertEqual(d, h)
+        self.assertEqual(Header(0, 0, 0, 0).floating, 0)  # not floating by default
+        self.assertNotEqual(_header(floating=1), _header())
+        buf = bytearray(frame.MAX_FRAME)
+        with self.assertRaises(ValueError):
+            encode(buf, _header(floating=2), [])
 
 
 class Limits(unittest.TestCase):
@@ -251,7 +262,7 @@ class Fields(unittest.TestCase):
     def test_header_extremes_round_trip(self):
         for h in (
             Header(0, 0, 0, 0, 0, 0),
-            Header(0xFFFF, 0xFFFF, 0xFFFFFF, 255, 15, 1),
+            Header(0xFFFF, 0xFFFF, 0xFFFFFF, 255, 15, 1, 1),
             Header(BROADCAST, 0x0001, 0x000100, 1, 8, 0),
         ):
             data = _encode([], h)
