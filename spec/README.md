@@ -75,28 +75,35 @@ stopped by `MAXSECS=N`. It is tracked: commit it after a run worth
 keeping. `run.sh quick` runs the configurations recorded at most
 `QUICK_SECS` seconds, and says how many it leaves out for want of a
 record: a configuration never timed belongs to the full tier only, so the
-quick tier holds only configurations timed before. The lines labelled
-`laptop-readme` are durations taken from the results below, measured on
-an 8-core laptop on earlier versions of the models. `make spec-calibrate` runs
+quick tier holds only configurations timed before. Every configuration
+now has a duration from a full run on a 32-vCPU instance with `JOBS` = 8
+(label `32cpu-63G-j8`, 4 workers each). `make spec-calibrate` runs
 every configuration with `MAXSECS=QUICK_SECS` (at most the number of
 configurations × `QUICK_SECS` / `JOBS`) and records each one's duration or `>QUICK_SECS`. The durations depend on
 `JOBS`: with several configurations at a time each gets fewer workers.
 Configurations without a record run first, then the others, longest
 first.
 
-A full run takes about 4 h 40 on an 8-core laptop with `JOBS` = 1, most
-of it in the configurations of `DODAG` with link cost rises
-(`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 20 to 36 minutes each),
-link deaths (`DODAG_*_cutlive`), the root sequence (`DODAG_*_babel_*`),
-and `LinkCut`.
+A full run (211 configurations) takes 54 minutes on a 32-vCPU instance
+(AMD EPYC 9555P) with `JOBS` = 8, 7 h 9 of configuration time in all;
+its end is set by the longest configuration, `DODAG_line_low_live`
+(54 minutes with 4 workers), so more processors would not shorten it
+much. Most of the time goes to the configurations of `DODAG` with link
+cost rises (`DODAG_line_low_*`, `DODAG_subtree_low_nocycle`: 17 to 54
+minutes), link deaths (`DODAG_*_cutlive`), the root sequence
+(`DODAG_*_babel_*`) and `DODAG_*_MP5`. On an 8-core laptop with `JOBS` =
+1 an earlier, smaller version of the models took about 4 h 40.
 
 ### Full tier on a rented machine
 
-The full tier can run on a rented Linux machine, for instance a 16-vCPU,
-32 GB instance (Scaleway POP2-HC-16C-32G), reached by ssh:
+The full tier can run on a rented Linux machine reached by ssh, for
+instance a 32-vCPU, 64 GB instance (Scaleway COMPUTE3-X32C-64G, dedicated
+vCPUs) with `SPEC_JOBS=8`:
 
-1. Create the instance (Debian or Ubuntu) with an ssh key.
-2. On it: `apt install openjdk-21-jre-headless rsync`.
+1. Create the instance (Debian or Ubuntu) with an ssh key; 10 GB of disk
+   are enough.
+2. On it: `apt install default-jre-headless rsync` (Java 11 or later), or
+   the same packages in the instance's cloud-init `packages`.
 3. Here: `make spec-remote SPEC_HOST=user@host` copies `spec/` and
    `tla2tools.jar` into `~/sily-spec` there (`SPEC_DIR`) and starts
    `run.sh all` under `nohup` with `JOBS=8` (`SPEC_JOBS`; `SPEC_NAMES`
