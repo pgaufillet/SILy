@@ -31,6 +31,8 @@ from mesh.reliable import ATTEMPTS, RETRY_DOUBLINGS, identity
 from mesh.replay import ReplayTable
 from mesh.routing import Routing
 from mesh.security import KeyRing, Security
+from sim.medium import OK
+from sim.medium import Observer as RadioObserver
 from sim.net import Network, Observer
 from sim.platform import FakePlatform
 from sim.prng import XorShift32
@@ -333,6 +335,8 @@ class RelayKilled(unittest.TestCase):
             m, relay, other, children = self._formed(seed)
             kill = m.net.now
             log = m.watch((C, D, E), kill)
+            failed = self._failed_samples(m, children, relay)
+            losses = self._losses(m, other)
             m.b(relay).power_loss(off_ms=OFF)
             last = {}  # the relay's last frame heard by each child (one may be on air)
 
@@ -341,23 +345,64 @@ class RelayKilled(unittest.TestCase):
                     last[n] = m.b(n).engine.neighbours.get(relay).heard
 
             m.net.at(kill + 1000, record)
-            m.run(kill + 4 * P)
+            # Up to the root's alarm limit after the silence limit (4.5
+            # periods, K_MISS, §16): presences after the switch may be lost.
+            end = kill + 4 * P + 9 * P // 2
+            m.run(end)
+            lost = 0
             for n in children:
                 t, parent = switched(log, n, relay)
-                # No frame from the relay for 2.5 presence periods (§9 switch,
-                # idle, strict), the step of the watch aside.
                 self.assertEqual(parent, other)
-                self.assertTrue(0 <= kill + t - (last[n] + 5 * P // 2) <= 10, (n, t))
-                # Its last frame came at most a jittered period before.
-                self.assertTrue(5 * P // 2 - 11 * P // 10 <= t <= 5 * P // 2 + 1000, (n, t))
+                # No frame from the relay for 2.5 presence periods (§9 switch,
+                # idle, strict), the step of the watch aside. Earlier only on
+                # failed samples: the presences sent to the dead relay go
+                # unacknowledged (§9: a presence is a sample), which may raise
+                # its ETX until the other relay wins by the switch threshold.
+                late = kill + t - (last[n] + 5 * P // 2)
+                self.assertTrue(late <= 10, (n, t, late))
+                if late < 0:
+                    self.assertTrue([u for u in failed[n] if u <= kill + t], (n, t, late))
+                else:
+                    # Its last frame came at most a jittered period before.
+                    self.assertTrue(5 * P // 2 - 11 * P // 10 <= t, (n, t))
+                self.assertTrue(t <= 5 * P // 2 + 1000, (n, t))
                 # A presence leaves at once, and the root learns the new parent
                 # (the watch samples every 5 ms: t is up to 5 ms late).
-                gen = [(tg, p) for tg, c, p in m.generated[n] if tg > kill + t - 5]
-                self.assertEqual(gen[0][1], other)
+                gen = [(tg, c, p) for tg, c, p in m.generated[n] if tg > kill + t - 5]
+                self.assertEqual(gen[0][2], other)
                 self.assertTrue(gen[0][0] - kill - t <= 4 * m.b(n).engine.slot_ms + 10)
                 after = [p for tp, c, p in m.presences[n] if tp >= kill + t]
-                self.assertEqual(after[0], other)
+                self.assertTrue(after, (n, t))
+                self.assertEqual(set(after), set((other,)), (n, after))
+                # A presence lost on the way (no retry, §8 K_MISS) is a
+                # reception lost at the other relay or at the root.
+                got = set(c for tp, c, p in m.presences[n])
+                lost += len([c for tg, c, p in gen if tg < end - 2000 and c not in got])
+            self.assertTrue(lost <= self._losses(m, other) - losses, lost)
             self.assertEqual(m.consistent((other, C, D, E)), [])
+
+    def _failed_samples(self, m, children, relay):
+        """Times of each child's presences to relay left unacknowledged."""
+        failed = {}
+        for n in children:
+            reporter = m.b(n).routing.reporter
+            failed[n] = []
+
+            def probe(ok, now, probe=reporter._probe, reporter=reporter, out=failed[n]):
+                if not ok and reporter._probe_hop == relay:
+                    out.append(now)
+                probe(ok, now)
+
+            reporter._probe = probe
+        return failed
+
+    def _losses(self, m, other):
+        """Receptions lost at the other relay and at the root."""
+        total = 0
+        for n in (other, ROOT):
+            st = m.net.medium.stats(n)
+            total += st.rx_collision + st.rx_half_duplex
+        return total
 
     def test_child_with_traffic_reattaches_after_three_attempts(self):
         m, relay, other, children = self._formed(4)
@@ -442,6 +487,16 @@ class FollowParentRank(unittest.TestCase):
             m.run(m.net.now + 1000)
         else:
             raise AssertionError("diamond not formed")
+        # Failed samples to A (hidden terminals: B and C) age out first:
+        # otherwise B, heard at last, may win by the switch threshold (§9)
+        # and C leave A before the kill. The margin covers one more failure
+        # with two acknowledged samples (ETX 1.5) until B is heard.
+        for _ in range(6 * P // 1000):
+            if c.routing.parents.cost + 4 < m.rank(B) + MIN_HOP + SWITCH_THRESHOLD:
+                break
+            m.run(m.net.now + 1000)
+        else:
+            raise AssertionError("failed samples to A not aged out", c.routing.parents.cost)
         medium.restore(C, B)
         b.engine.sent = lossy
         # C's path cost through B not below D's rank (a frame lost to a
@@ -990,7 +1045,10 @@ class RejoinBest(unittest.TestCase):
     switch threshold: taking the first candidate heard would keep C on E
     for good. C waits for the close of its answer window (Imin + 8 slots
     after the solicitation) and takes D, the best candidate heard in it
-    (§9)."""
+    (§9). Only a frame carrying a root sequence makes a candidate: when
+    D's answer is lost to a collision at C (D and E answer at the same
+    time), C has no candidate at the close and takes the first one heard
+    after it."""
 
     def test_rejoin_through_the_best_candidate_of_the_window(self):
         f = 0x00F1
@@ -1019,25 +1077,43 @@ class RejoinBest(unittest.TestCase):
         p = c.routing.parents
         solicited = []  # times of C's solicitations at rank 255
         heard = []  # (time, source) of the frames C hears after the first one
+        healed = []  # times of C's frames at rank 255 (the links to D and E up)
+        candidates = []  # (time, source) of the frames carrying a root sequence C hears since
+        lossy = []  # receptions lost at C at its solicitation and window close
+        stats = medium.stats(C)
         base_sent, base_heard = c.engine.sent, c.engine.heard
+        base_decoded = c.engine.decoded
+
+        def losses():
+            lossy.append(stats.rx_collision + stats.rx_half_duplex)
 
         def sent(sel, counter, now):
             base_sent(sel, counter, now)
             if c.engine.rank != RANK_INFINITE:
                 return
             medium.heal((C,), (D, E))  # from C's poison on
+            healed.append(now)
             if any(x.port == DODAG_INFO and not len(x.payload) for x in sel.messages):
                 solicited.append(now)
                 if len(solicited) == 1:  # E has a report to send (class 0)
                     m.net.at(now + 200, e.submit, APP, 0, ROOT, b"e")
+                    losses()
+                    m.net.at(now + c.routing.dodag.imin_ms + 8 * c.engine.slot_ms, losses)
 
         def on_heard(header, rssi, snr, now):
             if solicited and header.rank != RANK_INFINITE:
                 heard.append((now, header.source))
             return base_heard(header, rssi, snr, now)
 
+        def decoded(header, messages, entry, now):
+            if healed and header.rank != RANK_INFINITE:
+                if any(_carries_sequence(x) for x in messages):
+                    candidates.append((now, header.source))
+            return base_decoded(header, messages, entry, now)
+
         c.engine.sent = sent
         c.engine.heard = on_heard
+        c.engine.decoded = decoded
         kill = m.net.now
         log = m.watch((C,), kill)
         m.b(A).power_loss(off_ms=OFF)
@@ -1046,14 +1122,24 @@ class RejoinBest(unittest.TestCase):
         self.assertEqual(c.routing.dodag.counters.poisons, 1)
         self.assertTrue(solicited, log)
         close = solicited[0] + c.routing.dodag.imin_ms + 8 * c.engine.slot_ms
-        # Both heard in the window.
-        sources = [s for t, s in heard if t < close]
-        self.assertTrue(E in sources and D in sources, heard)
-        # C rejoined at the close, through D, and keeps it.
         rejoin = [(t + kill, x) for t, n, x, r in log if t + kill > solicited[0]]
         self.assertTrue(rejoin, log)
-        self.assertEqual(rejoin[0][1], D, log)
-        self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
+        if D in [s for t, s in candidates if t < close]:
+            # Both heard in the window.
+            sources = [s for t, s in heard if t < close]
+            self.assertTrue(E in sources and D in sources, heard)
+            # C rejoined at the close, through D, and keeps it.
+            self.assertEqual(rejoin[0][1], D, log)
+            self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
+        else:
+            # D's answer lost at C: no selection before the close, then the
+            # first candidate heard (the best of none, §9).
+            self.assertEqual(len(lossy), 2, lossy)
+            self.assertTrue(lossy[1] > lossy[0], (lossy, heard))
+            self.assertTrue(rejoin[0][0] >= close, (close, rejoin[0]))
+            t1, first = [x for x in candidates if x[0] >= close][0]
+            self.assertEqual(rejoin[0][1], first, (candidates, rejoin))
+            self.assertTrue(t1 <= rejoin[0][0] <= t1 + 10, (t1, rejoin[0]))
         self.assertEqual([x for t, x in rejoin if x != D], [], log)
         self.assertEqual([p.preferred, m.preferred(D), m.preferred(E)], [D, f, D])
         self.assertEqual(m.consistent((B, C, D, E, f)), [])
@@ -1080,6 +1166,28 @@ def _flagged_frames(board):
 
     engine.sent = sent
     return out
+
+
+class _SequenceFrames(RadioObserver):
+    """(start, end, fate at dst) of the frames of source carrying a root sequence."""
+
+    def __init__(self, source, dst):
+        self.source = source
+        self.dst = dst
+        self.frames = []
+        self._on_air = {}
+
+    def transmitting(self, source, f, start, end, receivers):
+        if source == self.source:
+            _, msgs = _open(f)
+            if any(_carries_sequence(x) for x in msgs):
+                self._on_air[start] = [r[0] for r in receivers]
+
+    def ended(self, source, start, end, fates):
+        if source == self.source and start in self._on_air:
+            dsts = self._on_air.pop(start)
+            fate = fates[dsts.index(self.dst)] if self.dst in dsts else None
+            self.frames.append((start, end, fate))
 
 
 GAP = 3300  # between class 1 submissions: away from the root's batching delay
@@ -1124,12 +1232,24 @@ class FloatAndGround(unittest.TestCase):
             return unground(at)
 
         pb._unground = on_unground
+        grounded = []
+        ground = pb._ground
+
+        def on_ground():
+            grounded.append(m.net.now)
+            return ground()
+
+        pb._ground = on_ground
+        heard = _SequenceFrames(A, B)
+        medium.observers.append(heard)
         start = m.net.now
-        payloads = []
+        payloads = []  # (time, payload, sequence number)
 
         def submit(i=0):
-            payloads.append(b"b%d" % i)
-            self.assertTrue(b.submit(APP, 1, ROOT, payloads[-1]) >= 0)
+            payload = b"b%d" % i
+            seq = b.submit(APP, 1, ROOT, payload)
+            self.assertTrue(seq >= 0)
+            payloads.append((m.net.now, payload, seq))
             if i < 30:
                 m.net.at(m.net.now + GAP, submit, i + 1)
 
@@ -1154,19 +1274,36 @@ class FloatAndGround(unittest.TestCase):
         held = b.engine.reliable.held()
         self.assertTrue(held >= 3, held)
         self.assertEqual((pb.preferred, pb.detaches, b.engine.counters.unreachable), (A, 0, 0))
-        # A's frames reach B again: grounded within about one period, the
-        # held messages leave.
+        # A's frames reach B again: grounded by the first one carrying a
+        # sequence that B receives, within about one period of A's per frame
+        # lost to a collision (C is hidden from A), the held messages leave.
         cutting[0] = False
         back = m.net.now
-        while not pb.grounded and m.net.now < back + 3 * P:
+        while not pb.grounded and m.net.now < back + 5 * P:
             m.run(m.net.now + 100)
         self.assertTrue(pb.grounded)
-        self.assertTrue(m.net.now - back <= 11 * P // 10 + 200, m.net.now - back)
+        again = grounded[-1]
+        since = [f for f in heard.frames if f[0] >= back and f[1] <= again]
+        self.assertTrue(since and since[-1][1:] == (again, OK), (again, heard.frames[-4:]))
+        missed = [f for f in since[:-1] if f[2] != OK]
+        self.assertEqual(len(missed), len(since) - 1, since)
+        self.assertTrue(again - back <= len(since) * 11 * P // 10 + 200, (again - back, since))
         m.run(start + 31 * GAP + 3 * P)
         self.assertTrue(pc.grounded)
+        # Every message delivered, or failed at its hold end (2 periods after
+        # the float or its submission if later, §12) when that came before
+        # B was grounded again (a frame lost may delay it past the hold).
         got = set(p for o, p in m.root.inbox_from(APP) if o == B)
-        self.assertEqual(got, set(payloads))
-        self.assertEqual((b.failures, b.engine.reliable.held(), pb.detaches), ([], 0, 0))
+        failures = dict((seq, (t, reason)) for t, dest, port, seq, reason in b.failures)
+        for t, payload, seq in payloads:
+            if payload in got:
+                self.assertFalse(seq in failures, payload)
+                continue
+            end = max(lost, t) + 2 * P
+            self.assertEqual(failures.get(seq), (end, 3), (payload, t, lost))
+            self.assertTrue(end < again, (payload, end, again))
+        self.assertEqual(len(failures), len(payloads) - len(got), b.failures)
+        self.assertEqual((b.engine.reliable.held(), pb.detaches), (0, 0))
         self.assertEqual(pb.floats, 1)
 
     def test_an_arrival_does_not_restart_the_hold(self):
@@ -1235,7 +1372,11 @@ class FloatAndGround(unittest.TestCase):
         m.run(lost + 2 * P + 2000)
         late = [x for x in arrivals if x[0] > lost]
         self.assertTrue(late, arrivals[-3:])
-        delivered = set(p for o, p in m.root.inbox_from(APP))
+        # Nothing held is delivered once B floats. A late arrival may be C's
+        # retry of a message B forwarded and the root delivered before:
+        # C missed that forward (its passive acknowledgement), and B takes
+        # the retry into its custody again (§12).
+        delivered = set(p for tt, o, port, p in m.root.inbox if port == APP and tt > lost)
         failed = dict((p, t) for t, p, r in fails)
         for t, p in late:
             self.assertFalse(p in delivered, p)
