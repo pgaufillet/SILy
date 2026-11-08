@@ -101,7 +101,8 @@ instance a 32-vCPU, 64 GB instance (Scaleway COMPUTE3-X32C-64G, dedicated
 vCPUs) with `SPEC_JOBS=8`:
 
 1. Create the instance (Debian or Ubuntu) with an ssh key; 10 GB of disk
-   are enough.
+   are enough. Create it directly with the target type: a trial on a
+   smaller type followed by a resize bills an extra started hour.
 2. On it: `apt install default-jre-headless rsync` (Java 11 or later), or
    the same packages in the instance's cloud-init `packages`.
 3. Here: `make spec-remote SPEC_HOST=user@host` copies `spec/` and
