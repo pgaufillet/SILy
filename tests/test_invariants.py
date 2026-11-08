@@ -89,16 +89,26 @@ def keep_cycle(net, a, b):
         select(net.now)
 
 
-class LoopsTest(unittest.TestCase):
-    """MP11: a node kept in a cycle beyond the bound is reported."""
+def release_cycle(net, parents_of):
+    """Give each node of parents_of its own parent selection back, at that parent."""
+    for name, parent in parents_of:
+        parents = net.boards[name].routing.parents
+        del parents._select
+        parents._set_members([parent])
 
-    def run_line(self, defect):
+
+class LoopsTest(unittest.TestCase):
+    """MP11: a node in a cycle is reported, however short the cycle."""
+
+    def run_line(self, defect, release=None):
         net = build((ROOT, A, B, C), line(A, B, C))
         checker = Checker(net, [Loops()])
         checker.start()
 
         if defect:
             net.at(FORMED, keep_cycle, net, B, C)
+        if release is not None:
+            net.at(FORMED + release, release_cycle, net, ((B, A), (C, B)))
         net.run(FORMED + 30000)
         return checker.finish(), checker
 
@@ -107,14 +117,24 @@ class LoopsTest(unittest.TestCase):
         self.assertEqual(violations(checker, "MP11"), [])
         self.assertEqual(checker.checks[0].episodes, 0)
 
-    def test_kept_cycle_reported(self):
+    def test_kept_cycle_reported_once(self):
         found, checker = self.run_line(True)
         v = violations(checker, "MP11")
         self.assertEqual(len(v), 1)
         self.assertEqual(sorted(v[0].nodes), [B, C])
-        bound = checker.checks[0].bound_ms()
-        self.assertTrue(v[0].time > FORMED + bound)
-        self.assertLessEqual(v[0].time, FORMED + bound + 2 * checker.every_ms)
+        self.assertTrue(FORMED <= v[0].time <= FORMED + checker.every_ms, v[0].time)
+
+    def test_short_cycle_reported(self):
+        # A cycle of 2 s, far below a presence period, is still a violation:
+        # with the root sequence no loop forms at all (§2 MP11).
+        found, checker = self.run_line(True, release=2000)
+        v = violations(checker, "MP11")
+        self.assertEqual(len(v), 1)
+        self.assertEqual(sorted(v[0].nodes), [B, C])
+        self.assertTrue(FORMED <= v[0].time <= FORMED + checker.every_ms, v[0].time)
+        loops = checker.checks[0]
+        self.assertEqual(loops.episodes, 1)
+        self.assertTrue(1000 <= loops.longest <= 3000, loops.longest)
 
 
 class AttachmentTest(unittest.TestCase):

@@ -17,8 +17,7 @@ Bounds are computed from the network's parameters at the time of the check
 (the root's DODAG information): presence period T, Imin, slot (time on air
 of a presence frame, §8), silence limit S = 2.5 T (§9). Checks:
 
-- `Loops` (MP11): no node stays in a preferred-parent cycle longer than
-  `Loops.bound_ms`;
+- `Loops` (MP11): no node is ever in a preferred-parent cycle;
 - `Attachment` (MP10): every node connected to the root attaches within
   the forming bound after start, and again within the repair bound after
   losing its route (`Attachment.bound_ms`);
@@ -316,20 +315,18 @@ def repair_ms(checker, hops):
 
 
 class Loops(Check):
-    """MP11: no node stays in a preferred-parent cycle longer than the bound.
+    """MP11: no node is ever in a preferred-parent cycle.
 
-    §2 MP11 and §9 (loop freedom): a loop forms only after two consecutive
-    losses on a link and ends by a parent switch or when the ranks pass
-    L + 56: 7 increases of one hop, each advertised after a Trickle reset
-    within one Imin when idle ("about 7 Imin"). Bound: 7 (Imin + 8 slots),
-    the 8 slots being an advertisement's access as in the answer window (§9:
-    busy sense, backoff of at most 4 slots, 1.25 slots on air, the step).
+    §2 MP11 and §9 (loop freedom): with the root sequence (Babel's
+    feasibility condition, L kept across a detach) no loop forms, whatever
+    was lost; any cycle sampled is a violation, reported once per episode.
+    The bound of about 7 Imin (rank following up to L + 56) holds only
+    without the root sequence and is not what the code promises.
     ``episodes`` counts the cycles seen (any length), ``longest`` the longest
     time a node spent in one (ms, as sampled).
     """
 
     name = "MP11"
-    INCREASES = 7  # (L + 56 - L) / 8: hops of rank increase before the bound
 
     def bind(self, checker):
         super().bind(checker)
@@ -337,10 +334,6 @@ class Loops(Check):
         self.reported = set()
         self.episodes = 0
         self.longest = 0
-
-    def bound_ms(self):
-        c = self.checker
-        return self.INCREASES * (c.imin_ms + WINDOW_SLOTS * c.slot_ms)
 
     def cycles(self):
         """Return the cycles of preferred parents among the boards switched on."""
@@ -375,35 +368,23 @@ class Loops(Check):
             if n not in looped:
                 self.longest = max(self.longest, now - self.since.pop(n))
                 self.reported.discard(n)
-        bound = self.bound_ms()
         for n, cycle in looped.items():
-            since = self.since.get(n)
-            if since is None:
+            if n not in self.since:
                 self.since[n] = now
                 if n == min(cycle):
                     self.episodes += 1
-                continue
-            if now - since > bound and n not in self.reported:
+            if n not in self.reported:
                 self.reported.update(cycle)
                 boards = self.checker.net.boards
                 ranks = " ".join("%04x:%d" % (m, boards[m].engine.rank) for m in cycle)
-                self.violate(
-                    now,
-                    cycle,
-                    "cycle for %.1f s > bound %.1f s (ranks %s)"
-                    % ((now - since) / 1000, bound / 1000, ranks),
-                )
+                self.violate(now, cycle, "cycle (ranks %s)" % ranks)
 
     def finish(self, now):
         for since in self.since.values():
             self.longest = max(self.longest, now - since)
 
     def stats(self):
-        return "cycles %d, longest %.1f s (bound %.1f s)" % (
-            self.episodes,
-            self.longest / 1000,
-            self.bound_ms() / 1000,
-        )
+        return "cycles %d, longest %.1f s (none allowed)" % (self.episodes, self.longest / 1000)
 
 
 # --- MP10 ---------------------------------------------------------------------------------
