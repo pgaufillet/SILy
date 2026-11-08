@@ -162,7 +162,7 @@ measurement recorded).
 | **Robustness** ||||
 | MP9 | Duty-cycle compliance guaranteed whatever the applications do; mesh control traffic bounded, its budget known per SF | designed | §6; budget §16 (SILy) |
 | MP10 | Self-forming, self-healing: no configuration beyond network key and radio parameters; repair within a bounded time stated per SF | designed | §9: local repair by parent set, detach and rejoin, global repair by DODAG version; repair times per SF (§9 table) |
-| MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, Babel's feasibility condition with a root sequence (L kept across a detach), data-path validation with duplicate cache; no hop limit needed. No loop in the cases checked (TLA+ `DODAG`, `Seq = "babel"`: line, star, star2 and diamond graphs, a dead relay, up to 1–3 losses in any pattern, one root sequence increment, fixed link costs; a diamond run with 2 losses stopped incomplete), the argument holding whatever was lost; without the root sequence, none with at most one consecutive loss per link, and beyond, a loop ended by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.6 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
+| MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, Babel's feasibility condition with a root sequence (L kept across a detach), data-path validation with duplicate cache; no hop limit needed. No loop in the cases checked (TLA+ `DODAG`, `Seq = "babel"`: line, star, star2 and diamond graphs, a dead relay, up to 1–3 losses in any pattern, one root sequence increment, fixed link costs; a diamond run with 2 losses stopped incomplete), the argument holding whatever was lost; without the root sequence, none with at most one consecutive loss per link, and beyond, a loop ended by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.7 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
 | MP12 | Stability: hysteresis, no route flapping; link quality (margin, delivery ratio) preferred over hop count; asymmetric links detected | designed | §9: ETX over 16-frame windows, margin eligibility with 3/6 dB hysteresis, ETX ≤ 4 eligibility (waived, for reachability alone, only on the link to the root and the last candidate's), parent switch threshold, rank hysteresis; asymmetric links flagged by the root |
 | MP13 | Bounded resources: sized tables (default 64 nodes, depth 8), bounded queues and buffers, documented degradation beyond | designed | §12 (resource table and degradation), §9 (neighbour table), §10 (graph, depth) |
 | MP14 | Reboot tolerance: a rebooted node or root rejoins without operator action; no persistent state required except security counters and the duty-cycle window (§6) | designed | §9: a node solicits at boot and rejoins; the root listens one presence period and issues the next DODAG version (no persistent routing state); persistent state limited to the frame counter and class 2 sequences in NVS, replay table and duty-cycle window in RTC memory (§6, §14) |
@@ -1151,7 +1151,18 @@ frame of the exchange lost on any hop, see below.)
   figure, not a bound. The children's answers are of no use to the node
   behind (its own version): a solicitation of finite rank (only a node
   behind sends one) answered by newer neighbours only would remove this
-  collision (open point, §18).
+  collision. Measured at 30 nodes (SF8, the large-network topologies of
+  the host simulator, 40 to 200 seeds each, with traffic): the collision
+  costs 0.5 % (`course`) to 4.5 % (`grid`) of the hops; per hop median
+  0.7–0.9 Imin; wave median 2.4 Imin on `course` (depth 3), 7.6 Imin on
+  `grid` (depth 9), at most 30 Imin (89 s) outside the overloaded star,
+  below 4 presence periods. With newer neighbours only answering, the
+  collision disappears but the 90th percentile of the wave gains 0.1 to
+  1.9 Imin and the median nothing: not adopted, the collision is
+  accepted. Slow hops come mostly from Trickle suppression (a parent that
+  heard 2 advertisements of the new version from its own neighbours sends
+  none, while the node behind is hidden from them; the hop then exceeds
+  (2^(n+1) − 1) Imin with no frame lost) and from detaches at adoption.
 
 Findings:
 
@@ -2269,11 +2280,6 @@ in the DODAG information message (§9), so every node applies them:
 - Adaptive SF (§5, deferred): reconsider once loss rates and margin
   stability are measured.
 - Check the decision in force (ARCEP 2014-1263 as amended) for 869.4–869.65 MHz.
-- Global repair wave (§9): a solicitation of finite rank (a node behind a
-  newer version) answered by newer neighbours only, so that the node's own
-  children no longer answer it in the window of its parent's advertisement
-  (a collision in about 15 % of the hops whose node has children). To
-  decide; then check it with the TLA+ `DODAG` model and the seed runs.
 - Option A6 (§11, §14): LoRa payload CRC off, relying on the AEAD tag;
   measure the corruption rate on the bench and check that diagnostics
   still separate sporadic failures (noise) from systematic ones (wrong key).
