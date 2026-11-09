@@ -580,12 +580,13 @@ class LinkEngine(Core):
     # --- Core ----------------------------------------------------------------
 
     def handle(self, now, event):
+        busy = None
         if event is not None:
             kind = event[0]
             if kind == RX:
                 self._receive(now, event[1], event[2], event[3])
             elif kind == CHANNEL:
-                self._channel(now, event[1])
+                busy = event[1]
             elif kind == TX_DONE:
                 self._tx_done(now, event[1])
             elif kind == RX_ERROR:
@@ -593,6 +594,10 @@ class LinkEngine(Core):
             else:
                 raise ValueError("unknown event")
         self.tick(now)
+        if busy is not None:
+            # After the protocol timers due now: a frame sent on a clear
+            # channel carries the rank and floating flag of this instant.
+            self._channel(now, busy)
         self._service(now)
         wake = self._wake
         t = self.timer()

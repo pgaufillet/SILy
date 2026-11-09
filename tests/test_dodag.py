@@ -37,7 +37,7 @@ from mesh.frame import (
 from mesh.link import open_link
 from mesh.parents import MAX_RANK_INCREASE
 from mesh.ports import DODAG_INFO, PRESENCE
-from mesh.radio import CHANNEL, RX, SENSE, TX_DONE
+from mesh.radio import CHANNEL, RX, SENSE, TX, TX_DONE
 from mesh.replay import ReplayTable
 from mesh.security import KeyRing, Security
 from mesh.trickle import IMIN_SLOTS
@@ -915,6 +915,28 @@ class Sequence(_Case):
         poison = [(h.rank, p[INFO_SEQUENCE]) for t, h, p in b.port9(start) if p]
         self.assertEqual(poison, [(RANK_INFINITE, 9)])
         self.assertEqual((b.dodag.parents.sequence, b.dodag.parents.lowest), (9, 24))
+
+    def test_frame_sensed_clear_when_grounding_ends_floats(self):
+        # The channel found clear at the very moment G runs out without
+        # advance: the frame leaves with the floating flag (§9).
+        b = self.attached(3)
+        p = b.dodag.parents
+        self.assertTrue(p.grounded)
+        due = p.float_at()
+        while b.now + 4000 < due:  # P kept heard, no newer sequence
+            b.advance(b.now + 4000)
+            b.rx(self.p.frame(16, 3))
+        b.advance(due - 1)
+        self.assertTrue(b.now < due and p.grounded)
+        self.assertEqual(b.engine.submit(200, 0, ROOT, b"report"), 0)
+        self.assertEqual(list(b.engine.step(b.now, None)), [(SENSE,)])
+        sent = [a[1] for a in b.engine.step(due, (CHANNEL, False)) if a[0] == TX]
+        self.assertEqual(len(sent), 1)
+        buf = bytearray(sent[0])
+        h = Header(0, 0, 0, 0)
+        self.assertIsNone(b._opener.receive(buf, len(buf), h))
+        self.assertFalse(p.grounded)
+        self.assertEqual(h.floating, 1)
 
 
 class Root(_Case):
