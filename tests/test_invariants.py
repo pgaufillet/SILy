@@ -260,6 +260,18 @@ class DeliveryTest(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertEqual(check.counts["delivered"], 5)
 
+    def test_duplicates_delivered_counted(self):
+        # A copy delivered again is counted and reported, not a violation.
+        found, check = self.run_line(False)
+        root = check.checker.root
+        self.assertEqual(check.counts["duplicates"], 0)
+        root.inbox.append(root.inbox[-1])
+        root.inbox.append(root.inbox[-1])
+        check.finish(check.checker.net.now)
+        self.assertEqual(violations(check.checker, "MP5"), [])
+        self.assertEqual((check.counts["delivered"], check.counts["duplicates"]), (5, 2))
+        self.assertTrue(check.stats().endswith("; 2 duplicates delivered"), check.stats())
+
     def test_dropped_after_acknowledgement_reported(self):
         found, check = self.run_line(True)
         self.assertEqual(len(found), 5)

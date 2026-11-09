@@ -119,7 +119,12 @@ entry of the message it reports, whatever the node's quota
 **Receiver** (`mesh.link.LinkEngine._receive`): every class 1/2 message
 received is looked up in the duplicate cache (`DUPLICATES` = 128 entries,
 oldest evicted, an entry ignored after `DUPLICATE_PERIODS` = 2 presence
-periods). **Custody** (§12): a duplicate is dropped at its destination, and
+periods; at the root, where every upward message ends, `ROOT_DUPLICATES` =
+256 entries and `ROOT_DUPLICATE_PERIODS` = 6 periods). At the destination
+the window slides: a duplicate dropped there refreshes its entry, so that
+the window runs from the last copy received (a relay whose acknowledgements
+from the destination are lost keeps retrying; each copy dropped extends the
+window). **Custody** (§12): a duplicate is dropped at its destination, and
 elsewhere only while the node holds a copy (`holding`: queued, waiting or
 held); a node that has handed it over takes it again as a new arrival
 (it came back through a loop, or its sender missed the acknowledgement:
@@ -170,7 +175,7 @@ forwarding a frame then lost): class 2 recovers it (§12).
 
 Bounded memory: per-slot state arrays of the queue size (`ATTEMPTS`
 counters per slot towards the root), a queue-size table of pending root
-failures, a 128-entry duplicate cache, an 8-entry batch and 24 lazy
+failures, a 128-entry duplicate cache (256 at the root), an 8-entry batch and 24 lazy
 entries, one count of consecutive frames timed out.
 """
 
@@ -189,6 +194,8 @@ ACK_SHARE = 20  # root acknowledgements use at most 1/20 (5 %) of the channel (�
 TIMEOUT_SLOTS = 6  # forwarding delay 1, backoff 4, margin 1 (§9)
 DUPLICATES = 128  # duplicate cache entries (§12)
 DUPLICATE_PERIODS = 2  # presence periods an entry is kept
+ROOT_DUPLICATES = 256  # the root's: every upward message ends there
+ROOT_DUPLICATE_PERIODS = 6
 HOLD_PERIODS = 2  # presence periods a message without route is held (MP15)
 POLL_SLOTS = 32  # held messages query the route again every Imin (§9)
 RETRY_SLOTS = 32  # base range of the random delay of a retry after the timeout (§12)
@@ -378,7 +385,12 @@ class Reliable:
         self.engine = engine
         self.queue = engine.queue
         self.counters = engine.counters
-        self.duplicates = DuplicateCache()
+        if engine.is_root:
+            self.duplicates = DuplicateCache(ROOT_DUPLICATES)
+            self._dup_periods = ROOT_DUPLICATE_PERIODS
+        else:
+            self.duplicates = DuplicateCache(DUPLICATES)
+            self._dup_periods = DUPLICATE_PERIODS
         slot = engine.slot_ms
         self.relay_timeout_ms = engine.toa_ms(engine.limit) + TIMEOUT_SLOTS * slot
         ack_frame = engine.toa_ms(frame.OVERHEAD + 2 + ACK_BATCH * ACK_ENTRY)
@@ -453,12 +465,20 @@ class Reliable:
 
     # --- Duplicate cache (receiver) ----------------------------------------------
 
+    def duplicate_ms(self):
+        """Return the duplicate window (ms): 2 presence periods, 6 at the root (§12)."""
+        return self._dup_periods * self.engine.neighbours.period_ms
+
     def duplicate(self, key, now):
-        """Return True if identity key was received within 2 presence periods."""
-        return self.duplicates.seen(key, now, DUPLICATE_PERIODS * self.engine.neighbours.period_ms)
+        """Return True if identity key was last recorded within the duplicate window."""
+        return self.duplicates.seen(key, now, self.duplicate_ms())
 
     def remember(self, key, now):
-        """Record a received identity (delivered, queued or held)."""
+        """Record a received identity (delivered, queued or held), or refresh it.
+
+        Also called for a duplicate dropped at its destination: the window
+        then runs from the last copy received (sliding window, §12).
+        """
         self.duplicates.add(key, now)
 
     def holding(self, key, source=None):

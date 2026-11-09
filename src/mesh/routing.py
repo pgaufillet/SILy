@@ -91,7 +91,7 @@ class Routing:
     """Routing component of one board (see the module docstring).
 
     engine: its `LinkEngine` (the root if its address is the root's);
-    profile, info, version: as `Dodag`; node_info, extension, tails,
+    profile, info, version, sequence: as `Dodag`; node_info, extension, tails,
     next_key, entries: as `mesh.reports.Reporter` (nodes only).
 
     Read: ``dodag``, ``parents``, ``reporter`` (None on the root),
@@ -109,9 +109,10 @@ class Routing:
         tails=None,
         next_key=None,
         entries=6,
+        sequence=None,
     ):
         self.engine = engine
-        self.dodag = Dodag(engine, profile, info, version)
+        self.dodag = Dodag(engine, profile, info, version, sequence=sequence)
         self.parents = self.dodag.parents
         self.counters = Counters()
         self.on_report = None

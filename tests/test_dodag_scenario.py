@@ -25,9 +25,10 @@ PERIOD = 10000
 A, B, C, D = 0x00A1, 0x00B1, 0x00C1, 0x00D1
 
 
-def _routing(reports):
+def _routing(reports, sequence=None):
+    # sequence: the root's first root sequence (`mesh.dodag.Dodag`).
     def make(engine):
-        r = Routing(engine, EU_869, INFO)
+        r = Routing(engine, EU_869, INFO, sequence=sequence)
         r.on_report = lambda port, origin, report, header: reports.append((port, origin))
         return r
 
@@ -35,12 +36,12 @@ def _routing(reports):
 
 
 class Line:
-    def __init__(self, seed):
+    def __init__(self, seed, sequence=None):
         net = Network(seed, _KEY)
         self.net = net
         self.names = (ROOT, A, B, C, D)
         self.reports = []
-        self.boards = [net.add(n, routing=_routing(self.reports)) for n in self.names]
+        self.boards = [net.add(n, routing=_routing(self.reports, sequence)) for n in self.names]
         for a, b in zip(self.names, self.names[1:]):
             net.link_both(a, b)
         self.root = self.boards[0]
@@ -549,10 +550,149 @@ class RootSequence(unittest.TestCase):
         self.assertEqual(flagged, [])
         # Every message delivered (class 1: a copy retried after a lost
         # acknowledgement may come again once the root's duplicate entry has
-        # aged out, 2 periods).
+        # aged out, 6 periods after the last copy).
         self.assertEqual(len(set(line.root.received(20))), len(sent))
         self.assertEqual([b.failures for b in line.nodes], [[]] * 4)
         # D's sequence advanced: it came from frames of C addressed to B
         # (its presence), overheard; the frames addressed to D are
         # acknowledgements only.
         self.assertTrue(watch.times[D], watch.times)
+
+
+class _Wrap(_Advances):
+    """`_Advances`, plus the root's sequences in order (``root``) and the
+    nodes found holding a sequence ahead of the root's (serial arithmetic,
+    computed here, not by the code under test) after any step (``ahead``:
+    (time, node, its sequence, the root's), the first 10)."""
+
+    def __init__(self, root, nodes, net):
+        super().__init__(nodes)
+        self.dodag = root.routing.dodag
+        self.net = net
+        self.root = [self.dodag.sequence]
+        self.ahead = []
+
+    def stepped(self, node, event):
+        super().stepped(node, event)
+        seq = self.dodag.sequence
+        if seq != self.root[-1]:
+            self.root.append(seq)
+        for b in self.nodes:
+            held = b.routing.parents.sequence
+            ahead = held is not None and 0 < (held - seq) & 0xFF < 128
+            if ahead and len(self.ahead) < 10:
+                self.ahead.append((self.net.now, b.address, held, seq))
+
+
+class RootSequenceWrap(unittest.TestCase):
+    """§9 root sequence, 8 bits in serial arithmetic: on the line, the
+    root's sequence passes from 255 to 0 while the network runs, D sending
+    class 1 messages. Nothing changes at the wrap: no detach, no float, no
+    floating flag, every node's sequence advances within G and is never
+    ahead of the root's, and every message of D is delivered (a plain
+    comparison would refuse 0 after 255: every node would float)."""
+
+    def test_wrap_around_keeps_the_line_grounded(self):
+        line = Line(11, sequence=245)  # about 2 increments per period
+        line.root.listen(20)
+        line.run(12 * line.imin)
+        line.steady()
+        self.assertEqual([b.routing.parents.preferred for b in line.nodes], [ROOT, A, B, C])
+        start_seq = line.root.routing.dodag.sequence
+        self.assertTrue(240 <= start_seq <= 254, start_seq)  # the wrap is still to come
+        flagged = []
+        for b in line.nodes:
+            base = b.engine.sent
+
+            def sent(sel, counter, now, base=base, engine=b.engine, name=b.name):
+                base(sel, counter, now)
+                if engine.floating:
+                    flagged.append((now, name))
+
+            b.engine.sent = sent
+        watch = _Wrap(line.root, line.nodes, line.net)
+        line.net.observers.append(watch)
+        start = line.net.now
+        end = start + 12 * PERIOD
+        d = line.nodes[3]
+        sent = []
+
+        def load(i=0):
+            sent.append(d.submit(20, 1, ROOT, b"d%d" % i))
+            if line.net.now < end - 3 * PERIOD:
+                line.net.at(line.net.now + 2000, load, i + 1)
+
+        line.net.at(start + 100, load)
+        line.run(end)
+        seqs = watch.root
+        self.assertIn(255, seqs)
+        self.assertEqual(seqs[seqs.index(255) + 1], 0, seqs)
+        self.assertTrue(seqs[-1] >= 4, seqs)  # well past the wrap
+        self.assertEqual(watch.detached, set())
+        self.assertEqual(watch.ahead, [])
+        self.assertEqual([b.routing.parents.floats for b in line.nodes], [0] * 4)
+        self.assertEqual([b.routing.parents.grounded for b in line.nodes], [True] * 4)
+        self.assertEqual(flagged, [])
+        for b in line.nodes:
+            p = b.routing.parents
+            hops = min(8, (p.rank + MIN_HOP - 1) // MIN_HOP)
+            g = (5 + 2 * hops) * PERIOD // 2
+            times = [start] + watch.times[b.address] + [end]
+            gaps = [u - t for t, u in zip(times, times[1:])]
+            self.assertTrue(max(gaps) < g, (b.address, p.rank, gaps))
+        self.assertTrue(len(sent) > 40 and min(sent) >= 0, sent)
+        self.assertEqual(len(set(line.root.received(20))), len(sent))
+        self.assertEqual(d.failures, [])
+
+
+class SequenceForgotten(unittest.TestCase):
+    """§9: a sequence not advanced for 50 presence periods is forgotten.
+    Root — A — B — C, the link between A and B cut both ways for about 65
+    periods: B detaches and keeps the sequence it held, while the root's
+    goes on (about 2 increments per period) until it is 128 to 200 ahead
+    of it, where serial arithmetic no longer finds it newer and would
+    refuse A for ever. Forgetting is checked at a selection, which a
+    detached node makes when it hears a frame: C, detached behind B,
+    solicits once per period, so B forgets within a period of the 50.
+    Once the link is back, B takes A's sequence at any rank, attaches
+    through A, is grounded and its class 1 message is delivered."""
+
+    def test_forgotten_sequence_lets_b_rejoin(self):
+        net = Network(5, _KEY)
+        reports = []
+        boards = {n: net.add(n, routing=_routing(reports)) for n in (ROOT, A, B, C)}
+        net.link_both(ROOT, A)
+        net.link_both(A, B)
+        net.link_both(B, C)
+        boards[ROOT].listen(20)
+        net.run(6 * PERIOD)
+        b = boards[B]
+        p = b.routing.parents
+        self.assertEqual((p.preferred, p.grounded), (A, True))
+        self.assertEqual(boards[C].routing.parents.preferred, B)
+        net.medium.cut(A, B)
+        net.medium.cut(B, A)
+        net.run(net.now + 3 * PERIOD)  # detached: no advance since
+        held, at = p.sequence, p.sequence_at
+        self.assertEqual(p.rank, RANK_INFINITE)
+        self.assertIsNotNone(held)
+        net.run(at + 50 * PERIOD - PERIOD // 2)
+        self.assertEqual((p.sequence, p.sequence_at), (held, at))
+        net.run(at + 51 * PERIOD + PERIOD // 4)  # C's next solicitation: forgotten
+        self.assertEqual(p.sequence, None)
+        net.run(at + 65 * PERIOD)
+        ahead = (boards[ROOT].routing.dodag.sequence - held) & 0xFF
+        self.assertTrue(128 <= ahead <= 200, ahead)
+        restored = net.now
+        net.medium.restore(A, B)
+        net.medium.restore(B, A)
+        # B solicits once per presence period while detached; A answers
+        # within the answer window.
+        bound = restored + 2 * PERIOD
+        while not (p.preferred == A and p.grounded):
+            self.assertTrue(net.now < bound, (p.preferred, p.rank, p.sequence))
+            net.run(net.now + 100)
+        b.submit(20, 1, ROOT, b"back")
+        net.run(net.now + PERIOD)
+        self.assertEqual(boards[ROOT].received(20), [b"back"])
+        self.assertEqual(b.failures, [])

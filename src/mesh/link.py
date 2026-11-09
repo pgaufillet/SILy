@@ -815,11 +815,18 @@ class LinkEngine(Core):
             # acknowledgement for the frame unless forwarding acknowledges.
             # Custody: a node other than the destination drops a duplicate
             # only while it holds a copy; one it handed over is taken again.
+            # At the destination the window slides: it runs from the last
+            # copy received, so that copies retried for longer than the
+            # window (acknowledgements lost on the last hop) stay filtered.
             dup = rel.duplicate(key, now)
-            if dup and (self._final(m) or rel.holding(key, h.source)):
-                self.repeated(m, h, now)
-                ack = True
-                continue
+            if dup:
+                final = self._final(m)
+                if final or rel.holding(key, h.source):
+                    if final:
+                        rel.remember(key, now)
+                    self.repeated(m, h, now)
+                    ack = True
+                    continue
             outcome = self._accept(m, h, now)
             if outcome == NOT_TAKEN:
                 refused = True

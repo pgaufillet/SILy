@@ -155,7 +155,7 @@ measurement recorded).
 | MP2 | Application-agnostic: opaque payloads multiplexed by an 8-bit port; the mesh never interprets payloads; applications act on the mesh only through documented parameters | designed | layering (§1); relays never read application payloads (§11) |
 | MP3 | Transparent to applications: they address nodes (or the root implicitly), never routes; topology changes appear only as delay or explicit failure | designed | §12: applications address nodes or the root; topology changes show as delay or explicit failure |
 | MP4 | Service classes chosen per message: **class 0** datagram (at most once, optional replace-by-newer); **class 1** hop-by-hop reliable (passive ack by overhearing the next hop, piggybacked ack on the last hop, 3 attempts, held during route repair); **class 2** end-to-end reliable (exactly once, unordered; NACK on sequence gaps, tail announcement, lazy cumulative ack, sender buffer) — SILy's punch recovery made generic | designed | §12: class 0 (replace by newer), class 1 (passive and explicit acknowledgements, 3 attempts, holding), class 2 (class 1 per hop + NACK, tail, lazy cumulative acknowledgement, send window) |
-| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay cut off from the root when its origin is cut off too and is not its neighbour (no link, no failure can travel; class 2 recovers it) |
+| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a copy received by its destination more than the duplicate window after the last copy received is delivered again (acknowledgements lost on the last hop, or a copy taken again under custody; class 2 and the application filter it); in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay cut off from the root when its origin is cut off too and is not its neighbour (no link, no failure can travel; class 2 recovers it) |
 | MP6 | Explicit limits: maximum payload announced (≈ 200 B), no fragmentation in v1 | designed | §11: 200 B announced |
 | MP7 | Priorities chosen by the application, mapped to duty-cycle allowances; fairness between forwarded and local traffic | designed | §6: priority implicit in the port (application ports 16–127 high, 128–255 low), allowances per priority; §7: round robin by origin within a priority, per-origin queue quota with back-pressure |
 | MP8 | Compact headers: fields implicit when deducible from context (root address upward, root origin downward), SCHC-style | designed | §11: implicit root, first-hop compression, implicit last length, bundles |
@@ -1612,8 +1612,11 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   after three attempts, drop it (TLA+ `DODAG_line_lateignore_drop`;
   accepted: `DODAG_*_lateack_*`).
 - **Duplicate cache** on every node: (origin, destination, port, sequence),
-  128 entries, each kept for at least 2 presence periods. A duplicate is
-  always acknowledged. **Custody**: the final destination drops it; any
+  128 entries, each kept for at least 2 presence periods; at the root,
+  where every upward message ends, 256 entries kept 6 periods. At the
+  destination the window **slides**: a duplicate dropped there refreshes
+  its entry, so the window runs from the last copy received, not from the
+  first. A duplicate is always acknowledged. **Custody**: the final destination drops it; any
   other node drops it only while it still holds a copy (queued, waiting for
   an acknowledgement, or held during repair) and otherwise takes it again
   as a new arrival (forwarded, or held), counted. A message that comes back
@@ -1626,6 +1629,32 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   the destination filters it. A copy so taken again that its holder fails
   (end of a holding) after another copy was delivered gives its origin a
   false failure (never a silent loss).
+- **Duplicates delivered** (class 1): no bound holds on the time between
+  two copies of a message reaching its destination. When the
+  destination's acknowledgements are lost on the last hop (collisions
+  under load), the relay keeps retrying a destination it keeps (the root,
+  above): the destination drops each copy within its window and
+  acknowledges it again, and those acknowledgements may collide too; a
+  copy taken again under custody by the last hop, or sent again by an
+  origin that rerouted, comes later still. A copy that arrives more than
+  the window after the last copy received is delivered again (MP5
+  exception). In the host simulator's large-network suite, with a fixed
+  window of 2 periods counted from the first copy, the root delivered
+  about 3 % of the class 1 messages twice (rarely three times), from 2.0
+  to 6.8 periods after the first copy; the sliding window alone removes
+  about two thirds of them, and with the root's 6 periods and 256
+  entries none was left in the runs checked. Class 2 (the receiver's bitmap) and the application
+  (SILy deduplicates punches on their content) filter what remains. A
+  longer window adds no real risk of taking a new message for a copy: a
+  node's class 1 sequence starts at a random value at boot and takes
+  65536 messages to come back.
+- **False failure after a delivery**: a message delivered, the
+  acknowledgement of its last frame lost, then the origin's own copy
+  held while the origin is ungrounded (§9 grounding) and failed at the
+  end of the holding (reason 3, no route). The origin gets a failure for
+  a message delivered: a false failure, never a silent loss. In the
+  host simulator's overloaded star with a single relay, about half of
+  the failures are of this kind.
 - **Upward failure**: after 3 attempts a relay parent is dropped (§9) and
   the message goes to the next parent with fresh attempts. **The root is
   kept** while it is a candidate apart from the drop (heard within the
@@ -1819,7 +1848,7 @@ Recovery times (worst depth 8, a hop costing at most one class 1 timeout):
 |---|---|---|
 | transmit queue | 64 messages; above 32, 16 per origin (§7); plus 2 entries for the node's own DODAG information | origin over its quota refused as below; local submission refused; forwarded class 0 dropped (lowest priority, oldest first); forwarded class 1/2 not accepted (no acknowledgement, the sender retries or switches parent); presence flag *queue overflow* |
 | neighbour table | 64 entries | stalest entry that is not a parent evicted (§9) |
-| duplicate cache | 128 entries | oldest evicted; a late duplicate may then be forwarded, and the class 2 receiver drops it |
+| duplicate cache | 128 entries, 2 presence periods; root: 256 entries, 6 periods (window from the last copy received at the destination) | oldest evicted; a late duplicate may then be forwarded or, at its destination, delivered again in class 1 (MP5 exception); the class 2 receiver drops it |
 | class 2 send window | 64 messages per flow, 8 flows per node | submission refused |
 | class 2 receiver | 64-sequence bitmap per flow | sequences beyond C + 64 are dropped unacknowledged (the sender's window prevents them) |
 | root graph | 64 nodes, depth 8 | new nodes not routed downward; alarm *graph full* (§13) |

@@ -1066,6 +1066,42 @@ class Rules(unittest.TestCase):
         _rx(r, now + two_periods, frames[2])
         self.assertEqual((r.counters.duplicates, r.counters.forwarded), (1, 2))
 
+    def _three_copies(self):
+        # R's three attempts of one class 1 message to the root, none
+        # acknowledged; the root delivers port 20 into the list returned.
+        r = _engine(R, ROOT, seed=2)
+        root = _engine(ROOT, None, seed=3)
+        delivered = []
+        root.bind(20, lambda origin, msg, h: delivered.append(origin))
+        r.submit(20, 1, ROOT, b"x")
+        frames, now = _run(r, 0, 3000 + 6 * r.reliable.retry_ms)
+        self.assertEqual(len(frames), ATTEMPTS)
+        return r, root, delivered, frames, now
+
+    def test_duplicate_window_slides_at_the_destination(self):
+        # §12: a copy dropped at its destination refreshes its entry, so the
+        # window runs from the last copy received, not from the first.
+        _, root, delivered, frames, now = self._three_copies()
+        window = root.reliable.duplicate_ms()
+        _rx(root, now, frames[0])
+        _rx(root, now + window - 1, frames[1])
+        _rx(root, now + 2 * window - 2, frames[2])  # beyond the first copy's window
+        self.assertEqual((delivered, root.counters.duplicates), ([R], 2))
+
+    def test_root_window_six_periods_and_256_entries(self):
+        # §12: the root keeps 256 identities for 6 presence periods; the
+        # other nodes 128 for 2 periods.
+        r, root, delivered, frames, now = self._three_copies()
+        period = root.neighbours.period_ms
+        self.assertEqual(r.reliable.duplicate_ms(), 2 * period)
+        _rx(root, now, frames[0])
+        for i in range(255):  # 255 other identities: the first one stays
+            root.reliable.remember((X, ROOT, 21, i), now)
+        _rx(root, now + 6 * period - 1, frames[1])
+        self.assertEqual((delivered, root.counters.duplicates), ([R], 1))
+        _rx(root, now + 12 * period - 1, frames[2])  # 6 periods after the last copy
+        self.assertEqual((delivered, root.counters.duplicates), ([R, R], 1))
+
     def test_never_an_error_about_an_error(self):
         # R forwards N's message to a root that never answers: R's error
         # goes to N, a neighbour, directly; N never answers either: kept

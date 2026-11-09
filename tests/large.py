@@ -343,11 +343,16 @@ def summary(reports, seconds=None):
     """Print the failing reports and the summary line; return the failing run names.
 
     The line counts the runs passed, among them the overload cases passed
-    on their criterion, with their accepted capacity losses summed.
+    on their criterion, with their accepted capacity losses summed, and the
+    class 1 duplicates delivered in all runs (`sim.invariants.Delivery`).
     """
     failed = []
     overload = [0, 0, 0, 0]  # runs, MP10, refused, failed
+    duplicates = [0, 0]  # copies delivered again, runs with any
     for lines in reports:
+        n = _duplicates(lines)
+        duplicates[0] += n
+        duplicates[1] += 1 if n else 0
         result = lines[-1]
         status = result.split(" ", 2)[1]
         if status == "overload":
@@ -365,9 +370,18 @@ def summary(reports, seconds=None):
         "large: %d of %d runs passed (%d as overload: accepted %d MP10, %d refused, "
         "%d failed)%s" % ((len(reports) - len(failed), len(reports)) + tuple(overload) + (wall,))
     )
+    print("large: %d class 1 duplicates delivered, in %d runs" % tuple(duplicates))
     for name in failed:
         print("  failed: %s" % name)
     return failed
+
+
+def _duplicates(lines):
+    # Class 1 duplicates delivered in a report (its MP5 Delivery line), 0 if none.
+    for line in lines:
+        if " MP5 Delivery: " in line and " duplicates delivered" in line:
+            return int(line.split("; ")[-1].split()[0])
+    return 0
 
 
 def main(argv):

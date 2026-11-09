@@ -52,7 +52,7 @@ from mesh.neighbours import CAPACITY, MARGIN_LOW, silence_ms
 from mesh.parents import SIZE as PARENT_SET
 from mesh.platform import JITTER_PERCENT
 from mesh.ports import ERROR
-from mesh.reliable import ACK_BATCH, DUPLICATES, LAZY_BATCH, decode_error
+from mesh.reliable import ACK_BATCH, DUPLICATES, LAZY_BATCH, ROOT_DUPLICATES, decode_error
 from mesh.txqueue import SIZE as QUEUE_SIZE
 
 USABLE = 0.5  # delivery both ways without collisions for a usable link
@@ -613,6 +613,10 @@ class Delivery(Check):
     the failure is explicit, and reaching the sender is the downward step's
     to check.
 
+    Copies delivered more than once (§2 MP5 exceptions, §12 duplicates: a
+    copy arriving after the root's duplicate window) are counted
+    (``duplicates``: deliveries beyond the first), not a violation.
+
     ``outcomes`` lists the outcome of each message counted (its submission
     time and its key in ``counts``), for the accounting of an overload run
     (`overload`).
@@ -705,7 +709,13 @@ class Delivery(Check):
 
     def finish(self, now):
         c = self.checker
-        delivered = set(r[3] for r in c.root.inbox if r[2] == self.port)
+        delivered = set()
+        duplicates = 0
+        for r in c.root.inbox:
+            if r[2] == self.port:
+                if r[3] in delivered:
+                    duplicates += 1
+                delivered.add(r[3])
         failed = {}
         for b in c.net.boards.values():
             failed[b.name] = set(f[3] for f in b.failures if f[2] == self.port)
@@ -719,6 +729,7 @@ class Delivery(Check):
             "partition": 0,
             "late": 0,
             "lost": 0,
+            "duplicates": duplicates,
         }
         self.outcomes = []
         for t, name, seq, payload in self.sent:
@@ -768,7 +779,8 @@ class Delivery(Check):
         return (
             "class 1: %(submitted)d submitted, %(delivered)d delivered, %(failed)d failed, "
             "%(refused)d refused, %(at_root)d failed at a relay (error at the root), "
-            "%(exempt)d exempt, %(partition)d failed in a partition, %(lost)d silent" % k
+            "%(exempt)d exempt, %(partition)d failed in a partition, %(lost)d silent; "
+            "%(duplicates)d duplicates delivered" % k
         )
 
 
@@ -847,7 +859,8 @@ class Resources(Check):
     """MP13: tables and queues within their bounds (§12 queues and resources, §9).
 
     Bounds (defaults: the cores' configured sizes): neighbour table 64
-    entries (§9), parent set 3 (§9), duplicate cache 128 (§12), transmit
+    entries (§9), parent set 3 (§9), duplicate cache 128 (256 at the root,
+    ``root_duplicates``; §12), transmit
     queue 64 messages (§12), per-address counters 32 (§13), root
     acknowledgement batch 8 entries and 24 lazy ones of presence frames
     (32 waiting, §12, §16). ``highest``: the largest value
@@ -861,6 +874,7 @@ class Resources(Check):
         neighbours=CAPACITY,
         parents=PARENT_SET,
         duplicates=DUPLICATES,
+        root_duplicates=ROOT_DUPLICATES,
         queue=QUEUE_SIZE,
         senders=SENDERS,
         batch=ACK_BATCH + LAZY_BATCH,
@@ -869,6 +883,7 @@ class Resources(Check):
             "neighbours": neighbours,
             "parents": parents,
             "duplicates": duplicates,
+            "root_duplicates": root_duplicates,
             "queue": queue,
             "senders": senders,
             "batch": batch,
@@ -885,7 +900,9 @@ class Resources(Check):
             sizes = {
                 "neighbours": len(e.neighbours),
                 "parents": len(b.routing.parents.members()),
-                "duplicates": len(e.reliable.duplicates),
+                "root_duplicates" if b is self.checker.root else "duplicates": len(
+                    e.reliable.duplicates
+                ),
                 "queue": e.queue.messages(),  # the DODAG information reserve apart
                 "senders": len(e.senders),
                 # root batch and lazy entries (no accessor)
