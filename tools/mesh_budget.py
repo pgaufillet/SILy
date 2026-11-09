@@ -273,13 +273,28 @@ def main():
         f"\nD. Root acknowledgements (class 1, last hop), {ACK_PER_FRAME} entries per frame, "
         f"<= {ACK_SHARE:.0%} of the channel"
     )
-    print(f"    and root beacon ({BEACONS} per presence period)")
-    print("SF  frame(ms)  batching(s)  root budget(s/h)  beacon(s/h)")
+    print(f"    and root beacon ({BEACONS} per presence period); presence probe: the")
+    print(f"    entries of the presence frames of {NODES} root children (every Node), idle,")
+    print(f"    in the beacons' frames (messages of at most {ACK_PER_FRAME} entries)")
+    print(
+        "SF  frame(ms)  batching(s)  root budget(s/h)  beacon(s/h)  presence entries(s/h)  channel"
+    )
     for sf in SFS:
+        live = periods[sf]
         t = toa(OVERHEAD + LAST_HEADER + ACK_PER_FRAME * ACK_ENTRY, sf)
         w = t / ACK_SHARE
-        bc = BEACONS * toa(OVERHEAD + BEACON, sf) * WINDOW / periods[sf]
-        print(f"{sf:<4}{t * 1000:>9.0f}  {w:>11.1f}  {t * WINDOW / w:>16.0f}  {bc:>11.0f}")
+        t_bc = toa(OVERHEAD + BEACON, sf)
+        bc = BEACONS * t_bc * WINDOW / live
+        # Per beacon, NODES / BEACONS entries in the beacon's frame, in
+        # messages of at most 8 (each: control, port, length).
+        per = round(NODES / BEACONS)
+        messages = -(-per // ACK_PER_FRAME)
+        grow = toa(OVERHEAD + BEACON + 3 * messages + per * ACK_ENTRY, sf) - t_bc
+        pr = BEACONS * grow * WINDOW / live
+        print(
+            f"{sf:<4}{t * 1000:>9.0f}  {w:>11.1f}  {t * WINDOW / w:>16.0f}  {bc:>11.0f}  "
+            f"{pr:>21.0f}  {pr / WINDOW:>7.1%}"
+        )
 
     print(
         f"\nE. Repair times (s), depth {DEPTH}, Trickle Imin {TRICKLE_IMIN} slots k {TRICKLE_K}, "
@@ -288,14 +303,14 @@ def main():
         f"parent lost after {K_PARENT} silent presence periods"
     )
     print(
-        "SF  Imin  RTO    RTO    switch, traffic  left,   switch  detach  global  "
+        "SF  Imin  RTO    RTO    switch, traffic  left,   switch  left,   detach  global  "
         "Trickle reset, per neighbourhood  node cost at max"
     )
     print(
-        "          relay  root   parent  parent   traffic idle    rejoin  wave    "
+        "          relay  root   parent  parent   traffic idle    idle,   rejoin  wave    "
         "frames  first-interval load       global repair rate (s/h)"
     )
-    print("                        relay   root     last relay")
+    print("                        relay   root     last relay      root")
     for sf in SFS:
         slot = toa(SLOT_FRAME, sf)
         imin = TRICKLE_IMIN * slot
@@ -338,9 +353,19 @@ def main():
         # next presence, a period jittered). The node then detaches.
         last_run = UNREACH_RUN * rto_relay + retry_slots(UNREACH_RUN - 1) * slot
         last_switch = max(last_run, SILENCE_LIMIT * live) + (1 + JITTER) * live
+        # A root child without class 1 traffic whose uplink died (the root no
+        # longer hears it, it still hears the root): its presences, one per
+        # period jittered, are the probes (§9 presence probe). From the death
+        # of the link: the UNREACH_RUN-th presence after it, its failure
+        # decided half a period jittered (the root's next beacon carries the
+        # acknowledgement) and a root timeout after its end (the silence
+        # limit since the last acknowledgement is passed by then), then the
+        # next selection at the root's next beacon.
+        idle_root = UNREACH_RUN * (1 + JITTER) * live + 2 * beacon + rto_root
         print(
             f"{sf:<4}{imin:>4.1f}  {rto_relay:>5.1f}  {rto_root:>5.1f}  {relay_switch:>6.1f}  "
-            f"{root_switch:>6.1f}  {last_switch:>7.1f}  {K_PARENT * live:>6.0f}  {rejoin:>6.1f}  "
+            f"{root_switch:>6.1f}  {last_switch:>7.1f}  {K_PARENT * live:>6.0f}  "
+            f"{idle_root:>6.0f}  {rejoin:>6.1f}  "
             f"{DEPTH * imin:>6.1f}  {TRICKLE_K * n_int:>6}  {peak:>8.0%}  {node:>28.1f}"
         )
 

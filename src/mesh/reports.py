@@ -42,16 +42,30 @@ and driven by its `mesh.dodag.Dodag`:
   allowance refuses presence above 80 %) passes its flags to the next one;
   bit 7 next key loaded (§14), the current state; bit 3 when the class 2
   tails hook returns tails.
-- **Passive acknowledgement of presence** (§9, presence reports matched by
-  origin): when a presence goes on air to a preferred parent other than the
-  root, in a frame without class 1/2 message (those give the frame's sample,
-  `mesh.reliable`), the node waits for the parent's forward of a presence of
-  its origin, overheard: one sample of the parent's acknowledgement window
-  (`NeighbourTable.acked`), a success when it is heard, a failure after the
-  class 1 timeout towards a relay (`Reliable.timeout_ms`: from the end of
-  the frame, a frame of the frame limit + 6 slots, which covers the relay's
-  forwarding delay of at most one slot, §7). No retry; a newer presence on
-  air replaces the wait.
+- **Acknowledgement of presence** (§9, presence reports): when a presence
+  goes on air in a frame without class 1/2 message (those give the frame's
+  sample, `mesh.reliable`), it is one sample of the preferred parent's
+  link. To a relay (acknowledgement window, `NeighbourTable.acked`),
+  matched by origin: a success when the node overhears the parent's forward of a
+  presence of its origin (passive), a failure after the class 1 timeout
+  towards a relay (`Reliable.timeout_ms`: from the end of the frame, a
+  frame of the frame limit + 6 slots, which covers the relay's forwarding
+  delay of at most one slot, §7). To the root, which forwards nothing (the
+  **presence probe**): a success when a root acknowledgement entry for that
+  frame comes (``engine.root_entry``; the root sends it with its next
+  acknowledgement frame, at the latest with its next beacon), a failure
+  `PROBE_SHARE` (11/20) of a presence period after the end of the frame (the
+  longest gap between root beacons, half a period + 10 % jitter, §9) plus
+  the root timeout (its batching delay and access), subject to the rule of
+  one failed sample per batching delay towards the root
+  (`Reliable.root_failure`); a sample of the link's reachability only
+  (`NeighbourTable.missed`; the entry, `NeighbourTable.answered`), not of
+  its acknowledgement window: the root's link cost, hence the rank of a
+  root child and of its subtree, moves with class 1 traffic only, as
+  before the probe. It is the probe of an idle root child's link:
+  a dead uplink still heard is left after 4 such failures and a silence
+  limit without acknowledgement of the root (§9 reachability). No retry; a
+  newer presence on air replaces the wait.
 - **Topology** every topology period, jittered by ±10 %, the first one at a
   random time within the first presence period after the first attachment;
   with the DODAG information flag *topology report on change* (deployment,
@@ -76,7 +90,10 @@ information (with every 8th topology report), "since the last report" read
 as since the last presence on air ("first report since boot" included),
 the timeout of the presence's passive acknowledgement (the class 1 one: a
 forward later than that, behind priority-1 traffic or the relay's own
-duty-cycle allowance, counts as a failure), presence and topology withheld
+duty-cycle allowance, counts as a failure), the deadline of the root's
+acknowledgement of a presence (a beacon delayed beyond it, by the root's
+medium access or allowance, makes a failure; its entry, late, still ends
+the run of failed samples, `mesh.reliable`), presence and topology withheld
 while detached (no route; the topology timer restarts at the next
 attachment).
 """
@@ -112,6 +129,7 @@ NAME_MAX = 16
 MAC_SIZE = 6
 NODE_INFO_EVERY = 8  # topology reports per node information report
 CHANGE_SLOTS = 4  # presence after a parent change: random delay in [0, 4 slots] (CW_MIN, §8)
+PROBE_SHARE = (11, 20)  # root acknowledgement of a presence: within 0.55 period (+ root timeout)
 
 
 def _u16(value, name):
@@ -393,8 +411,10 @@ class Reporter:
         self._presence = None  # (slot, message) of the last presence queued
         self._sticky = FIRST_REPORT  # flags not yet carried by a presence on air
         self._carried = 0  # ... of them, those the queued presence carries
-        self._probe_hop = None  # parent whose forward of the presence on air is awaited
+        self._probe_hop = None  # parent whose acknowledgement of the presence on air is awaited
         self._probe_due = None  # ... until (then a failed sample)
+        self._probe_ctr = 0  # towards the root: the frame's counter (low 16 bits)
+        self._probe_end = 0  # ... and its end (batching delay rule)
         self._rank_errors = 0
         self._auth = 0
         self._info_left = 0  # topology reports before the next node information
@@ -403,10 +423,12 @@ class Reporter:
         self._base_timer = engine.timer
         self._base_sent = engine.sent
         self._base_overheard = engine.overheard
+        self._base_root_entry = engine.root_entry
         engine.tick = self._tick
         engine.timer = self._timer
         engine.sent = self._sent
         engine.overheard = self._overheard
+        engine.root_entry = self._root_entry
 
     # --- Entry points ---------------------------------------------------------------
 
@@ -545,16 +567,32 @@ class Reporter:
         self._sticky &= ~self._carried
         self._carried = 0
         self._presence = None
-        # Passive acknowledgement of the presence (§9): one sample when the
-        # parent's forward is overheard or the timeout passes; none towards
-        # the root (it forwards nothing) nor for a frame whose class 1/2
-        # messages already give its sample (`mesh.reliable`).
+        # Acknowledgement of the presence (§9): one sample when the parent's
+        # forward is overheard, or the root's entry comes, or the timeout
+        # passes; none for a frame whose class 1/2 messages already give its
+        # sample (`mesh.reliable`).
         self._probe_hop = None
         self._probe_due = None
+        if cls:
+            return
         hop = sel.dest
-        if hop != ROOT and not cls:
-            self._probe_hop = hop
-            self._probe_due = now + sel.toa_ms + self.engine.reliable.timeout_ms(hop)
+        end = now + sel.toa_ms
+        rel = self.engine.reliable
+        self._probe_hop = hop
+        if hop == ROOT:
+            num, den = PROBE_SHARE
+            self._probe_ctr = counter & 0xFFFF
+            self._probe_end = end
+            self._probe_due = (
+                end + self.engine.neighbours.period_ms * num // den + rel.timeout_ms(ROOT)
+            )
+        else:
+            self._probe_due = end + rel.timeout_ms(hop)
+
+    def _root_entry(self, counter, now):
+        self._base_root_entry(counter, now)
+        if self._probe_due is not None and self._probe_hop == ROOT and counter == self._probe_ctr:
+            self._probe(True, now)
 
     def _overheard(self, header, messages, now):
         self._base_overheard(header, messages, now)
@@ -567,7 +605,14 @@ class Reporter:
                 return
 
     def _probe(self, ok, now):
-        self.engine.neighbours.acked(self._probe_hop, ok, now)
+        hop = self._probe_hop
+        table = self.engine.neighbours
+        if hop != ROOT:
+            table.acked(hop, ok, now)
+        elif not ok and self.engine.reliable.root_failure(self._probe_end):
+            # Towards the root: reachability only (its entry, `answered`,
+            # ends the run), one failure per batching delay (§9).
+            table.missed(ROOT, now)
         if ok:
             self.counters.presence_acked += 1
         else:

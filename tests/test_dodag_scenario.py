@@ -370,6 +370,45 @@ class DetachRejoin(unittest.TestCase):
         line.check_ranks(self)
 
 
+class DeadUplinkIdle(unittest.TestCase):
+    """MP10 over a dead uplink without traffic: root, A and B, each hearing the
+    two others; A's frames no longer reach the root, A still hears it, and
+    nobody sends class 1 traffic. A's presences to the root are the probes
+    of its link (§9): A leaves it and rejoins through B (before the probe,
+    A stayed attached over the dead link for ever)."""
+
+    def test_idle_root_child_rejoins_through_its_neighbour(self):
+        net = Network(21, _KEY)
+        reports = []
+        boards = {n: net.add(n, routing=_routing(reports)) for n in (ROOT, A, B)}
+        for x, y in ((ROOT, A), (ROOT, B), (A, B)):
+            net.link_both(x, y)
+        net.run(6 * PERIOD)
+        a = boards[A].routing
+        self.assertEqual([boards[n].routing.parents.preferred for n in (A, B)], [ROOT, ROOT])
+        cut = net.now
+        unacked = a.reporter.counters.presence_unacked
+        net.medium.cut(A, ROOT)
+        # Left after 4 failed presence samples (about 4 periods, 5.5 at
+        # most, §9 repair table): a switch to B when B is feasible (a newer
+        # root sequence), otherwise a detach, the hold, the solicitation and
+        # the rejoin through B (the root's link unreachable until its
+        # failures age out); kept: B is no worse than the root by the switch
+        # threshold (one hop).
+        net.run(cut + 7 * PERIOD)
+        self.assertEqual((a.attached, a.parents.preferred), (True, B))
+        self.assertTrue(a.reporter.counters.presence_unacked - unacked >= 4)
+        poisons = a.dodag.counters.poisons
+        self.assertTrue(poisons <= 1, poisons)
+        net.run(cut + 12 * PERIOD)
+        state = (a.attached, a.parents.preferred, a.dodag.counters.poisons)
+        self.assertEqual(state, (True, B, poisons))
+        # The root hears A's reports again, through B.
+        since = len(reports)
+        net.run(net.now + 2 * PERIOD)
+        self.assertIn((PRESENCE, A), reports[since:])
+
+
 class LinkCostRise(unittest.TestCase):
     """B's link to A degrades one way: A hears none of B's frames, B still
     hears A. B's class 1 messages (one per second) to A fail, their retries

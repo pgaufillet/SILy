@@ -52,7 +52,7 @@ from mesh.neighbours import CAPACITY, MARGIN_LOW, silence_ms
 from mesh.parents import SIZE as PARENT_SET
 from mesh.platform import JITTER_PERCENT
 from mesh.ports import ERROR
-from mesh.reliable import ACK_BATCH, DUPLICATES, decode_error
+from mesh.reliable import ACK_BATCH, DUPLICATES, LAZY_BATCH, decode_error
 from mesh.txqueue import SIZE as QUEUE_SIZE
 
 USABLE = 0.5  # delivery both ways without collisions for a usable link
@@ -849,7 +849,8 @@ class Resources(Check):
     Bounds (defaults: the cores' configured sizes): neighbour table 64
     entries (§9), parent set 3 (§9), duplicate cache 128 (§12), transmit
     queue 64 messages (§12), per-address counters 32 (§13), root
-    acknowledgement batch 8 entries (§16). ``highest``: the largest value
+    acknowledgement batch 8 entries and 24 lazy ones of presence frames
+    (32 waiting, §12, §16). ``highest``: the largest value
     seen of each.
     """
 
@@ -862,7 +863,7 @@ class Resources(Check):
         duplicates=DUPLICATES,
         queue=QUEUE_SIZE,
         senders=SENDERS,
-        batch=ACK_BATCH,
+        batch=ACK_BATCH + LAZY_BATCH,
     ):
         self.bounds = {
             "neighbours": neighbours,
@@ -887,7 +888,8 @@ class Resources(Check):
                 "duplicates": len(e.reliable.duplicates),
                 "queue": e.queue.messages(),  # the DODAG information reserve apart
                 "senders": len(e.senders),
-                "batch": len(e.reliable._batch),  # root batch (no accessor)
+                # root batch and lazy entries (no accessor)
+                "batch": len(e.reliable._batch) + len(e.reliable._lazy),
             }
             for k, v in sizes.items():
                 if v > self.highest[k]:

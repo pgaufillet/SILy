@@ -127,8 +127,19 @@ the destination filters the extra copy). The frame gets one explicit
 acknowledgement entry when it carries a duplicate (dropped or taken
 again), a message delivered here or a message held; the root batches up
 to `ACK_BATCH` (8) entries per frame for at most its batching delay, any
-other node sends at once. A forwarded message
-queued normally is acknowledged passively when the relay forwards it; if it
+other node sends at once. **Presence of a root child** (§9 presence
+probe): the root also acknowledges a frame carrying a node's own presence
+(first hop, mode 6), without class 1/2 message, with a **lazy** entry
+(``acknowledge(..., lazy=True)``), kept apart from the batch: it starts no
+batching delay and goes with the next batch, or at the latest with the
+root's next beacon (`flush_acks`, called by routing just before the beacon
+is queued: the lazy entries are sent to every neighbour, so that they
+share the beacon's frame), or when `LAZY_BATCH` (24) of them are waiting;
+the batch keeps its own frame and timing (the root sends as many frames as
+before the probe, each of them heard as a proof of the root's presence),
+messages of 8 entries at most. The root child takes its sample from it
+(`mesh.reports`, ``engine.root_entry``).
+A forwarded message queued normally is acknowledged passively when the relay forwards it; if it
 has not gone on air within half a timeout (queue, duty cycle, busy channel),
 the relay acknowledges it explicitly (`owe`). A frame with a class 1/2
 message the relay refused (queue full or quota) gets no explicit
@@ -159,8 +170,8 @@ forwarding a frame then lost): class 2 recovers it (§12).
 
 Bounded memory: per-slot state arrays of the queue size (`ATTEMPTS`
 counters per slot towards the root), a queue-size table of pending root
-failures, a 128-entry duplicate cache, an 8-entry batch, one count of
-consecutive frames timed out.
+failures, a 128-entry duplicate cache, an 8-entry batch and 24 lazy
+entries, one count of consecutive frames timed out.
 """
 
 from mesh import frame
@@ -172,6 +183,7 @@ from mesh.txqueue import accepted
 
 ATTEMPTS = 3  # transmissions per next hop (§12)
 ACK_BATCH = 8  # entries per root acknowledgement frame (§16)
+LAZY_BATCH = 3 * ACK_BATCH  # root: lazy entries waiting at most (§9 presence probe)
 ACK_ENTRY = 4  # link source 2 B, frame counter low 16 bits 2 B (§11 port 3)
 ACK_SHARE = 20  # root acknowledgements use at most 1/20 (5 %) of the channel (§16)
 TIMEOUT_SLOTS = 6  # forwarding delay 1, backoff 4, margin 1 (§9)
@@ -393,6 +405,7 @@ class Reliable:
         self._keys = {}  # identity -> slot, pending messages (passive acknowledgement)
         self._batch = []  # root: (link source, counter) waiting for the batch
         self._batch_due = None
+        self._lazy = []  # root: lazy entries (presence frames), for the next batch or beacon
         self._root_fail = None  # end of the frame of the last failed sample towards the root
         self._delay_at = None  # last retry delay drawn: time, frame (next hop, counter), delay
         self._delay_hop = 0
@@ -583,8 +596,10 @@ class Reliable:
             if source != own:
                 continue
             if origin == ROOT:
-                # Any transmission kept, whatever the message's state (late
+                # A presence frame's sample (`mesh.reports`), then any
+                # transmission kept, whatever the message's state (late
                 # acknowledgement, §12).
+                self.engine.root_entry(c16, self.engine.now)
                 self._late(c16)
                 rn = self._rn
                 for slot in range(queue.entries):
@@ -743,9 +758,12 @@ class Reliable:
         self._due[slot] = now + delay
         self._at(self._due[slot])
 
-    def _root_failure(self, end):
-        # True if the failure of the frame ended at end gives a sample: one
-        # per batching delay towards the root (one lost batch, one loss).
+    def root_failure(self, end):
+        """Return True if the failure of a frame to the root ended at end gives a sample.
+
+        One failed sample per batching delay towards the root (one lost
+        batch, one loss, §9); also for a presence frame (`mesh.reports`).
+        """
         last = self._root_fail
         if last is not None and end - last < self.batch_ms:
             return False
@@ -776,7 +794,7 @@ class Reliable:
     def _decide(self, i, now):
         end = self._fend[i]
         self._fend[i] = None
-        if self._root_failure(end):
+        if self.root_failure(end):
             self.engine.neighbours.acked(ROOT, False, now)
 
     def _late(self, c16):
@@ -995,11 +1013,14 @@ class Reliable:
 
     # --- Receiver --------------------------------------------------------------------
 
-    def acknowledge(self, source, counter, now):
+    def acknowledge(self, source, counter, now, lazy=False):
         """Acknowledge the frame (source, counter) explicitly: batched at the root.
 
         Cancels the acknowledgements owed for that frame (the entry covers
-        every class 1/2 message of the frame, §12).
+        every class 1/2 message of the frame, §12). lazy (root only: a
+        presence frame of a root child, §9): the entry starts no batching
+        delay; it goes with the next acknowledgement frame or beacon
+        (`flush_acks`).
         """
         self.cancel_owed(source, counter)
         c16 = counter & 0xFFFF
@@ -1007,7 +1028,12 @@ class Reliable:
             self._send_acks(((source, c16),))
             return
         entry = (source, c16)
-        if entry in self._batch:
+        if entry in self._batch or entry in self._lazy:
+            return
+        if lazy:
+            self._lazy.append(entry)
+            if len(self._lazy) >= LAZY_BATCH:
+                self.flush_acks()
             return
         self._batch.append(entry)
         if len(self._batch) >= ACK_BATCH:
@@ -1016,16 +1042,38 @@ class Reliable:
             self._batch_due = now + self.batch_ms
             self._at(self._batch_due)
 
-    def _flush(self):
-        batch = self._batch
-        self._batch = []
-        self._batch_due = None
-        if batch:
-            self._send_acks(batch)
+    def flush_acks(self):
+        """Root: send the lazy entries now, to every neighbour (the beacon's frame).
 
-    def _send_acks(self, entries):
-        # One link source: sent to it; several (root batch): to every neighbour.
-        dest = entries[0][0]
+        Routing calls it just before it queues the root beacon, so that the
+        lazy entries (presence, §9) go in the beacon's frame (one link
+        destination, `BROADCAST`); the batch keeps its own timing.
+        """
+        lazy = self._lazy
+        self._lazy = []
+        self._send_all(lazy, True)
+
+    def _flush(self):
+        # The batch, with the lazy entries waiting (no frame of their own).
+        batch = self._batch
+        lazy = self._lazy
+        self._batch = []
+        self._lazy = []
+        self._batch_due = None
+        self._send_all(batch, bool(lazy))  # with lazy entries: one destination, one frame
+        self._send_all(lazy, True)
+
+    def _send_all(self, entries, broadcast):
+        # Messages of at most ACK_BATCH entries; several go to every neighbour.
+        if len(entries) > ACK_BATCH:
+            broadcast = True
+        for i in range(0, len(entries), ACK_BATCH):
+            self._send_acks(entries[i : i + ACK_BATCH], broadcast)
+
+    def _send_acks(self, entries, broadcast=False):
+        # One link source: sent to it; several (root batch), or with the
+        # root beacon, or one message of several: to every neighbour.
+        dest = BROADCAST if broadcast else entries[0][0]
         for source, _ in entries:
             if source != dest:
                 dest = BROADCAST

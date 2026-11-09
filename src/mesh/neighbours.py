@@ -58,7 +58,10 @@ link destination (the channel is shared, §9). Per neighbour:
   explicit entry for a frame already sampled, a late one of the root, a
   passive one of a frame already sampled); beacons and other frames do
   not. The node's class 1 transmissions towards the neighbour are the
-  probes. Failure ageing ends the run too (its failures left the window:
+  probes, and towards the root its presence frames too (`missed`: a
+  failed presence lengthens the run without a sample of the window, so
+  that the root's link cost, hence the rank, still moves with class 1
+  traffic only, §9 presence probe). Failure ageing ends the run too (its failures left the window:
   the link gets `UNREACH_RUN` more failed samples), ``answered`` stays: a
   node that stopped sending to the neighbour reads it reachable again a
   silence limit after its last failure, as under the ETX rule.
@@ -239,6 +242,12 @@ class Neighbour:
             if self.run < UNREACH_RUN:
                 self.run += 1
 
+    def _missed(self, now):
+        # A failed probe outside the window: the run grows, ageing as a failure.
+        self.fail_at = now
+        if self.run < UNREACH_RUN:
+            self.run += 1
+
     def _answered(self, now):
         # An acknowledgement of the neighbour: ends the run of failed samples.
         self.run = 0
@@ -417,6 +426,23 @@ class NeighbourTable:
             end = now + silence_ms(self.period_ms)
             if end < self._next_expiry:
                 self._next_expiry = end
+        return True
+
+    def missed(self, address, now):
+        """Record a failed probe of address at now that is no sample of p_ack.
+
+        The presence probe of the link to the root (§9): it lengthens the
+        run of failed samples (reachability) and ages as a failure, but
+        leaves the acknowledgement window, hence the ETX and the rank, to
+        the class 1 frames. Returns False if address is not in the table.
+        """
+        n = self.get(address)
+        if n is None:
+            return False
+        n._missed(now)
+        end = now + silence_ms(self.period_ms)
+        if end < self._next_expiry:
+            self._next_expiry = end
         return True
 
     def answered(self, address, now):

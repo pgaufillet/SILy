@@ -348,3 +348,36 @@ class LocalRepair(unittest.TestCase):
         self.assertFalse(entry.eligible(line.net.now, silence))
         self.assertTrue(all(hop == ROOT for hop, eligible, _ in reroutes if eligible), reroutes)
         self.assertEqual((rel.held(), r.engine.counters.unreachable), (1, 0))
+
+    def test_idle_root_child_leaves_a_dead_uplink(self):
+        # The root no longer hears R, which still hears its beacons, and R
+        # sends no class 1 traffic: its presences to the root are the probes
+        # of the link (§9). Each one, unacknowledged by the root's next
+        # beacon, is a failed sample; after 4 in a row and a silence limit
+        # without acknowledgement of the root, the link is unreachable and R
+        # leaves the root (its only candidate: a detach). Before the probe,
+        # R stayed attached over the dead link for ever.
+        line = Line(14)
+        r = line.relay
+        parents = r.routing.parents
+        entry = r.engine.neighbours.get(ROOT)
+        rep = r.routing.reporter.counters
+        line.run(2 * PERIOD)
+        self.assertTrue(rep.presence_acked >= 2, rep.presence_acked)
+        self.assertEqual(entry.run, 0)
+        cut = line.net.now
+        last = entry.answered
+        unacked = rep.presence_unacked
+        line.net.medium.cut(R, ROOT)
+        silence = silence_ms(PERIOD)
+        # 4 presences, at most 1.1 periods apart, each failed 0.55 period
+        # (+ the root timeout) after its end, then a selection at the next
+        # beacon heard (half a period + 10 %).
+        bound = cut + 11 * PERIOD // 10 + 3 * 11 * PERIOD // 10 + 11 * PERIOD // 10 + 3000
+        while not parents.detaches and line.net.now < bound:
+            line.run(100)
+        self.assertEqual(parents.detaches, 1, (rep.presence_unacked - unacked, entry.run))
+        self.assertTrue(line.net.now - last >= silence, (line.net.now - last, silence))
+        self.assertEqual(rep.presence_unacked - unacked, 4)
+        self.assertTrue(entry.run >= 4)
+        self.assertEqual(r.engine.counters.retries, 0)  # no class 1 probe

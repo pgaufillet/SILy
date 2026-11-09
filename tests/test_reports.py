@@ -10,9 +10,10 @@ import unittest
 from mesh import frame
 from mesh.counter import FrameCounter
 from mesh.dodag import TOPOLOGY_ON_CHANGE, DodagInfo
-from mesh.frame import FIRST_HOP, ROOT, UPWARD
-from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
+from mesh.frame import BROADCAST, FIRST_HOP, ROOT, UPWARD
+from mesh.ports import ACK, DODAG_INFO, NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.profile import EU_869
+from mesh.reliable import decode_acks
 from mesh.replay import ReplayTable
 from mesh.reports import (
     ADDRESS_CONFLICT,
@@ -431,7 +432,8 @@ class Presences(unittest.TestCase):
 
 class PresenceAcknowledgement(unittest.TestCase):
     """§9: presence reports feed the parent's acknowledgement window, matched
-    by origin when the parent forwards them; not when the parent is the root."""
+    by origin when the parent forwards them, by the root's acknowledgement
+    entry when the parent is the root (the presence probe)."""
 
     def test_forward_overheard_one_sample_per_presence(self):
         line = Line(15)
@@ -446,11 +448,49 @@ class PresenceAcknowledgement(unittest.TestCase):
         self.assertEqual(entry.acknowledged(), rep.presence_acked)
         total = rep.presence_acked + rep.presence_unacked
         self.assertTrue(rep.presence_acked <= entry.ack_count <= total, (entry.ack_count, total))
-        # R's parent is the root: no sample of its presence.
+        # R's parent is the root: its presences are acknowledged by the
+        # root's entries (the presence probe), which feed the link's
+        # reachability only: no sample of its acknowledgement window, so
+        # that R's rank moves with class 1 traffic only.
         r = line.relay
-        self.assertEqual(r.routing.reporter.counters.presence_acked, 0)
-        self.assertEqual(r.routing.reporter.counters.presence_unacked, 0)
-        self.assertEqual(r.engine.neighbours.get(ROOT).ack_count, 0)
+        rr = r.routing.reporter.counters
+        root = r.engine.neighbours.get(ROOT)
+        self.assertTrue(rr.presence_acked >= 6, rr.presence_acked)
+        self.assertEqual(root.ack_count, 0)
+        self.assertTrue(line.net.now - root.answered < PERIOD + PERIOD // 2)
+
+    def test_root_acknowledges_presence_in_its_beacon_frame(self):
+        # The root acknowledges each frame of R carrying R's own presence
+        # (no class 1 traffic) with a lazy entry: no frame of its own, the
+        # entries ride in the beacon's frame (every half period, §9).
+        line = Line(17)
+        line.formed()
+        start = line.net.now
+        line.net.run(start + 6 * PERIOD)
+        presences = {}  # counter (low 16 bits) -> time on air
+        for t, h, msgs, _ in line.frames(R):
+            if h.dest == ROOT and any(m.port == PRESENCE and m.mode == FIRST_HOP for m in msgs):
+                presences[h.counter & 0xFFFF] = t
+        recent = {c for c, t in presences.items() if t > start}
+        self.assertTrue(len(recent) >= 5, presences)
+        acked = set()
+        for t, h, msgs, _ in line.frames(ROOT):
+            if t <= start:
+                continue
+            ports = [m.port for m in msgs]
+            if ACK not in ports:
+                continue
+            # Only in a beacon's frame, sent to every neighbour.
+            self.assertEqual(h.dest, BROADCAST)
+            self.assertTrue(any(m.port == DODAG_INFO and m.payload for m in msgs), ports)
+            for m in msgs:
+                if m.port == ACK:
+                    acked.update(c for a, c in decode_acks(m.payload) if a == R)
+        # Only R's presence frames (N's presences, forwarded by R, give no
+        # entry of their own), each of them but those of the last half period
+        # (their beacon not yet sent).
+        self.assertTrue(acked <= set(presences), (acked, presences))
+        self.assertTrue(len(recent - acked) <= 1, (recent, acked))
 
     def test_parent_that_does_not_hear_the_node_is_left(self):
         # N hears R at 100 % but R no longer hears N, without class 1

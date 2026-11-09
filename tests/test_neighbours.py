@@ -519,6 +519,24 @@ class RootReachability(unittest.TestCase):
             self.assertEqual(n.etx(), (6 * ETX_ONE + 1) // 2 if sample else 5 * ETX_ONE)
         self.assertFalse(_table().answered(ROOT, 0))
 
+    def test_missed_probes_lengthen_the_run_without_a_sample(self):
+        # Failed presence probes (§9): the run grows and the root becomes
+        # unreachable after 4 and a silence limit, the window (ETX, rank)
+        # untouched; they age out a silence limit after the last one.
+        t = _table()
+        silence = silence_ms(_PERIOD)
+        n = _hear(t, ROOT, range(16))
+        etx = n.etx()
+        for at in (1000, 2000, 3000, 4000):
+            self.assertTrue(t.missed(ROOT, at))
+        self.assertEqual((n.run, n.ack_count, n.etx()), (4, 0, etx))
+        self.assertFalse(n.eligible(silence, silence))
+        _hear(t, ROOT, [16], now=4000 + silence)
+        t.expire(4000 + silence)
+        self.assertEqual((n.run, n.fail_at), (0, None))
+        self.assertTrue(n.eligible(4000 + silence, silence))
+        self.assertFalse(_table().missed(ROOT, 0))
+
     def test_beacons_do_not_make_it_reachable(self):
         t = _table()
         silence = silence_ms(_PERIOD)

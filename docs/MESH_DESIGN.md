@@ -161,7 +161,7 @@ measurement recorded).
 | MP8 | Compact headers: fields implicit when deducible from context (root address upward, root origin downward), SCHC-style | designed | §11: implicit root, first-hop compression, implicit last length, bundles |
 | **Robustness** ||||
 | MP9 | Duty-cycle compliance guaranteed whatever the applications do; mesh control traffic bounded, its budget known per SF | designed | §6; budget §16 (SILy) |
-| MP10 | Self-forming, self-healing: no configuration beyond network key and radio parameters; repair within a bounded time stated per SF | designed | §9: local repair by parent set, detach and rejoin, global repair by DODAG version; repair times per SF (§9 table) |
+| MP10 | Self-forming, self-healing: no configuration beyond network key and radio parameters; repair within a bounded time stated per SF | designed | §9: local repair by parent set, detach and rejoin, global repair by DODAG version; repair times per SF (§9 table); a dead uplink still heard is left with or without traffic: class 1 transmissions and presence reports probe the parent's link, the root acknowledging its children's presence in its beacons (§9 link estimation, presence probe). TLA+ `DODAG`: every node attached again (MP10Live) after a dead uplink, with or without traffic, ≤ 1 loss (`DODAG_diamond_probe_cutup*`); without the presence probe an idle node stays attached over it (`DODAG_diamond_reach_cutup_idle`) |
 | MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, Babel's feasibility condition with a root sequence (L kept across a detach), data-path validation with duplicate cache; no hop limit needed. No loop in the cases checked (TLA+ `DODAG`, `Seq = "babel"`: line, star, star2 and diamond graphs, a dead relay, up to 1–3 losses in any pattern, one root sequence increment, fixed link costs; a diamond run with 2 losses stopped incomplete), the argument holding whatever was lost; without the root sequence, none with at most one consecutive loss per link, and beyond, a loop ended by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.7 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
 | MP12 | Stability: hysteresis, no route flapping; link quality (margin, delivery ratio) preferred over hop count; asymmetric links detected | designed | §9: ETX over 16-frame windows, margin eligibility with 3/6 dB hysteresis, ETX ≤ 4 eligibility (waived, for reachability alone, only on the link to the root and the last candidate's), parent switch threshold, rank hysteresis; asymmetric links flagged by the root |
 | MP13 | Bounded resources: sized tables (default 64 nodes, depth 8), bounded queues and buffers, documented degradation beyond | designed | §12 (resource table and degradation), §9 (neighbour table), §10 (graph, depth) |
@@ -547,9 +547,25 @@ acknowledgement window and the time of its newest failure.
   the node overhears the parent forward a presence of its origin, a failure
   after the class 1 timeout towards a relay (§12: a forward later than that,
   behind priority-1 traffic or the parent's own allowance, counts as a
-  failure); no retry. When the parent is the root, which forwards nothing,
-  the root's class 1 acknowledgements (§16) play this part when there is
-  class 1 traffic.
+  failure); no retry. **Presence probe**: when the parent is the root,
+  which forwards nothing, the root acknowledges the frame carrying the
+  node's own presence (first hop, no class 1/2 message) with a **lazy**
+  entry (§12, §16): no batching delay of its own, it goes with the root's
+  next acknowledgement frame or, at the latest, in its next beacon's frame
+  (every half period); the presence is one sample of the link's
+  reachability (below), a success at that entry, a failure 0.55 period
+  (the longest gap between beacons) plus a root timeout after the end of
+  its frame, subject to the rule of one failed sample per batching delay;
+  it is no sample of the acknowledgement window: the root's link cost,
+  hence the rank of a root child and of its subtree, still moves with
+  class 1 traffic only (a lost presence or beacon moved the ranks of root
+  children in the host scenarios, with Trickle resets down their
+  subtrees). Without it an idle root child (no
+  class 1 traffic, the normal case of an orienteering control) whose
+  uplink died while it still hears the root had no sample of the link and
+  stayed attached over it for ever (TLA+ `DODAG_diamond_reach_cutup_idle`,
+  MP10). Cost: no frame of the node; the root's entries ride in its
+  beacons, 4 bytes per root child and presence period (§16).
 - **Failure ageing**: once the newest failure of a window is a silence limit
   old (2.5 presence periods), the failures leave the window and its
   successes are kept. A link that failed during a cut and is heard again
@@ -599,7 +615,10 @@ acknowledgement window and the time of its newest failure.
   the neighbour ends the run and makes the link reachable again; beacons
   and other frames do not. The probes are the node's own class 1
   transmissions towards the neighbour (fresh attempts while it is kept,
-  §12) and its presence reports to a relay parent: no extra frame.
+  §12) and its presence reports to its preferred parent, the root
+  included (presence probe, above): no extra frame of the node, so that
+  an idle node leaves a dead uplink too, after 4 failed presences (one
+  per period: 4 to 5.5 periods, §9 repair table).
   Reachability is read at each selection (the root's beacons give one
   every half period, a relay's presence one every period). Failure ageing
   ends the run with the failures it removes (the link then gets 4 more
@@ -1061,14 +1080,14 @@ acknowledgement window and the time of its newest failure.
 
 ### Repair times per SF (MP10)
 
-| SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | left with traffic, last candidate relay | switch, idle | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
-|---|---|---|---|---|---|---|---|---|---|
-| 7 | 1.6 | 12.0 | 92 | 108 | 75 | 7.0 | 13 | 12 | 11 |
-| 8 | 3.0 | 21.6 | 92 | 108 | 75 | 12.6 | 24 | 10 | 17 |
-| 9 | 5.3 | 38.4 | 183 | 216 | 150 | 22.4 | 42 | 10 | 15 |
-| 10 | 10.6 | 76.1 | 366 | 432 | 300 | 44.8 | 84 | 10 | 14 |
-| 11 | 21.1 | 153.5 | 915 | 1080 | 750 | 89.7 | 169 | 10 | 12 |
-| 12 | 42.2 | 304.0 | 1830 | 2160 | 1500 | 179.4 | 338 | 10 | 11 |
+| SF | Imin | switch with traffic, parent relay | switch with traffic, parent root | left with traffic, last candidate relay | switch, idle | left idle, dead uplink to the root | detach + rejoin | global repair wave (8 hops) | Trickle frames per neighbourhood per reset | node cost at the maximum global repair rate (s/h) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 7 | 1.6 | 12.0 | 92 | 108 | 75 | 167 | 7.0 | 13 | 12 | 11 |
+| 8 | 3.0 | 21.6 | 92 | 108 | 75 | 169 | 12.6 | 24 | 10 | 17 |
+| 9 | 5.3 | 38.4 | 183 | 216 | 150 | 337 | 22.4 | 42 | 10 | 15 |
+| 10 | 10.6 | 76.1 | 366 | 432 | 300 | 674 | 44.8 | 84 | 10 | 14 |
+| 11 | 21.1 | 153.5 | 915 | 1080 | 750 | 1680 | 89.7 | 169 | 10 | 12 |
+| 12 | 42.2 | 304.0 | 1830 | 2160 | 1500 | 3356 | 179.4 | 338 | 10 | 11 |
 
 (Times in seconds, from section E of `mesh_budget.py`; the "with
 traffic" columns are upper bounds, retry delays at their maximum from the
@@ -1127,6 +1146,23 @@ frame of the exchange lost on any hop, see below.)
 - **Switch, idle**: no frame from the preferred parent for 2.5 presence
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
+- **Left idle, dead uplink to the root**: a root child without class 1
+  traffic whose frames no longer reach the root, which it still hears:
+  its presences are the probes (presence probe, §9 link estimation). From
+  the death of the link: the 4th presence after it (at most 4.4 periods,
+  one per period jittered), its failure decided 0.55 period and a root
+  timeout after its frame (the silence limit since the last
+  acknowledgement has passed by then), then the next selection at the
+  root's next beacon (0.55 period): 5.5 periods and a root timeout at
+  most, about 4 periods typically, then the detach and rejoin (or a
+  switch to another candidate). Longer than the root's silent-node
+  threshold (4.5 periods, §16): in the worst phase the root reports the
+  node silent shortly before it reappears through its new parent; the
+  node is indeed unheard by the root meanwhile. Before the presence
+  probe, the node was never left (no sample of the link). A presence sent
+  at once after a failed sample would bring it to about 4 periods, at
+  the cost of one more presence per failure (on a live link too); not
+  adopted, the probe costs no frame of the node.
 - **Detach + rejoin**, after the detection above: poison within Imin, hold
   2 Imin, then the answer window of the solicitation, Imin + 8 slots, when
   a feasible neighbour answers it (the table). Otherwise the node rejoins
@@ -1187,7 +1223,12 @@ Findings:
    not heard). A relay that is the node's last candidate is kept the same
    way: left within 108 s at SF7–8, 216 s at SF9, then the detach.
 2. **Idle, local repair is bounded by the silence limit**, 2.5 presence
-   periods (75 s at SF7–8, 150 s at SF9), and costs no airtime. The children
+   periods (75 s at SF7–8, 150 s at SF9), and costs no airtime, when the
+   parent falls silent; a dead uplink to a parent still heard is left
+   after 4 failed presence samples (5.5 periods at most from the root,
+   167 s at SF7, 337 s at SF9; 4.4 periods and a selection from a relay),
+   the root's acknowledgements of its children's presence riding in its
+   beacons. The children
    of a failed relay re-attach and send their presence before the root
    declares them silent, so that the root reports the relay alone (§16):
    the root hears nothing from a child for at most 1.1 + 2.5 periods plus the
@@ -1197,9 +1238,10 @@ Findings:
    presence after the change has less than 0.9 period to reach the root.
    Without frame loss only: in the worst phase, losing that presence too
    still raises a short false alarm.
-3. **Every repair is shorter than the silence detection** (§16) at every SF;
-   at SF7–9 they all fit the detection targets (135 s at SF7–8, 270 s at
-   SF9, §15).
+3. **Every repair is shorter than the silence detection** (§16) at every SF,
+   but an idle dead uplink (4 failed presences: up to 5.5 periods from
+   the root); at SF7–9 the others fit the detection targets (135 s at
+   SF7–8, 270 s at SF9, §15).
 4. **Control traffic stays bounded**: about 10 advertisements per
    neighbourhood per reset, about 15 % of the channel during the first Imin /
    2 only; at one global repair every 4 presence periods (the maximum rate), at
@@ -1539,6 +1581,15 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
 - **Explicit acknowledgement** (port 3, link-local), sent by:
   - the final destination: the root batches up to 8 entries per frame (§16),
     any other node acknowledges at once;
+  - the root, for a frame of a root child carrying the child's own
+    presence and no class 1/2 message (presence probe, §9): a lazy entry,
+    kept apart from the batch, which starts no batching delay; it goes
+    with the next batch or in the next beacon's frame (messages of 8
+    entries; at most 24 waiting). The batch keeps its own frame and
+    timing: merged into the beacon, it would have removed root frames
+    that a root child under hidden terminals hears as the root's presence
+    (host simulator, the overloaded 64-node star: more silence-limit
+    detaches of the relay);
   - a relay that accepted the message but will not forward it within half a
     timeout (message held during repair, duty-cycle budget, queue);
   - a node that receives a duplicate (the sender missed the acknowledgement).
@@ -2261,6 +2312,18 @@ budget besides (27 s/h at SF8).
 Class 1 retransmission timeouts must exceed this delay (§9). Under load the
 root's medium access can delay a batch beyond the timeout; such a late
 acknowledgement is still accepted (§12).
+
+The root also acknowledges each presence frame of its children (the
+presence probe of their link, §9), with lazy entries that ride in its
+beacons' frames: 4 bytes per root child and presence period, a 3-byte
+message header per 8 entries. With all 30 Nodes root children, idle
+(`mesh_budget.py` section D): 23 s/h of the root's budget at SF7, 39 s/h
+at SF8, 26–37 s/h at SF9–12; channel load +0.6 % at SF7, +1.1 % at SF8
+(idle load 15.0 %, the 15 % of the policy), +0.7–1.0 % at SF9–12. With
+a few root children (a relay or two next to the Gateway, the SILy
+layout) about +0.1 %. Separate acknowledgement frames per batching delay
+would have cost 3 to 5 times more (one frame of 13 B overhead and a
+preamble per one or two entries).
 
 ### Findings
 

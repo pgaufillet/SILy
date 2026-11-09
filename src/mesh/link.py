@@ -56,12 +56,18 @@ drops it only while it holds a copy (custody, `Reliable.holding`), and
 otherwise takes it again (forwarded or held, counted ``retaken``: a loop, or
 a retransmission after a lost acknowledgement, which the destination then
 filters). Either way the frame gets an explicit acknowledgement, as when it
-carries a class 1/2 message delivered here or held (`mesh.reliable`).
+carries a class 1/2 message delivered here or held (`mesh.reliable`). The
+root also acknowledges a frame carrying a node's own presence (mode 6) that
+needs no other acknowledgement, with a lazy entry (its next acknowledgement
+frame or beacon, `Reliable.acknowledge`): the presence probe of the root
+child's link (§9).
 
 **Extension points** (minimal defaults, overridden or replaced by the later
 steps): `heard` (neighbour table), `decoded` (every decoded frame, before
 its messages: the root sequence, §9), `overheard` (passive acknowledgements),
-`sent` (class 1 bookkeeping, frame counter of the frame), `tick` and `timer`
+`sent` (class 1 bookkeeping, frame counter of the frame), `root_entry` (a
+root acknowledgement entry for this node: the reporter's presence sample,
+§9), `tick` and `timer`
 (protocol timers): an override calls the base method (class 1 lives there);
 `give_up` (busy channel), `expand` (first-hop compression undone on every
 message addressed to this node: origin, and port fields such as the
@@ -105,7 +111,7 @@ from mesh.frame import (
 )
 from mesh.neighbours import NeighbourTable
 from mesh.platform import randbelow, retained_layout
-from mesh.ports import ACK, APP_HIGH, ERROR, PRIORITY_LOW, PRIORITY_PERIODIC
+from mesh.ports import ACK, APP_HIGH, ERROR, PRESENCE, PRIORITY_LOW, PRIORITY_PERIODIC
 from mesh.ports import priority as port_priority
 from mesh.radio import CHANNEL, RX, RX_ERROR, SENSE_ACTION, TX, TX_DONE
 from mesh.reliable import Reliable, identity
@@ -507,6 +513,14 @@ class LinkEngine(Core):
         """A frame goes on air: sel (`txqueue.Selection`, before its commit), counter."""
         self.reliable.sent(sel, counter, now)
 
+    def root_entry(self, counter, now):
+        """A root acknowledgement entry for this node: frame counter (low 16 bits).
+
+        Called by `mesh.reliable` for every such entry, before class 1 reads
+        it; the reporter takes its presence sample there (§9). Nothing by
+        default.
+        """
+
     def give_up(self, sel, now):
         """MAX_ATTEMPTS busy senses for sel: drop its priority-2/3 reports (§8)."""
         self.counters.access_dropped += self.queue.drop(_is_report, sel)
@@ -787,8 +801,11 @@ class LinkEngine(Core):
         rel = self.reliable
         ack = False
         refused = False
+        presence = False
         for m in messages:
             c.rx_messages[m.port] += 1
+            if m.mode == FIRST_HOP and m.port == PRESENCE:
+                presence = True
             self.expand(m, h)
             key = identity(m, h.source, h.dest) if m.cls else None
             if key is None:
@@ -820,6 +837,10 @@ class LinkEngine(Core):
                 c.ack_withheld += 1
         elif ack:
             rel.acknowledge(h.source, h.counter, now)
+        elif presence and self.is_root and h.dest == ROOT:
+            # A root child's own presence: its link's probe (§9), acknowledged
+            # with the next acknowledgement frame or beacon.
+            rel.acknowledge(h.source, h.counter, now, True)
 
     def _final(self, m):
         # This node is the destination of m (`_accept` delivers it here).

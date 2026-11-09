@@ -48,6 +48,8 @@ DODAG_diamond_keeproot_cutuplive 79 32cpu-63G-j8
 DODAG_diamond_keeproot_witness_cutfresh 2 32cpu-63G-j8
 DODAG_diamond_lateack_MP5 469 32cpu-63G-j8
 DODAG_diamond_lateack_live 85 32cpu-63G-j8
+DODAG_diamond_probe_cutup_idle 75 8cpu-8G
+DODAG_diamond_probe_cutuplive 3000 8cpu-8G
 DODAG_diamond_reach_MP5 77 32cpu-63G-j8
 DODAG_diamond_reach_cutlive 381 32cpu-63G-j8
 DODAG_diamond_reach_cutup_idle 4 32cpu-63G-j8
@@ -104,6 +106,8 @@ DODAG_line_lateignore_drop 2 32cpu-63G-j8
 DODAG_line_low_live 3230 32cpu-63G-j8
 DODAG_line_low_safety 1954 32cpu-63G-j8
 DODAG_line_partition_MP5Live 2 32cpu-63G-j8
+DODAG_line_probe_live 120 8cpu-8G
+DODAG_line_probe_witness_run 7 8cpu-8G
 DODAG_line_reach_MP5 20 32cpu-63G-j8
 DODAG_line_reach_cutlive 872 32cpu-63G-j8
 DODAG_line_reach_live 29 32cpu-63G-j8

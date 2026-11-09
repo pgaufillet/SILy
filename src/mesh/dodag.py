@@ -134,7 +134,10 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
 - **Root**: rank 0, never adopts. **Beacon** (§9, §16): the root
   sequence incremented, then one DODAG information advertisement,
   priority 2, every half presence period
-  jittered by ±10 % (§7), the timer re-armed from each firing; it runs
+  jittered by ±10 % (§7), the timer re-armed from each firing; the
+  root's waiting acknowledgement entries go in its frame
+  (`Reliable.flush_acks`: the lazy entries of its children's presence
+  frames, §9 presence probe); it runs
   beside Trickle, whose resets (solicitation, older version, new version)
   send their priority-1 advertisements without postponing or suppressing
   it, so that the root's frames are never further apart than 0.55 periods
@@ -595,6 +598,9 @@ class Dodag:
         elif self._beacon_at is not None and now >= self._beacon_at:
             self._beacon_at = self._next_beacon(now)
             self._seq = (self._root_sequence() + 1) & SEQUENCE_MASK
+            # The waiting acknowledgement entries (the lazy ones of presence
+            # frames, §9) go in the beacon's frame.
+            self.engine.reliable.flush_acks()
             self._advertise(False)
         due = self.trickle.poll(now)
         if due:

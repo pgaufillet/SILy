@@ -18,6 +18,7 @@ from mesh.reliable import (
     ATTEMPTS,
     ERROR_SIZE,
     HOLD,
+    LAZY_BATCH,
     RETRY_DOUBLINGS,
     DuplicateCache,
     decode_acks,
@@ -547,6 +548,61 @@ class RootSamples(_RootCase):
         _run(r, end, end + ATTEMPTS * (timeout + 1000) + 6 * r.reliable.retry_ms + timeout)
         self.assertEqual((r.counters.retries, self._failures(r)), (2, 3))
         self.assertEqual(failures, [1])
+
+
+class LazyRootAcknowledgements(unittest.TestCase):
+    """§9 presence probe: the root acknowledges a presence frame of a root child
+    with a lazy entry, sent with its next acknowledgement frame or beacon."""
+
+    def test_lazy_entries_wait_for_the_beacon_flush(self):
+        root = _engine(ROOT, None, seed=3)
+        rel = root.reliable
+        rel.acknowledge(R, 0x12345, 0, True)
+        for i in range(ACK_BATCH + 1):  # more than a batch: still no frame
+            rel.acknowledge(0x0100 + i, i, 0, True)
+        frames, now = _run(root, 0, 10 * rel.batch_ms)
+        self.assertEqual(frames, [])  # no batching delay of their own
+        rel.flush_acks()  # routing, before the root beacon
+        (f,), _ = _run(root, now)
+        h, msgs = _messages(_KEY, f)
+        self.assertEqual(h.dest, BROADCAST)  # in the beacon's frame
+        # In messages of 8 entries, in one frame.
+        self.assertEqual([len(decode_acks(m.payload)) for m in msgs], [ACK_BATCH, 2])
+        self.assertEqual(decode_acks(msgs[0].payload)[0], (R, 0x2345))
+
+    def test_lazy_entries_bounded(self):
+        root = _engine(ROOT, None, seed=3)
+        rel = root.reliable
+        for i in range(LAZY_BATCH):
+            rel.acknowledge(0x0100 + i, i, 0, True)
+        (f,), _ = _run(root, 0)  # sent at the bound, in one frame
+        entries = sum(len(decode_acks(m.payload)) for m in _messages(_KEY, f)[1])
+        self.assertEqual(entries, LAZY_BATCH)
+
+    def test_lazy_entry_goes_with_the_next_batch(self):
+        root = _engine(ROOT, None, seed=3)
+        rel = root.reliable
+        rel.acknowledge(R, 7, 0, True)
+        rel.acknowledge(X, 9, 1000)  # a class 1 frame: its batching delay
+        frames, now = _run(root, 1000, 1000 + rel.batch_ms - 1)
+        self.assertEqual(frames, [])
+        (f,), _ = _run(root, now, 1000 + rel.batch_ms)
+        h, msgs = _messages(_KEY, f)
+        self.assertEqual(h.dest, BROADCAST)  # one frame for both
+        self.assertEqual([decode_acks(m.payload) for m in msgs], [[(X, 9)], [(R, 7)]])
+
+    def test_beacon_flush_leaves_the_batch_to_its_timing(self):
+        # The batch keeps its own frame: the root sends as many frames as
+        # before the probe, each one heard as a proof of its presence.
+        root = _engine(ROOT, None, seed=3)
+        rel = root.reliable
+        rel.acknowledge(X, 9, 0)
+        rel.acknowledge(R, 7, 0, True)
+        rel.flush_acks()
+        (f,), now = _run(root, 0, rel.batch_ms - 1)
+        self.assertEqual(decode_acks(_messages(_KEY, f)[1][0].payload), [(R, 7)])
+        (f,), _ = _run(root, now, rel.batch_ms)
+        self.assertEqual(decode_acks(_messages(_KEY, f)[1][0].payload), [(X, 9)])
 
 
 class LateRootAcknowledgements(_RootCase):

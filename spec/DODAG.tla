@@ -244,7 +244,14 @@
 (*   cost ETX 1, or the costly links of the graph), so the cap is outside *)
 (*   the model, as for the root.                                           *)
 (*                                                                         *)
-(* Root sequence (Seq, remedy C of the rootless DODAG): the root          *)
+(* Presence probe (Probe, with Elig): "none" (every configuration before   *)
+(* this option): a root child's presence gives no sample of its link, so   *)
+(* only class 1 traffic probes it (an idle node stays attached over a      *)
+(* dead uplink, DODAG_diamond_reach_cutup_idle); "presence" (the code):    *)
+(* the root acknowledges its children's presence frames, each one a        *)
+(* sample of the link (Presence, ProbeAnswer, ProbeTimeout below).         *)
+(*                                                                         *)
+(* Root sequence (Seq, remedy C of the rootless DODAG): the root           *)
 (* increments a sequence at each beacon (NewSeq, MaxSeq times); every      *)
 (* Announce frame (presence, DODAG information) carries its sender's       *)
 (* sequence, data and acknowledgement frames do not; a node holds the     *)
@@ -353,7 +360,8 @@ CONSTANTS
     Elig,       \* link ineligible: "none" (after the cut only), "etx" (the code before A), "reach" (remedy A, the code),
                 \* "reachetx" (the same, relay links by ETX) or "reachall" (every link by reachability)
     Seq,        \* root sequence: "none" (a ghost only: the code before remedy C) or "babel" (feasibility, floating)
-    MaxSeq      \* increments of the root sequence (0: none; values 0..MaxSeq, no wrap-around)
+    MaxSeq,     \* increments of the root sequence (0: none; values 0..MaxSeq, no wrap-around)
+    Probe       \* presence to the root: "none" (no sample: the code before) or "presence" (acknowledged, a probe)
 
 NONE == -1
 Root == 0
@@ -451,6 +459,7 @@ ASSUME Cut # "none" => Acks = "frame" /\ CutChild \in Nbr(CutParent)
 ASSUME Elig \in {"none", "etx", "reach", "reachetx", "reachall"} /\ (Elig # "none" => Acks = "frame")
 ASSUME Seq \in {"none", "babel"} /\ MaxSeq \in Nat
 ASSUME Seq = "babel" => Thr = "low" /\ Versions = 1 /\ Acks = "frame" /\ Fix5 = "solicit"
+ASSUME Probe \in {"none", "presence"} /\ (Probe = "presence" => Acks = "frame")
 
 \* The rank of the last frame is tracked (otherwise constant).
 TrackAir == Thr \in {"air", "minair"}
@@ -514,13 +523,15 @@ VARIABLES
     kp,        \* kp[k]: the relay k last kept as its last candidate (ghost, Ghosts; NONE: none)
     sq,        \* sq[k]: the root sequence k holds (Seq "none": a ghost, read by NoStaleRejoin only)
     sv,        \* sv[k][c]: the root sequence of c's last frame heard by k
-    fl         \* fl[k]: k is ungrounded (Seq "babel": detached, or floating), holding its upward messages
+    fl,        \* fl[k]: k is ungrounded (Seq "babel": detached, or floating), holding its upward messages
+    pb         \* pb[k]: k's presence probe towards the root (Probe): "none", "exp" (heard, its
+               \* acknowledgement on its way), "no" (lost: the failure comes)
 
 routing0 == <<alive, rank, pref, low, hold, poisoned, toSend, view, fresh, dropped,
               ver, vview, behind, sol, owe, win, wh, rj, sq, sv, fl>>
 routing == <<routing0, dc, rises, air, inc>>
 msgvars == <<sub, cp, giver, delivered, err, errFrom>>
-linkvars == <<cut, rfail, kp>>
+linkvars == <<cut, rfail, kp, pb>>
 vars == <<routing, lost, consec, msgvars, loops, rl, rerr, xv, linkvars>>
 
 \* Link cost of k to c, as k currently estimates it.
@@ -555,6 +566,7 @@ TypeOK ==
     /\ air \in [Nodes -> 0..INF] /\ inc \in [Nodes -> BOOLEAN]
     /\ cut \in BOOLEAN /\ rfail \in [Nodes -> [Nodes -> 0..Lim]]
     /\ kp \in [Nodes -> Nodes \cup {NONE}]
+    /\ pb \in [Nodes -> {"none", "exp", "no"}]
     /\ sq \in [Nodes -> 0..MaxSeq] /\ sv \in [Nodes -> [Nodes -> 0..MaxSeq]] /\ fl \in [Nodes -> BOOLEAN]
 
 (***************************************************************************)
@@ -868,8 +880,9 @@ Effect(s, H, dio, SS, SF, ann, sc) ==
               ELSE [k \in Nodes |-> S[k].behind /\ (sol[k] \/ (k = s /\ ann))]
     IN  [V |-> V, VV |-> VV, Dr |-> Dr, Fr |-> Fr, S |-> S, OW |-> OW, SO |-> SO, SV |-> SV]
 
-\* A frame without class 1 message.
-HeaderFrame(s, SS, SF, dio, ann) ==
+\* A frame without class 1 message; pr: a presence probe of s towards the root
+\* (Probe), whose acknowledgement is then on its way (the root heard it) or not.
+HeaderFrameP(s, SS, SF, dio, ann, pr) ==
     \E L \in SUBSET Receivers(s) :
         LET H == Receivers(s) \ L
             E == Effect(s, H, dio, SS, SF, ann, TRUE)
@@ -877,7 +890,10 @@ HeaderFrame(s, SS, SF, dio, ann) ==
             /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, E.SV, s, H)
             /\ FrameCounters(s, L, H, 0)
             /\ cp' = [m \in Msgs |-> [k \in Nodes |-> Reshape(cp[m][k], E.S[k])]]
-            /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, linkvars>>
+            /\ pb' = IF pr THEN [pb EXCEPT ![s] = IF Root \in H THEN "exp" ELSE "no"] ELSE pb
+            /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, rfail, kp>>
+
+HeaderFrame(s, SS, SF, dio, ann) == HeaderFrameP(s, SS, SF, dio, ann, FALSE)
 
 (***************************************************************************)
 (* Announce: a frame of an alive node without class 1 message.             *)
@@ -1069,7 +1085,7 @@ Float(n) ==
 CutLink ==
     /\ Cut # "none" /\ ~cut
     /\ cut' = TRUE
-    /\ UNCHANGED <<routing, lost, consec, msgvars, loops, rl, rerr, xv, rfail, kp>>
+    /\ UNCHANGED <<routing, lost, consec, msgvars, loops, rl, rerr, xv, rfail, kp, pb>>
 
 (***************************************************************************)
 (* Link cost rise (Rise): k's estimate of its link to c rises by one       *)
@@ -1198,7 +1214,7 @@ SendData(s, m) ==
              /\ rfail' = IF ~ByReach(s) THEN rfail
                          ELSE [k \in Nodes |-> IF k # s /\ k # d /\ k \in H /\ waits(k)
                                                THEN [rfail[k] EXCEPT ![s] = 0] ELSE rfail[k]]
-             /\ UNCHANGED <<alive, sub, err, errFrom, cut, kp>>
+             /\ UNCHANGED <<alive, sub, err, errFrom, cut, kp, pb>>
 
 \* An acknowledgement frame of h to k about m (Acks = "frame"): lost by k (k's
 \* copy becomes NC), or heard (the copy goes; k selects again). On a dead link
@@ -1251,7 +1267,7 @@ AckFrame(k, m) ==
                         ELSE /\ cp' = [cp EXCEPT ![m][k] = NoCopy]
                              /\ UNCHANGED <<routing, lost, consec, loops, rl>>
                    ELSE AckOnAir(h, k, m, lostIt, [c EXCEPT !.acc = "no"])
-    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, kp>>
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, kp, pb>>
 
 (***************************************************************************)
 (* Late root acknowledgement (LateAck = "accept", Reliable.on_ack): the    *)
@@ -1267,7 +1283,65 @@ LateAckFrame(k, m) ==
          /\ rfail' = IF ~lostIt THEN Acked(k, Root)
                      ELSE IF Elig = "none" THEN rfail ELSE Fail(k, Root)
          /\ AckOnAir(Root, k, m, lostIt, [cp[m][k] EXCEPT !.late = FALSE])
+    /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, kp, pb>>
+
+(***************************************************************************)
+(* Presence probe of the link to the root (Probe = "presence"; "none":    *)
+(* the code before, every configuration before this option). A root child *)
+(* sends its presence to the root, a frame without class 1 message        *)
+(* (reports.py Reporter._sent); the root acknowledges it (link.py         *)
+(* _receive, an entry of its batch, reliable.py acknowledge with lazy:    *)
+(* sent with its next acknowledgement frame or beacon). The presence is   *)
+(* one sample of the root link: heard by the root, the acknowledgement is *)
+(* on its way ("exp") and comes as a frame of the root heard by the node  *)
+(* (it ends the run of failed samples, Elig "reach") or is lost (a failed *)
+(* sample); lost at the root, or over a dead uplink, the failure comes    *)
+(* at the deadline ("no", ProbeTimeout). What the abstraction keeps of    *)
+(* the timers: the acknowledgement (at the latest with the root's next    *)
+(* beacon, half a period) or the failure comes before the node's next     *)
+(* presence (a period later): one probe at a time. A presence is one      *)
+(* frame of the node among its others (Announce); its probe is weakly     *)
+(* fair, as the presence period. Elig "none": only a failure of CutChild  *)
+(* towards the root after the cut counts, as for Timeout. Each failed     *)
+(* sample on a live link costs one loss (the presence lost at the root,   *)
+(* or the root's acknowledgement lost at the node), so UNREACH = MaxLoss  *)
+(* + 1 still keeps a live root link reachable.                            *)
+(***************************************************************************)
+ProbeCounted(k) == IF Elig = "none" THEN cut /\ k = CutChild /\ CutParent = Root ELSE TRUE
+
+Presence(s) ==
+    /\ Probe = "presence" /\ s # Root /\ alive[s]
+    /\ rank[s] # INF /\ pref[s] = Root /\ pb[s] = "none"
+    /\ HeaderFrameP(s, Keep(s), fresh[s], FALSE, TRUE, TRUE)
+
+\* The root's acknowledgement of k's presence: a frame of the root heard by k, or lost.
+ProbeAnswer(k) ==
+    /\ alive[k] /\ pb[k] = "exp"
+    /\ pb' = [pb EXCEPT ![k] = "none"]
+    /\ \E lostIt \in AckLost(Root, k) :
+         /\ rfail' = IF ~lostIt THEN Acked(k, Root)
+                     ELSE IF ProbeCounted(k) THEN Fail(k, Root) ELSE rfail
+         /\ IF lostIt
+            THEN /\ IF Severed(Root, k) THEN UNCHANGED <<lost, consec>>
+                    ELSE LossOK(Root, {k}, 0) /\ FrameCounters(Root, {k}, {}, 0)
+                 /\ air' = IF TrackAir THEN [air EXCEPT ![Root] = rank[Root]] ELSE air
+                 /\ inc' = [inc EXCEPT ![Root] = FALSE]
+                 /\ UNCHANGED <<routing0, dc, rises, loops, rl, cp>>
+            ELSE LET E == Effect(Root, {k}, FALSE, Keep(Root), fresh[Root], FALSE, FALSE)
+                 IN  /\ CommitH(E.S, E.V, E.VV, E.Dr, E.Fr, E.OW, E.SO, E.SV, Root, {k})
+                     /\ FrameCounters(Root, {}, {k}, 0)
+                     /\ cp' = [m \in Msgs |-> [cp[m] EXCEPT ![k] = Reshape(cp[m][k], E.S[k])]]
     /\ UNCHANGED <<alive, sub, giver, delivered, err, errFrom, rerr, xv, cut, kp>>
+
+\* No acknowledgement on its way: the failed sample at the deadline.
+ProbeTimeout(k) ==
+    /\ alive[k] /\ pb[k] = "no"
+    /\ pb' = [pb EXCEPT ![k] = "none"]
+    /\ rfail' = IF ProbeCounted(k) THEN Fail(k, Root) ELSE rfail
+    /\ UNCHANGED <<routing, lost, consec, msgvars, loops, rl, rerr, xv, cut, kp>>
+
+\* Enabled in disjoint states of pb[k]: weak fairness of the disjunction is that of each.
+ProbeStep(k) == ProbeAnswer(k) \/ ProbeTimeout(k)
 
 (***************************************************************************)
 (* Timeout (Reliable._timeout, reliable.py:534-564): fewer than 3          *)
@@ -1341,7 +1415,7 @@ Timeout(s, m) ==
                        /\ cp' = [mm \in Msgs |-> [cp[mm] EXCEPT ![s] =
                                    IF mm = m THEN (IF p = NONE \/ p = h THEN Held ELSE Queued(p))
                                    ELSE Reshape(cp[mm][s], S[s])]]
-    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, cut>>
+    /\ UNCHANGED <<alive, lost, consec, sub, giver, delivered, err, errFrom, rerr, xv, cut, pb>>
 
 \* A held copy resumes once there is a route (Reliable._resume_held, reliable.py:664-689),
 \* and with Seq "babel" once the node is grounded again.
@@ -1406,9 +1480,11 @@ Init ==
     /\ kp = [n \in Nodes |-> NONE]
     /\ sq = [n \in Nodes |-> 0] /\ sv = [k \in Nodes |-> [c \in Nodes |-> 0]]
     /\ fl = [n \in Nodes |-> FALSE]
+    /\ pb = [n \in Nodes |-> "none"]
 
 Protocol ==
     \/ \E s \in Nodes : Announce(s) \/ HoldEnd(s) \/ BehindEnd(s) \/ WindowClose(s)
+                        \/ Presence(s) \/ ProbeStep(s)
     \/ \E k, c \in Nodes : Expire(k, c)
     \/ \E s \in Nodes, m \in Msgs :
           SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s, m) \/ HoldExpire(s, m)
@@ -1440,6 +1516,8 @@ BNodes == IF Versions > 1 /\ Behind = "detach" THEN Nodes ELSE {}
 WNodes == IF Track THEN Nodes ELSE {}
 \* A late root acknowledgement comes or is lost.
 LNodes == IF LateAck = "accept" THEN Nodes \ {Root} ELSE {}
+\* Presence probes towards the root are sent, and answered or failed.
+PNodes == IF Probe = "presence" THEN Nodes \ {Root} ELSE {}
 
 Fairness ==
     /\ \A s \in Nodes : WF_vars(Announce(s)) /\ WF_vars(HoldEnd(s))
@@ -1450,6 +1528,7 @@ Fairness ==
     /\ \A k \in BNodes : WF_vars(BehindEnd(k))
     /\ \A k \in WNodes : WF_vars(WindowClose(k))
     /\ \A k \in LNodes, m \in Msgs : WF_vars(LateAckFrame(k, m))
+    /\ \A k \in PNodes : WF_vars(Presence(k)) /\ WF_vars(ProbeStep(k))
     /\ (Seq = "babel" /\ MaxSeq >= 2) => WF_vars(NewSeq)
 
 Spec == Init /\ [][Next]_vars

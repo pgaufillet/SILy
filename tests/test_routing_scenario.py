@@ -500,8 +500,10 @@ class FollowParentRank(unittest.TestCase):
         medium.restore(C, B)
         b.engine.sent = lossy
         # C's path cost through B not below D's rank (a frame lost to a
-        # hidden terminal may raise an ETX for a while, §9 failure ageing).
-        for _ in range(60):
+        # hidden terminal may raise an ETX for a while, §9 failure ageing;
+        # B's frames lost at C to A's, hidden from B, lower its d_in until
+        # B's next frames are heard: up to 90 s).
+        for _ in range(90):
             m.run(m.net.now + 1000)
             n = view.get(B)
             cost = None if n is None else c.routing.parents.candidate_cost(n, m.net.now)
@@ -1456,7 +1458,15 @@ class RootlessPart(unittest.TestCase):
             start = m.net.now
             m.net.at(start + 10, submit)
             cut = start + 20 * 1500 // 2
-            m.net.at(cut, m.b(relay).power_loss, OFF)
+            dying = []  # messages the relay holds when switched off (MP5's exception)
+
+            def switch_off(m=m, relay=relay, dying=dying):
+                engine = m.b(relay).engine
+                held = engine.queue.select(lambda x: x.port == APP, True)
+                dying.extend(bytes(x.payload) for _, x in held)
+                m.b(relay).power_loss(OFF)
+
+            m.net.at(cut, switch_off)
             moves = _Moves(m, part, cut)
             m.net.observers.append(moves)
             ranks = dict((n, m.rank(n)) for n in part)
@@ -1479,6 +1489,10 @@ class RootlessPart(unittest.TestCase):
             for p in payloads:
                 if p in delivered:
                     self.assertTrue(delivered[p] < cut + 4 * P, (seed, p, delivered[p]))
+                    continue
+                if p in dying:
+                    # Acknowledged by the relay, lost with it (§12: class 2
+                    # recovers it).
                     continue
                 self.assertTrue(p in fails, (seed, p, "neither delivered nor failed"))
                 last = max(t for t, _ in fails[p])
