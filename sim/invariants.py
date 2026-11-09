@@ -505,16 +505,18 @@ class Attachment(Check):
 class VersionWave(Check):
     """MP10 (global repair): connected nodes adopt a new version within the bound.
 
-    §9 (repair times, global repair wave): a hop whose exchange loses n
-    frames takes at most (2^(n+1) - 1) Imin, without detach. Bound per hop,
-    tolerating two lost frames: 7 Imin + 8 slots (an advertisement's access,
-    as in the answer window); per node: that times its depth (hops of its
-    chain of preferred parents when the version is issued, else its hop
-    count over usable links). ``slowest``: the longest adoption time.
+    §9 (repair times, global repair wave): a hop whose exchange has f
+    failed rounds (a frame of the round lost, or every advertisement or
+    answer of the newer neighbours suppressed by Trickle) takes at most
+    (2^(f+1) - 1) Imin, without detach. Bound per hop, tolerating two
+    failed rounds: 7 Imin + 8 slots (an advertisement's access, as in the
+    answer window); per node: that times its depth (hops of its chain of
+    preferred parents when the version is issued, else its hop count over
+    usable links). ``slowest``: the longest adoption time.
     """
 
     name = "MP10"
-    LOSSES = 2  # lost frames tolerated per hop
+    LOSSES = 2  # failed rounds tolerated per hop
 
     def bind(self, checker):
         super().bind(checker)

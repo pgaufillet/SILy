@@ -1008,8 +1008,9 @@ acknowledgement window and the time of its newest failure.
   cut off from the root detaches within 2.5 presence periods; frames of rank 255
   do not propagate their version, and a detached node adopts any other version
   it hears after its solicitation. Connected nodes follow a new version within
-  8 Imin (table below) when no frame of the exchange is lost, a few Imin more
-  per lost frame (global repair wave, below), far less than 4 presence
+  8 Imin (table below) when no round of the exchange fails, a few Imin more
+  per failed round (a frame lost, or the answers suppressed: global repair
+  wave, below), far less than 4 presence
   periods. A node behind solicits at least once per presence period
   and adopts at the first answer heard: lagging by two versions would take
   every answer lost for 4 presence periods while its parent stays heard,
@@ -1204,11 +1205,19 @@ frame of the exchange lost on any hop, see below.)
   ([Imin/2, Imin) of both resets) and collide with it at the child (parent
   and grandchild are hidden terminals): about 2 × ToA(24 B) / (Imin/2) ≈ 15 %
   per hop whose node has children, at every SF (Imin is in slots). The
-  child, behind, solicits with backoff: each frame of the exchange lost
-  (the parent's advertisement at the child, the child's solicitation at the
-  parent) costs at most the next backoff gap (Imin, then doubling), so that
-  a hop with n losses takes at most **(2^(n+1) − 1) Imin** (Imin + access
-  without loss), without detach. Measured on the SF7 line root — A — B — C
+  child, behind, solicits with backoff. A round of the exchange (the
+  parent's advertisement after adopting, then each solicitation of the
+  child and its answers) **fails** when a frame of it is lost (the
+  parent's advertisement or an answer at the child, the child's
+  solicitation at the parent), or when every newer neighbour that would
+  advertise or answer suppressed it (Trickle: each heard 2 advertisements
+  of the new version from neighbours hidden from the child; a solicitation
+  arriving while its first decision is pending restarts nothing). Each
+  failed round costs at most the next backoff gap (Imin, then doubling),
+  so that a hop with f failed rounds takes at most **(2^(f+1) − 1) Imin**
+  and the channel access (Imin and the access when none fails), without
+  detach. Suppression can fail several rounds in a row with no frame
+  lost: the bound counts failed rounds, not lost frames. Measured on the SF7 line root — A — B — C
   — D (host scenario, 400 seeds): advertisement lost at the child in 14.5 %
   of the hops whose node has a child (B, C), 0.5 % of the others; per hop
   median 0.8 Imin, 1.5 to 5.8 Imin after such a loss; wave of 4 hops median
@@ -1226,13 +1235,25 @@ frame of the exchange lost on any hop, see below.)
   below 4 presence periods. With newer neighbours only answering, the
   collision disappears but the 90th percentile of the wave gains 0.1 to
   1.9 Imin and the median nothing: not adopted, the collision is
-  accepted. Slow hops come mostly from Trickle suppression (a parent that
-  heard 2 advertisements of the new version from its own neighbours sends
-  none, while the node behind is hidden from them; the hop then exceeds
-  (2^(n+1) − 1) Imin with no frame lost) and, in these measurements, from
-  detaches at adoption, which the adoption condition (DODAG version above)
-  has since removed: a node that would have detached now waits behind for
-  its parent's advertisement.
+  accepted. Slow hops come mostly from Trickle suppression (rounds failed
+  with no frame lost: a parent that heard 2 advertisements of the new
+  version from its own neighbours sends none, while the node behind is
+  hidden from them) and, in these measurements, from detaches at
+  adoption, which the adoption condition (DODAG version above) has since
+  removed: a node that would have detached now waits behind for its
+  parent's advertisement. Re-measured with that condition (100 seeds
+  each): wave median 4.0 Imin on `geometric`, 7.7 on `grid`, 90th
+  percentile 6.4 and 9.7, maximum 15.1 and 12.4 Imin (17.5 before on
+  `grid`). The advertisement after adopting a version,
+  never suppressed, was tried and not adopted: on `geometric` it brought
+  the wave's 90th percentile from 5.7 to 4.7 Imin and its maximum from
+  15.1 to 7.7 Imin (50 seeds), nothing on `grid`; but every node adopting
+  from one advertisement then sends one within Imin / 2 (29 in the 30-node
+  star, twice what the channel carries then), the wave gained nothing in
+  the stars, and in the hidden-root star (48 runs) the relay lost its
+  root link after the overload in 3 runs, never without the change (the
+  root's beacons and acknowledgements colliding at the relay with the
+  leaves' frames), cause not traced.
 
 Findings:
 
