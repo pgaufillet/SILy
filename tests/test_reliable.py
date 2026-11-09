@@ -1012,7 +1012,9 @@ class Rules(unittest.TestCase):
 
     def test_never_an_error_about_an_error(self):
         # R forwards N's message to a root that never answers: R's error
-        # fails in turn and is only counted.
+        # goes to N, a neighbour, directly; N never answers either: kept
+        # while N is heard, for at most the holding, it goes to the root
+        # instead, fails in turn and is only counted.
         n = _engine(N, R)
         r = _engine(R, ROOT, seed=2)
         failures = []
@@ -1020,12 +1022,42 @@ class Rules(unittest.TestCase):
         n.submit(20, 1, ROOT, b"x")
         (f,), now = _run(n, 0)
         _rx(r, now, f)
-        frames, now = _run(r, now, now + 60000)
-        ports_sent = [[m.port for m in _messages(_KEY, g)[1]] for g in frames]
-        self.assertEqual(ports_sent, [[20]] * ATTEMPTS + [[ports.ERROR]] * ATTEMPTS)
+        frames, now = _run(r, now, now + 200000)
+        sent = []
+        for g in frames:
+            h, msgs = _messages(_KEY, g)
+            sent.append((h.dest, [(m.mode, m.port) for m in msgs]))
+        data = (ROOT, [(UPWARD, 20)])
+        direct = (N, [(LINK_LOCAL, ports.ERROR)])
+        upward = (ROOT, [(FIRST_HOP, ports.ERROR)])
+        k = sent.count(direct)
+        self.assertEqual(sent, [data] * ATTEMPTS + [direct] * k + [upward] * ATTEMPTS)
+        self.assertTrue(k > ATTEMPTS and k % ATTEMPTS == 0, k)
         c = r.counters
-        self.assertEqual((c.unreachable, c.errors_sent, c.errors_dropped), (2, 1, 1))
+        self.assertEqual((c.errors_sent, c.errors_direct, c.errors_dropped), (1, 1, 1))
         self.assertEqual((failures, len(r.queue)), ([], 0))
+
+    def test_error_takes_the_entry_of_the_failed_message_whatever_the_quota(self):
+        # A relay without route holds 30 forwarded messages and 16 of its
+        # own (its quota, the queue more than half full): when the forwarded
+        # ones fail, each error takes the entry its message leaves instead of
+        # being refused by the quota (a silent loss, MP5).
+        e = _engine(R, lambda msg: None)
+        rel = e.reliable
+        period = e.neighbours.period_ms
+        for i in range(30):
+            msg = Message(UPWARD, 1, 20, b"f", origin=0x0100 + i, seq=i)
+            e.queue.offer(msg, BROADCAST)
+            rel.hold(e.queue.slot, msg, 0)
+        for _ in range(16):
+            e.submit(20, 1, ROOT, b"own")
+        _run(e, period, period)  # own ones held from here: they fail later
+        self.assertEqual((len(e.queue), e.queue.holding(-1)), (46, 16))
+        _run(e, period, 2 * period + rel.poll_ms)
+        errors = e.queue.select(lambda m: m.port == ports.ERROR, True)
+        self.assertEqual(len(errors), 30)
+        c = e.counters
+        self.assertEqual((c.errors_sent, c.errors_dropped, len(e.queue)), (30, 0, 46))
 
     def test_route_changed_resumes_held_messages_at_once(self):
         route = {"hop": None}
@@ -1125,7 +1157,7 @@ class Ungrounded(unittest.TestCase):
             failed.append((now, msg.port, reason)),
             fail(slot, msg, reason, hop, now),
         )
-        n.submit(20, 1, ROOT, b"x")
+        seq = n.submit(20, 1, ROOT, b"x")
         (f,), now = _run(n, period)  # arrives one period after the loss
         actions = _rx(r, now, f)
         frames, now = _run(r, now, now + 2 * r.slot_ms, actions)
@@ -1134,13 +1166,46 @@ class Ungrounded(unittest.TestCase):
         self.assertEqual(rr.held(), 1)
         _rx(n, now, frames[0])
         self.assertEqual(len(n.queue), 0)
-        _, now = _run(r, now, lost + 4 * period)
-        # Failed at the loss of grounding + 2 periods; its error, an own
-        # message, is held 2 periods from its own hold, then dropped (no
-        # path: never an error about an error).
-        self.assertEqual(failed[0], (lost + 2 * period, 20, 3))
-        self.assertEqual(failed[1], (lost + 4 * period, ports.ERROR, 3))
-        self.assertEqual((r.counters.errors_sent, r.counters.errors_dropped), (1, 1))
+        failures = []
+        n.on_failure(lambda *f: failures.append(f))
+        frames, now = _run(r, now, lost + 2 * period + 2 * r.slot_ms)
+        # Failed at the loss of grounding + 2 periods; its error goes to N,
+        # a neighbour, directly (link-local: not held although R is
+        # ungrounded), and N reports the failure.
+        self.assertEqual(failed, [(lost + 2 * period, 20, 3)])
+        (g,) = frames
+        h, msgs = _messages(_KEY, g)
+        self.assertEqual(
+            (h.dest, [(m.mode, m.port) for m in msgs]), (N, [(LINK_LOCAL, ports.ERROR)])
+        )
+        _rx(n, now, g)
+        self.assertEqual(failures, [(ROOT, 20, seq, 3)])
+        self.assertEqual((r.counters.errors_sent, r.counters.errors_direct), (1, 1))
+
+    def test_error_about_a_farther_origin_held_from_its_own_hold(self):
+        # The message comes from N through X: N is no neighbour of R, so the
+        # error goes upward; R being ungrounded, it is held 2 periods from
+        # its own hold, then dropped (no path: never an error about an error).
+        x, _ = self._node(X, R)
+        r, _ = self._node(R, ROOT, seed=2)
+        rr = r.reliable
+        period = r.neighbours.period_ms
+        lost = 100
+        rr.grounding(False, lost, lost)
+        failed = []
+        fail = rr.fail
+        rr.fail = lambda slot, msg, reason, hop, now: (
+            failed.append((now, msg.port, msg.mode, reason)),
+            fail(slot, msg, reason, hop, now),
+        )
+        x.send(Message(UPWARD, 1, 20, b"x", origin=N, seq=5), R)
+        (f,), now = _run(x, period)
+        actions = _rx(r, now, f)
+        _, now = _run(r, now, lost + 4 * period, actions)
+        self.assertEqual(failed[0], (lost + 2 * period, 20, UPWARD, 3))
+        self.assertEqual(failed[1], (lost + 4 * period, ports.ERROR, FIRST_HOP, 3))
+        c = r.counters
+        self.assertEqual((c.errors_sent, c.errors_direct, c.errors_dropped), (1, 0, 1))
 
     def test_own_message_held_two_periods_from_its_hold(self):
         e, _ = self._node(N, R)

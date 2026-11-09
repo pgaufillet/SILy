@@ -105,7 +105,16 @@ hold at every holder. Grounding again resumes the held messages
 (``engine.failed``: destination, port, sequence, reason); for a forwarded
 one an error (port 4, class 1) goes to the root, which forwards it to the
 message's origin (the root sends it directly); an error about an error is
-never generated, only counted (``errors_dropped``).
+never generated, only counted (``errors_dropped``). **Direct error** (§12):
+when the origin is a neighbour heard within the silence limit, the error
+goes to it link-local instead (``errors_direct``), whatever the route or
+the grounding (a link-local message is never held); once its attempts are
+exhausted it gets fresh ones, after a retry delay, while the origin is
+heard, for at most the holding from the first exhaustion (``_since``),
+then goes upward as any error (the same error, not a new one). The root
+sends its errors to a neighbour origin the same way. An error takes the
+entry of the message it reports, whatever the node's quota
+(`mesh.txqueue`).
 
 **Receiver** (`mesh.link.LinkEngine._receive`): every class 1/2 message
 received is looked up in the duplicate cache (`DUPLICATES` = 128 entries,
@@ -156,6 +165,7 @@ consecutive frames timed out.
 
 from mesh import frame
 from mesh.frame import BROADCAST, DOWNWARD, FIRST_HOP, LINK_LOCAL, P2P, ROOT, UPWARD, Message
+from mesh.neighbours import silence_ms
 from mesh.platform import randbelow
 from mesh.ports import ACK, ERROR
 from mesh.txqueue import accepted
@@ -364,7 +374,7 @@ class Reliable:
         self.root_timeout_ms = self.batch_ms + ack_frame + TIMEOUT_SLOTS * slot
         self.poll_ms = POLL_SLOTS * slot
         self.retry_ms = RETRY_SLOTS * slot  # base range of the retry delay (`retry_window_ms`)
-        n = self.queue.size
+        n = self.queue.entries
         self._msg = [None] * n  # message tracked in each queue slot
         self._state = bytearray(n)
         self._hop = [0] * n  # next hop of the last transmission
@@ -423,7 +433,7 @@ class Reliable:
 
     def _count(self, state):
         n = 0
-        for slot in range(self.queue.size):
+        for slot in range(self.queue.entries):
             if self._state[slot] == state and self.queue.holds(slot, self._msg[slot]):
                 n += 1
         return n
@@ -577,12 +587,12 @@ class Reliable:
                 # acknowledgement, §12).
                 self._late(c16)
                 rn = self._rn
-                for slot in range(queue.size):
+                for slot in range(queue.entries):
                     if rn[slot] and self._sent_to_root(slot, c16):
                         if queue.holds(slot, self._msg[slot]):
                             self._acknowledged(slot, False, c16)
                 continue
-            for slot in range(queue.size):
+            for slot in range(queue.entries):
                 if (
                     self._state[slot] == _PENDING
                     and self._ctr[slot] == c16
@@ -597,7 +607,7 @@ class Reliable:
         state = self._state
         sampled = self._sampled
         out = []
-        for i in range(self.queue.size):
+        for i in range(self.queue.entries):
             if i != slot and state[i] == _PENDING and not sampled[i]:
                 if self._hop[i] == hop and self._ctr[i] == ctr:
                     out.append(i)
@@ -677,6 +687,18 @@ class Reliable:
     def _exhausted(self, slot, msg, hop, now):
         # ATTEMPTS transmissions to hop unacknowledged: next hop after failure.
         queue = self.queue
+        if msg.mode == LINK_LOCAL and msg.port == ERROR:
+            # A direct error: fresh attempts while its origin is heard, for
+            # at most the holding from the first exhaustion (`_since`);
+            # then failed, which sends it upward (`fail`).
+            if self._since[slot] is None:
+                self._since[slot] = now
+            if self._near(hop, now) and now < self._since[slot] + self.hold_ms():
+                self._retry(slot, msg, True, now)
+                return
+            self.counters.unreachable += 1
+            self.fail(slot, msg, UNREACHABLE, hop, now)
+            return
         reroute = self.engine.reroute
         alt = reroute(msg, hop) if reroute is not None else None
         if alt == HOLD:
@@ -852,7 +874,7 @@ class Reliable:
     def _resume_held(self, now):
         engine = self.engine
         self._poll = None
-        for slot in range(self.queue.size):
+        for slot in range(self.queue.entries):
             if self._state[slot] != _HELD:
                 continue
             msg = self._msg[slot]
@@ -883,13 +905,22 @@ class Reliable:
         error (port 4) to the root, or from the root to the origin. Reading:
         §12 makes errors go "to the root"; a relay without route therefore
         holds its error like any class 1 message, so the origin learns of a
-        failure only if a path to the root returns within that holding.
+        failure only if a path to the root returns within that holding. The
+        error takes the entry the message leaves: admitted whatever the
+        node's quota (`mesh.txqueue`), it occupies no more room than the
+        message did (refused, it would be a silent loss, MP5).
         """
         engine = self.engine
         self.queue.remove(slot, msg)
         self._clear(slot)
         origin, dest, port, seq = identity(msg, engine.address, hop)
         if port == ERROR:
+            if msg.mode == LINK_LOCAL:
+                # A direct error its origin did not acknowledge: to the root
+                # instead, as any error (the same error, not a new one).
+                payload = bytes(msg.payload)
+                self._send_error(payload, decode_error(payload)[2], now, True, False)
+                return
             self.counters.errors_dropped += 1  # never an error about an error
             return
         if origin == engine.address:
@@ -897,25 +928,45 @@ class Reliable:
             return
         payload = encode_error(reason, hop, origin, dest, port, seq)
         self.counters.errors_sent += 1
-        self._send_error(payload, origin, now)
+        self._send_error(payload, origin, now, True)
 
-    def _send_error(self, payload, origin, now):
+    def _send_error(self, payload, origin, now, exempt=False, direct=True):
+        # To origin itself when it is a neighbour (direct), else upward (or
+        # from the root, downward). exempt: as `send_own`.
         engine = self.engine
         seq = engine.next_seq()
+        if direct and self._near(origin, now):
+            msg = Message(LINK_LOCAL, 1, ERROR, payload, seq=seq)
+            if accepted(engine.send(msg, origin, exempt=exempt)):
+                self.counters.errors_direct += 1
+            else:
+                self.counters.errors_dropped += 1
+            return
         if engine.is_root:
             msg = Message(DOWNWARD, 1, ERROR, payload, dest=origin, seq=seq)
         else:
             msg = Message(FIRST_HOP, 1, ERROR, payload, seq=seq)
-        self.send_own(msg, now)
+        self.send_own(msg, now, exempt)
 
-    def send_own(self, msg, now):
+    def _near(self, address, now):
+        # address is a neighbour heard within the silence limit (§9).
+        if address == self.engine.address:
+            return False
+        n = self.engine.neighbours.get(address)
+        if n is None or n.heard is None:
+            return False
+        return now - n.heard < silence_ms(self.engine.neighbours.period_ms)
+
+    def send_own(self, msg, now, exempt=False):
         """Queue an own class 1 message towards next_hop(msg), held without route.
 
         Returns True if queued (or held), False if the queue refused it.
+        exempt: beyond the node's quota (`mesh.txqueue`; an error taking
+        the entry of the message it reports).
         """
         engine = self.engine
         hop = engine.next_hop(msg) if engine.next_hop is not None else None
-        outcome = engine.send(msg, BROADCAST if hop is None else hop)
+        outcome = engine.send(msg, BROADCAST if hop is None else hop, exempt=exempt)
         if not accepted(outcome):
             self.counters.errors_dropped += 1
             return False
@@ -1000,7 +1051,7 @@ class Reliable:
     def cancel_owed(self, source, counter):
         """Forget the acknowledgements owed for the frame (source, counter)."""
         c16 = counter & 0xFFFF
-        for slot in range(self.queue.size):
+        for slot in range(self.queue.entries):
             if self._odue[slot] is not None and self._osrc[slot] == source:
                 if self._octr[slot] == c16:
                     self._odue[slot] = None
@@ -1036,7 +1087,7 @@ class Reliable:
             if end is not None:
                 self._at(end + wait)
         queue = self.queue
-        for slot in range(queue.size):
+        for slot in range(queue.entries):
             msg = self._msg[slot]
             if msg is None:
                 continue

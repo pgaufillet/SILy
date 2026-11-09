@@ -155,7 +155,7 @@ measurement recorded).
 | MP2 | Application-agnostic: opaque payloads multiplexed by an 8-bit port; the mesh never interprets payloads; applications act on the mesh only through documented parameters | designed | layering (§1); relays never read application payloads (§11) |
 | MP3 | Transparent to applications: they address nodes (or the root implicitly), never routes; topology changes appear only as delay or explicit failure | designed | §12: applications address nodes or the root; topology changes show as delay or explicit failure |
 | MP4 | Service classes chosen per message: **class 0** datagram (at most once, optional replace-by-newer); **class 1** hop-by-hop reliable (passive ack by overhearing the next hop, piggybacked ack on the last hop, 3 attempts, held during route repair); **class 2** end-to-end reliable (exactly once, unordered; NACK on sequence gaps, tail announcement, lazy cumulative ack, sender buffer) — SILy's punch recovery made generic | designed | §12: class 0 (replace by newer), class 1 (passive and explicit acknowledgements, 3 attempts, holding), class 2 (class 1 per hop + NACK, tail, lazy cumulative acknowledgement, send window) |
-| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay cut off from the root when its origin is cut off too (no link, no failure can travel; class 2 recovers it) |
+| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay cut off from the root when its origin is cut off too and is not its neighbour (no link, no failure can travel; class 2 recovers it) |
 | MP6 | Explicit limits: maximum payload announced (≈ 200 B), no fragmentation in v1 | designed | §11: 200 B announced |
 | MP7 | Priorities chosen by the application, mapped to duty-cycle allowances; fairness between forwarded and local traffic | designed | §6: priority implicit in the port (application ports 16–127 high, 128–255 low), allowances per priority; §7: round robin by origin within a priority, per-origin queue quota with back-pressure |
 | MP8 | Compact headers: fields implicit when deducible from context (root address upward, root origin downward), SCHC-style | designed | §11: implicit root, first-hop compression, implicit last length, bundles |
@@ -442,6 +442,10 @@ gets its share, not its relays' capacity.
   fills and refuses submissions, MP5); a forwarded class 0 message is
   dropped; a local submission is refused. A node flooding the network gets
   its share, not its relays' capacity. Refusals are counted per origin (§13).
+  Outside the quota, the node's own control messages, which are no
+  origin's traffic: its acknowledgements (port 3) and DODAG information
+  (port 9), and an error that takes the entry of the message it reports
+  (§12 queues and resources).
 - **Strict priority between levels**: under sustained priority-1 load,
   priority-3 messages wait. Periodic reports replace older ones in the queue
   (class 0, replace by newer, §12), so waiting costs no memory.
@@ -601,9 +605,9 @@ acknowledgement window and the time of its newest failure.
   ends the run with the failures it removes (the link then gets 4 more
   before it is left), the time of the last acknowledgement stays: a node
   that stops sending to the neighbour (it left it) sees it eligible again
-  a silence limit after its last failure, as with ETX. Taking a relay as
-  the preferred parent restarts its reachability, as at the entry's
-  creation (below).
+  a silence limit after its last failure, as with ETX. Taking a relay, or
+  the root, as the preferred parent restarts its reachability, as at the
+  entry's creation (below).
   - **The root and the last candidate**: the link to the root, and the
     preferred parent's while no other neighbour is a candidate (drops
     included; the other candidates do not depend on the preferred parent,
@@ -633,16 +637,24 @@ acknowledgement window and the time of its newest failure.
     detach only when there is none, which is where reachability replaces
     it.
   - **Restart at a parent change**: a relay taken as the preferred parent
-    (by ETX ≤ 4, or as the first one) gets 4 failed samples and a silence
-    limit of probes before it is judged unreachable, its run and the time
-    of its last acknowledgement restarted. Otherwise a link back after a
-    cut, or a last candidate left unreachable while its ETX was still ≤ 4
-    (a dead uplink is left before its ETX passes 4), would be taken at the
-    rejoin and left at the next selection, before its first probe (the
-    presence sent at once after the change) is acknowledged. Over a dead
-    uplink the node still leaves and takes the relay again, once per
-    silence limit and rejoin, until its ETX passes 4 or the relay is no
-    longer heard; before, a drop after 3 attempts did so at every message.
+    (by ETX ≤ 4, or as the first one), and the root taken again, get 4
+    failed samples and a silence limit of probes before they are judged
+    unreachable, their run and the time of their last acknowledgement
+    restarted. Otherwise a link back after a cut, or a last candidate left
+    unreachable while its ETX was still ≤ 4 (a dead uplink is left before
+    its ETX passes 4), would be taken at the rejoin and left at the next
+    selection, before its first probe (the presence sent at once after the
+    change) is acknowledged; and the root, taken again once the failures
+    that made it unreachable aged out, would be left after its next 4
+    failed samples, its last acknowledgement older than a silence limit:
+    under hidden terminals (the overloaded 30-node star, after the burst),
+    a root child rejoining while the root's acknowledgements still
+    collide at it left the root again within about 40 s, before any
+    acknowledgement could come through, its subtree's held messages and
+    errors expiring meanwhile. Over a dead uplink the node still leaves
+    and takes the relay, or the root, again, once per silence limit and
+    rejoin, until the relay's ETX passes 4 or the parent is no longer
+    heard; before, a drop after 3 attempts did so at every message.
 - **Asymmetric links** (MP12): locally, a parent heard well (high `d_in`) but
   forwarding poorly (low `p_ack`) loses preference through its ETX (as the
   node's last candidate it is kept while reachable: no better link is
@@ -1394,7 +1406,7 @@ Addressing modes:
 | 1 | presence | upward (mode 6 on the first hop, 1 when forwarded), 0 | preferred parent 2 B (mode 1 only; in mode 6 it is the link destination); root sequence 1 B (mode 6 only: the sequence the sender holds, §9; dropped when forwarded); flags 1 B (bit 0 first report since boot, bit 1 queue overflow since last report, bit 2 duty-cycle use above 80 % since last report (seen at every transmission, kept until a presence goes on air: presence itself is refused above 80 %), bit 3 class 2 tails follow, bit 4 rank errors since last report (§9), bit 5 address conflict, bit 6 authentication failures since last report (§13), bit 7 next key loaded (§14)); if bit 3: tail count 1 B, then per idle flow not yet acknowledged: port 1 B, oldest unacknowledged sequence 2 B, last sequence 2 B (§12); application extension: the remaining bytes, opaque (length set by configuration; SILy: battery and mode, 1 B) |
 | 2 | topology | upward (6 / 1), 0 | count 1 B; per neighbour: address 2 B, margin 1 B (signed dB, saturated, §5), quality 1 B (bit 7 parent-set member, bits 6–0 delivery ratio 0–100 %); parent set first, then best other links; 6 entries by default |
 | 3 | acknowledgement | link-local, 0 | per acknowledged frame: link source 2 B, frame counter low 16 bits 2 B |
-| 4 | error | upward (6 / 1), 1 | reason 1 B (1 next hop unreachable, 2 next hop not a neighbour, 3 no route, 4 queue full, 5 duty-cycle budget, 6 route beyond 8 hops); next hop 2 B; failed message: origin 2 B, destination 2 B, port 1 B, sequence 2 B (§10, §12; the root forwards it to the origin) |
+| 4 | error | upward (6 / 1), or link-local (0) to its origin when a neighbour (§12), 1 | reason 1 B (1 next hop unreachable, 2 next hop not a neighbour, 3 no route, 4 queue full, 5 duty-cycle budget, 6 route beyond 8 hops); next hop 2 B; failed message: origin 2 B, destination 2 B, port 1 B, sequence 2 B (§10, §12; the root forwards it to the origin) |
 | 5 | node information | upward (6 / 1), 0 | full MAC 6 B, protocol version 1 B, firmware version 2 B, name (remaining bytes, UTF-8, ≤ 16 B) |
 | 6 | echo | any, 0 | kind 1 B (0 request, 1 response); identifier 2 B; hop count out 1 B; hop count back 1 B; padding (optional) (§13) |
 | 7 | traceroute | any, 0 | kind 1 B (0 request, 1 response, bit 7 truncated); identifier 2 B; then per hop, out and back: address 2 B, margin of the received frame 1 B (signed dB), link cost 1 B (8 × ETX); 16 entries at most (§13) |
@@ -1560,7 +1572,9 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   that node took it, and its acknowledgement may still arrive. Cost: after
   a lost acknowledgement, the retransmission reaching a relay that has
   already forwarded the message travels the rest of the path once more;
-  the destination filters it.
+  the destination filters it. A copy so taken again that its holder fails
+  (end of a holding) after another copy was delivered gives its origin a
+  false failure (never a silent loss).
 - **Upward failure**: after 3 attempts a relay parent is dropped (§9) and
   the message goes to the next parent with fresh attempts. **The root is
   kept** while it is a candidate apart from the drop (heard within the
@@ -1633,17 +1647,39 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   G per further frame lost.
 - **Errors are class 1** (port 4, upward). The root forwards an error about an
   upward or P2P message to its origin. An error about an error is never
-  generated, only counted. Class 1 thus delivers the message, or its origin
-  gets an explicit failure (MP5), **except** when a relay that already
-  acknowledged the message reboots before forwarding it: the message is
-  then lost silently (accepted: custody records in RTC memory would cost
-  writes per message and still not survive a power loss); and when a relay cut off from the root fails a
-  held message (end of holding) while its origin is cut off too: the error
-  cannot reach the origin, held in turn then dropped (TLA+
-  `DODAG_line_partition_MP5Live`). Accepted: with no link
-  at all nobody can communicate, not even a failure. Applications that
-  cannot accept these risks use class 2, whose end-to-end recovery covers
-  them.
+  generated, only counted.
+- **Direct error**: when the origin of the failed message is a neighbour
+  (heard within the silence limit), the error goes to it directly,
+  link-local (mode 0, link destination the origin), whatever the node's
+  route or grounding: one hop, no path to the root needed. Its attempts
+  follow the class 1 rules; once they are exhausted it gets fresh
+  attempts, after a retry delay, while the origin is still heard, for at
+  most the holding (2 presence periods) from the first exhaustion; then
+  it goes upward as any error (the same error, once). The root sends its
+  errors (forwarded, or about its own messages) to a neighbour origin
+  the same way. Without it, an error had to reach the root first: a
+  relay cut off from the root by an overload (its uplink's
+  acknowledgements drowned by hidden terminals, the 30-node star with a
+  single relay after its burst) looks, from where it stands, like a relay
+  over a dead uplink; it failed its held messages after the holding and
+  its errors expired in turn before the relay could rejoin (the
+  reachability of the link it left comes back a silence limit after its
+  last failure, longer than the holding): silent losses, although the
+  origins were one hop away. Cost: an error to a neighbour origin is a
+  frame of its own (one link destination per frame), where upward errors
+  share the frames to the parent; it is one hop instead of the path to
+  the root and back.
+- Class 1 thus delivers the message, or its origin gets an explicit
+  failure (MP5), **except** when a relay that already acknowledged the
+  message reboots before forwarding it: the message is then lost silently
+  (accepted: custody records in RTC memory would cost writes per message
+  and still not survive a power loss); and when a relay cut off from the
+  root fails a held message (end of holding) while its origin is cut off
+  too and is not its neighbour (or does not answer its direct error): the
+  error cannot reach the origin, held in turn then dropped (TLA+
+  `DODAG_line_partition_MP5Live`). Accepted: with no link at all nobody
+  can communicate, not even a failure. Applications that cannot accept
+  these risks use class 2, whose end-to-end recovery covers them.
 - A frame holding a refused message is not acknowledged at all (one entry
   per frame): its other, delivered messages may then be retried (duplicates,
   filtered) or reported failed although delivered (a false failure, never a
@@ -1730,7 +1766,7 @@ Recovery times (worst depth 8, a hop costing at most one class 1 timeout):
 
 | Resource | Size (default) | When exceeded |
 |---|---|---|
-| transmit queue | 64 messages; above 32, 16 per origin (§7) | origin over its quota refused as below; local submission refused; forwarded class 0 dropped (lowest priority, oldest first); forwarded class 1/2 not accepted (no acknowledgement, the sender retries or switches parent); presence flag *queue overflow* |
+| transmit queue | 64 messages; above 32, 16 per origin (§7); plus 2 entries for the node's own DODAG information | origin over its quota refused as below; local submission refused; forwarded class 0 dropped (lowest priority, oldest first); forwarded class 1/2 not accepted (no acknowledgement, the sender retries or switches parent); presence flag *queue overflow* |
 | neighbour table | 64 entries | stalest entry that is not a parent evicted (§9) |
 | duplicate cache | 128 entries | oldest evicted; a late duplicate may then be forwarded, and the class 2 receiver drops it |
 | class 2 send window | 64 messages per flow, 8 flows per node | submission refused |
@@ -1743,6 +1779,30 @@ entry (counted in the size and the quota) only until the next hop
 acknowledges it. Only an arriving forwarded class 0 message evicts, and only
 a queued class 0 message of the same or lower priority, oldest first; local
 and class 1/2 arrivals are refused, never evict.
+
+Three admissions keep the control plane and MP5 working when the queue is
+full of held messages (a detached or ungrounded relay, §12 holding):
+
+- **DODAG information reserve**: the node's own DODAG information
+  (port 9: one advertisement, one solicitation queued at most) takes 2
+  entries beyond the 64 and is never refused for room nor by the quota.
+  Otherwise a detached relay whose queue is full of held messages, or
+  holds its own errors beyond its quota, cannot queue its poison nor its
+  solicitation: it stays detached until the holding of those messages
+  expires, then of their errors (the TLA+ `DODAG` model assumes a queue
+  that never refuses). In the overloaded 30-node star the relay stayed
+  detached 2 to 4 presence periods this way, and its subtree's holdings
+  expired meanwhile.
+- **Acknowledgements outside the quota**: the node's own acknowledgements
+  (port 3) are not refused by the quota (still by a full queue: their
+  number is not bounded). The root holding errors it cannot route yet
+  (§10) beyond its quota otherwise refused its acknowledgements to its
+  child, which then left it as unreachable.
+- **An error takes the entry of its message**: the error a relay queues
+  for a message it fails (§12 class 1) is admitted whatever its own
+  quota: it occupies no more room than the message did. Refused, it was a
+  silent loss (MP5): a relay failing its 64 held messages at the end of a
+  holding could queue only 16 errors.
 
 With these sizes, a node's mesh state is a few tens of KB of MicroPython
 heap (out of 2 MB of PSRAM on the T3S3). Measured on the bench: 31 KB for a

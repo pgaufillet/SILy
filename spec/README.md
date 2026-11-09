@@ -499,10 +499,18 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   when the forward is addressed to the waiting node itself — as the code —
   or explicitly), held, or none. One copy per node and message: a duplicate
   taken again replaces a copy still waiting (the code keeps both; the
-  waiting one only adds a retry). Unbounded queues. **Errors** are abstracted: "sent" by a
+  waiting one only adds a retry). Unbounded queues (the code keeps a
+  reserve of entries for a node's DODAG information, so that a queue full
+  of held messages refuses neither its poison nor its solicitation, and
+  admits an error in the entry of the message it reports whatever the
+  quota: MESH_DESIGN §12 queues and resources). **Errors** are abstracted: "sent" by a
   relay whose holding expires, received when the failing relay and the
   origin are both connected to the root (or at once when the origin itself
-  fails); the error's own custody is not modelled.
+  fails); the error's own custody is not modelled. The code also sends an
+  error straight to an origin that is a neighbour of the failing node
+  (link-local, MESH_DESIGN §12 direct error), then upward if the origin
+  does not answer: one more way for it to arrive, outside the model, which
+  only makes MP5 easier for the code than for the model.
 - **Root sequence** (`Seq`, `MaxSeq`): the root increments a sequence at
   each beacon (`NewSeq`, `MaxSeq` times, no wrap-around: the code compares
   in serial arithmetic and forgets a sequence that has not advanced for 50
@@ -1071,9 +1079,11 @@ How each fix is implemented, what it costs, and the limits accepted.
   reachability alone, without ETX ≤ 4, while it is the last candidate
   (the other candidates first, by the ordinary rule), its link cost
   capped at 32 (`Neighbour.link_etx`). Taking a relay as the preferred
-  parent restarts its reachability (`NeighbourTable.restart_reach`, run
-  and acknowledgement time as at the entry's creation), outside the model
-  (no time there): a link back after a cut, or left unreachable at
+  parent, or the root again, restarts its reachability
+  (`NeighbourTable.restart_reach`, run and acknowledgement time as at the
+  entry's creation), outside the model (no time there; it only postpones
+  the silence limit without acknowledgement, which makes the code's rule
+  stricter than the model's run, as above): a link back after a cut, or left unreachable at
   ETX ≤ 4, would otherwise be taken by the ETX rule at the rejoin and
   left at the next selection, before its first probe is acknowledged
   (`make seeds`: `AdoptionDuringTheHold` on 4 of 24 shifts; requiring

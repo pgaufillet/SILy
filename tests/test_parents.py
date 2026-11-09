@@ -737,6 +737,33 @@ class KeepRoot(unittest.TestCase):
         p.recompute(30)
         self.assertEqual((p.members(), p.rank), ((ROOT,), 24))
 
+    def test_root_taken_again_restarts_its_reachability(self):
+        # Left unreachable, the root is taken again once its failures age
+        # out (a silence limit after the last one): its probes restart, as
+        # a relay's, so that 4 failed samples (the collisions that made it
+        # unreachable, still going on) leave it only a silence limit after
+        # the retake, not at once (its last acknowledgement is long gone).
+        p = self.p
+        net = self.net
+        silence = 5 * _PERIOD // 2
+        self._failing(2100)
+        self.assertTrue(p.recompute(50 + silence) & DETACHED)
+        aged = 2100 + silence
+        net.table.expire(aged)
+        net.hear(ROOT, 0, aged)
+        self.assertTrue(p.recompute(aged) & ATTACHED)
+        n = net.table.get(ROOT)
+        self.assertEqual((p.members(), n.run, n.answered), ((ROOT,), 0, aged))
+        t = aged + 100
+        for _ in range(4):
+            net.hear(ROOT, 0, t)
+            net.table.acked(ROOT, False, t)
+            t += 500
+        self.assertEqual(n.run, 4)
+        self.assertFalse(p.recompute(t) & DETACHED)  # its rank follows its ETX
+        self.assertEqual(p.members(), (ROOT,))
+        self.assertTrue(p.recompute(aged + silence) & DETACHED)
+
     def test_silent_root_left(self):
         # Silent from 2.5 periods on (strict, §9).
         self._left(self.p.next_parent(ROOT, 5 * _PERIOD // 2))

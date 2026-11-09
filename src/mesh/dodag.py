@@ -101,8 +101,9 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   node advertises rank 255 at once (Trickle reset), selects nothing for
   2 Imin (``Parents.hold_ms``), then stops its Trickle timer and sends a
   solicitation without selecting; the hold lasts until the solicitation
-  goes on air (`Parents.solicited`, from ``sent``: a full queue or the duty
-  cycle keep the node detached), and the node rejoins only through
+  goes on air (`Parents.solicited`, from ``sent``: the duty cycle keeps
+  the node detached; a full queue does not, its DODAG information having
+  a reserve of entries, `mesh.txqueue`), and the node rejoins only through
   neighbours heard after it. The poison is sent once: a child that lost it
   hears the solicitation (rank 255) and detaches in turn.
   The poison and the solicitations leave after a random delay of at most

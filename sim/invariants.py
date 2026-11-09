@@ -885,7 +885,7 @@ class Resources(Check):
                 "neighbours": len(e.neighbours),
                 "parents": len(b.routing.parents.members()),
                 "duplicates": len(e.reliable.duplicates),
-                "queue": len(e.queue),
+                "queue": e.queue.messages(),  # the DODAG information reserve apart
                 "senders": len(e.senders),
                 "batch": len(e.reliable._batch),  # root batch (no accessor)
             }

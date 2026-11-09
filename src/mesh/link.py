@@ -212,6 +212,7 @@ class Counters:
         self.errors_sent = 0  # port 4 errors about forwarded messages
         self.errors_received = 0  # errors about own messages (failure callback)
         self.errors_forwarded = 0  # root: errors forwarded to the origin
+        self.errors_direct = 0  # errors sent to their origin, a neighbour (link-local)
         self.errors_dropped = 0  # errors failed (never an error about an error) or refused
         self.errors_misrouted = 0
         self.errors_malformed = 0
@@ -458,13 +459,13 @@ class LinkEngine(Core):
         self._seq = (seq + 1) & 0xFFFF
         return seq
 
-    def send(self, msg, hop, trickle_reset=False, replace=False):
+    def send(self, msg, hop, trickle_reset=False, replace=False, exempt=False):
         """Queue an own message for next hop hop; return the `TxQueue.offer` outcome.
 
         For mesh components (any port, explicit next hop); no check beyond
-        the queue's. trickle_reset, replace: as `TxQueue.offer`.
+        the queue's. trickle_reset, replace, exempt: as `TxQueue.offer`.
         """
-        outcome = self.queue.offer(msg, hop, True, trickle_reset, replace)
+        outcome = self.queue.offer(msg, hop, True, trickle_reset, replace, exempt)
         if accepted(outcome):
             self._dirty = True
         else:

@@ -819,6 +819,32 @@ class Resets(_Case):
         b.rx(self.q.frame(20, 3))
         self.assertEqual((b.dodag.parents.preferred, b.engine.rank), (Q, 28))
 
+    def test_queue_full_of_held_messages_still_poisons_solicits_and_rejoins(self):
+        # A relay whose 64 entries hold class 1 messages it cannot forward
+        # (§12 holding): its poison and its solicitation still leave (the
+        # reserve of its DODAG information, §12 queues), so it rejoins at
+        # once instead of staying detached until the holding expires.
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        engine = b.engine
+        for i in range(64):
+            msg = Message(UPWARD, 1, 20, b"f", origin=0x0100 + i, seq=i)
+            engine.queue.offer(msg, P)
+            engine.reliable.hold(engine.queue.slot, msg, b.now)
+        self.assertEqual(engine.queue.messages(), 64)
+        start = b.now
+        b.rx(self.p.frame(RANK_INFINITE, 3))  # the parent's poison: detached
+        late = DESYNC_SLOTS * engine.slot_ms + 100
+        b.advance(start + 2 * b.imin + late)
+        self.assertEqual([h.rank for _, h in b.adverts(start)], [RANK_INFINITE])
+        sol = b.solicitations(start)
+        self.assertEqual(len(sol), 1)
+        self.assertEqual(b.dodag.parents.poisoned_at, sol[0][0])
+        b.rx(self.q.presence(20, 3, 0))
+        b.advance(b.dodag.parents.window_until)
+        self.assertEqual((b.dodag.parents.preferred, engine.rank), (Q, 28))
+        self.assertEqual(engine.queue.messages(), 64)  # held, none failed
+
     def test_parent_poison_detaches_its_child_at_once(self):
         b = self.attached(3)
         b.steady([(self.p, 16, 3)])

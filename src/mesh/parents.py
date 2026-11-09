@@ -66,10 +66,12 @@ infinite: no route or poisoned).
   candidate, drops included: the other candidates do not depend on the
   preferred parent, so they are found first with the ordinary rule; once
   the node has switched away from it, the old parent needs ETX <= 4
-  again; a relay taken as the preferred parent has its reachability
-  restarted, `NeighbourTable.restart_reach`, so that a link taken again by
-  ETX <= 4 after it was left unreachable, a link back after a cut
-  included, gets its probes before it is judged), whose path cost is at
+  again; a relay taken as the preferred parent, and the root taken again,
+  have their reachability restarted, `NeighbourTable.restart_reach`, so
+  that a link taken again by ETX <= 4 after it was left unreachable, a
+  link back after a cut included, and the root taken again once its
+  failures aged out, get their probes before they are judged), whose path
+  cost is at
   most the
   **bound** min(254, L + max_increase), max_increase 56 by default
   (MaxRankIncrease, carried by the DODAG information, §9), 254 for a
@@ -576,10 +578,10 @@ class Parents:
             if old_pref is not None:
                 self.switches += 1
             self.rank = cost
-            if chosen[2] != ROOT:
-                # Taken by ETX <= 4, it may be the last candidate at the next
-                # selection, judged by reachability: its probes start now.
-                table.restart_reach(chosen[2], now)
+            # A relay taken by ETX <= 4 may be the last candidate at the next
+            # selection, judged by reachability, and the root always is: the
+            # probes start now.
+            table.restart_reach(chosen[2], now)
         elif cost - old_rank >= RANK_HYSTERESIS or old_rank - cost >= RANK_HYSTERESIS:
             self.rank = cost
         rank = self.rank

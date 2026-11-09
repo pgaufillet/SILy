@@ -9,7 +9,7 @@ import unittest
 
 from mesh import frame, ports
 from mesh.counter import FrameCounter
-from mesh.frame import ROOT
+from mesh.frame import LINK_LOCAL, ROOT
 from mesh.link import destination
 from mesh.reliable import (
     ACK_BATCH,
@@ -30,6 +30,7 @@ _KEY = bytes(range(16))
 
 N = 0x00A1  # leaf
 R = 0x0010  # relay
+X = 0x0020  # relay between N and R (`FarOrigin`)
 E = "eve"
 
 
@@ -320,29 +321,61 @@ class Holding(unittest.TestCase):
         line.up = None  # R has no route
         line.net.at(1000, line.node.submit, 20, 1, ROOT, b"stranded")
         r_hold = line.relay.engine.reliable.hold_ms()
-        # The route returns after the message's holding, within the error's.
-        line.net.at(1000 + r_hold + 10000, setattr, line, "up", ROOT)
         line.net.run(1000 + r_hold + 20000)
         n, r, root = line.node.engine, line.relay.engine, line.root.engine
         # R held the message and acknowledged it at once (explicitly).
         self.assertEqual((n.counters.acks_explicit, n.counters.retries), (1, 0))
         self.assertTrue(line.ack_frames(R)[0][0] - line.data_frames(N)[0][0] < 100)
         self.assertEqual(
-            (r.counters.held, r.counters.hold_expired, r.counters.errors_sent), (2, 1, 1)
+            (r.counters.held, r.counters.hold_expired, r.counters.errors_sent), (1, 1, 1)
         )
-        # Error reason 3 to the root, forwarded by the root to the origin.
+        # Error reason 3 straight to the origin, a neighbour of R (link-local,
+        # no route needed): the root sees nothing.
+        self.assertEqual(r.counters.errors_direct, 1)
         self.assertEqual(line.root.received(), [])
-        self.assertEqual(root.counters.errors_forwarded, 1)
+        self.assertEqual(root.counters.errors_forwarded, 0)
         self.assertEqual(len(line.node.failures), 1)
         _, dest, port, seq, reason = line.node.failures[0]
         self.assertEqual((dest, port, reason), (ROOT, 20, NO_ROUTE))
         self.assertEqual(seq, line.data_frames(N)[0][2][0].seq)
-        errors = [m for _, _, msgs in line.frames(R) for m in msgs if m.port == ports.ERROR]
-        payloads = set(bytes(m.payload) for m in errors)
-        self.assertEqual(len(payloads), 1)  # R's upward error, then the root's copy down
-        self.assertEqual(decode_error(errors[0].payload), (NO_ROUTE, NO_HOP, N, ROOT, 20, seq))
+        errors = [
+            (h.dest, m) for _, h, msgs in line.frames(R) for m in msgs if m.port == ports.ERROR
+        ]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual((errors[0][0], errors[0][1].mode), (N, LINK_LOCAL))
+        self.assertEqual(decode_error(errors[0][1].payload), (NO_ROUTE, NO_HOP, N, ROOT, 20, seq))
         for engine in (n, r, root):
             self.assertEqual(len(engine.queue), 0)
+
+    def test_error_about_a_farther_origin_goes_through_the_root(self):
+        # N — X — R — root: R holds N's message without route; N is no
+        # neighbour of R, so the error goes upward once R's route is back
+        # (after the message's holding, within the error's), and the root
+        # forwards it down to N.
+        net = Network(23, _KEY)
+        up = {"R": None}
+
+        def r_hop(msg):
+            return X if destination(msg) == N else up["R"]
+
+        root = net.add(ROOT, next_hop=lambda m: R)
+        relay = net.add(R, next_hop=r_hop)
+        middle = net.add(X, next_hop=lambda m: N if destination(m) == N else R)
+        node = net.add(N, next_hop=lambda m: X)
+        net.link_both(N, X)
+        net.link_both(X, R)
+        net.link_both(R, ROOT)
+        net.at(1000, node.submit, 20, 1, ROOT, b"far")
+        r_hold = relay.engine.reliable.hold_ms()
+        net.at(1000 + r_hold + 10000, up.__setitem__, "R", ROOT)
+        net.run(1000 + r_hold + 30000)
+        r = relay.engine
+        self.assertEqual((r.counters.hold_expired, r.counters.errors_sent), (1, 1))
+        self.assertEqual(r.counters.errors_direct, 0)
+        self.assertEqual(root.engine.counters.errors_forwarded, 1)
+        self.assertEqual([(f[1], f[2], f[4]) for f in node.failures], [(ROOT, 20, NO_ROUTE)])
+        for b in (node, middle, relay, root):
+            self.assertEqual(len(b.engine.queue), 0)
 
     def test_reroute_hold_waits_for_a_route(self):
         # "next hop after failure" says no route for now (the parent set is

@@ -13,7 +13,18 @@ that priority, so that a frame or an allowance too small for every queued
 message shares its capacity equally between origins, whatever their volume.
 
 **Admission** (§7, §12 queues and resources): `offer` returns the outcome
-for the message's class and origin:
+for the message's class and origin. The queue holds ``size`` messages
+(64 by default) plus `RESERVE` (2) entries kept for the node's own DODAG
+information (port 9: one advertisement, one solicitation, `mesh.dodag`
+queues at most one of each), which neither fill the queue nor are refused
+by the quota: a node whose queue is full of held class 1 messages, or of
+its own errors, still solicits and rejoins (otherwise it stays detached
+until their holding expires, and its subtree's holdings expire
+meanwhile). The node's own acknowledgements (port 3) are not subject to
+the quota either (but to a full queue: their number is not bounded), nor
+is a message offered with ``exempt``: an error taking the entry of the
+message it reports (`mesh.reliable`), which occupies no more room than
+that message did. Neither control message is any origin's traffic.
 
 - `REPLACED`: class 0 replace by newer (per port, chosen by the caller): the
   newer message takes the place, and the age, of a queued class 0 message of
@@ -65,10 +76,11 @@ messages per packed frame).
 """
 
 from mesh import frame
-from mesh.ports import PRIORITY_REPAIR
+from mesh.ports import ACK, DODAG_INFO, PRIORITY_REPAIR
 from mesh.ports import priority as port_priority
 
 SIZE = 64  # default transmit queue size (§12)
+RESERVE = 2  # entries beyond it for the node's own DODAG information (port 9)
 QUOTA = 16  # messages per origin once the queue is more than half full (§7)
 MAX_SIZE = 254
 
@@ -90,6 +102,7 @@ _NIL = 255
 _END = 0x3FFFFFFF  # sorts after every key
 _WAIT = 0x01
 _LOCAL = 0x02
+_CONTROL = 0x04  # the node's own DODAG information: in the reserve
 
 
 def accepted(outcome):
@@ -133,41 +146,46 @@ class Selection:
 class TxQueue:
     """Transmit queue of one board.
 
-    size: entries (64 by default, at most 254); quota: messages an origin may
-    hold once the queue holds more than size // 2.
+    size: messages (64 by default); reserve: entries beyond them for the
+    node's own DODAG information (module docstring); ``entries``: size +
+    reserve, at most 254, the slots (0 to entries - 1); quota: messages an
+    origin may hold once the queue holds more than size // 2.
     """
 
-    def __init__(self, size=SIZE, quota=QUOTA):
-        if size < 2 or size > MAX_SIZE or quota < 1:
+    def __init__(self, size=SIZE, quota=QUOTA, reserve=RESERVE):
+        entries = size + reserve
+        if size < 2 or reserve < 0 or entries > MAX_SIZE or quota < 1:
             raise ValueError("bad queue size")
         self.size = size
+        self.entries = entries
         self.quota = quota
         self._count = 0
+        self.control = 0  # entries of the reserve in use
         # Entries (slots).
-        self._msg = [None] * size
-        self._hop = [0] * size
-        self._prio = bytearray(size)
-        self._flags = bytearray(size)
-        self._attempts = bytearray(size)
-        self._oidx = bytearray(size)
+        self._msg = [None] * entries
+        self._hop = [0] * entries
+        self._prio = bytearray(entries)
+        self._flags = bytearray(entries)
+        self._attempts = bytearray(entries)
+        self._oidx = bytearray(entries)
         # Age order: doubly linked list of the entries, oldest first; free
         # slots are chained through _next.
-        self._prev = bytearray(size)
-        self._next = bytearray(range(1, size + 1))
-        self._next[size - 1] = _NIL
+        self._prev = bytearray(entries)
+        self._next = bytearray(range(1, entries + 1))
+        self._next[entries - 1] = _NIL
         self._free = 0
         self._head = _NIL
         self._tail = _NIL
         # Origins with queued messages: key (address or LOCAL), messages held.
-        self._okey = [None] * size
-        self._ocount = bytearray(size)
+        self._okey = [None] * entries
+        self._ocount = bytearray(entries)
         # Round robin: origin index served last, per priority (index 1–3).
-        self._last = bytearray((size - 1,) * 4)
+        self._last = bytearray((entries - 1,) * 4)
         # Packing scratch.
-        self._keys = [_END] * size
-        self._rounds = bytearray(3 * size)
-        self._zero = bytes(3 * size)
-        self._sel = Selection(size)
+        self._keys = [_END] * entries
+        self._rounds = bytearray(3 * entries)
+        self._zero = bytes(3 * entries)
+        self._sel = Selection(entries)
         # Reporting.
         self.refusals = [0, 0, 0]  # per class
         self.evictions = 0
@@ -180,6 +198,10 @@ class TxQueue:
     def __len__(self):
         return self._count
 
+    def messages(self):
+        """Return the number of queued messages, the reserve's excluded (at most size)."""
+        return self._count - self.control
+
     def holding(self, origin):
         """Return the number of messages queued for origin (address or `LOCAL`)."""
         o = self._origin(origin)
@@ -187,13 +209,17 @@ class TxQueue:
 
     # --- Admission ---------------------------------------------------------
 
-    def offer(self, msg, hop, local=False, trickle_reset=False, replace=False):
+    def offer(self, msg, hop, local=False, trickle_reset=False, replace=False, exempt=False):
         """Queue msg for next hop hop; return the outcome (`ACCEPTED`...).
 
         local: the node's own message (one origin, `LOCAL`), else forwarded
-        (origin: msg.origin, the root for messages without origin);
-        trickle_reset: port 9 priority (`mesh.ports.priority`); replace: class
-        0 replace by newer for this port. On a refusal or eviction, ``reason``
+        (origin: msg.origin, the root for messages without origin); a local
+        port 9 message goes into the reserve, a local port 3 one is not
+        subject to the quota (module docstring); trickle_reset: port 9
+        priority (`mesh.ports.priority`); replace: class 0 replace by newer
+        for this port; exempt: admitted beyond the
+        origin's quota (an error taking the entry of the message it
+        reports). On a refusal or eviction, ``reason``
         is `FULL` or `OVER_QUOTA`; on `EVICTED`, ``victim`` and
         ``victim_origin`` give the message dropped. ``slot`` is the entry of
         the message once queued (or of the message it replaced), None after a
@@ -221,11 +247,21 @@ class TxQueue:
                 self._prio[i] = p
                 self.slot = i
                 return REPLACED
+        control = local and msg.port == DODAG_INFO
+        if control:
+            if self.control == self.entries - self.size:
+                return self._refuse(msg, local, FULL)  # more than the reserve
+            self._insert(msg, hop, p, key, local, _CONTROL)
+            return ACCEPTED
         o = self._origin(key)
-        if o != _NIL and self._count > self.size // 2 and self._ocount[o] >= self.quota:
-            return self._refuse(msg, local, OVER_QUOTA)
+        count = self._count - self.control
+        if local and msg.port == ACK:
+            exempt = True  # the node's acknowledgements: no origin's traffic
+        if o != _NIL and not exempt and count > self.size // 2:
+            if self._ocount[o] >= self.quota:
+                return self._refuse(msg, local, OVER_QUOTA)
         outcome = ACCEPTED
-        if self._count == self.size:
+        if count == self.size:
             v = _NIL if local or msg.cls else self._eviction(p)
             if v == _NIL:
                 return self._refuse(msg, local, FULL)
@@ -276,7 +312,7 @@ class TxQueue:
             i = self._next[i]
         return best
 
-    def _insert(self, msg, hop, p, key, local):
+    def _insert(self, msg, hop, p, key, local, control=0):
         i = self._free
         self._free = self._next[i]
         o = self._origin(key)
@@ -287,7 +323,9 @@ class TxQueue:
         self._msg[i] = msg
         self._hop[i] = hop
         self._prio[i] = p
-        self._flags[i] = _LOCAL if local else 0
+        self._flags[i] = (_LOCAL if local else 0) | control
+        if control:
+            self.control += 1
         self._attempts[i] = 0
         self._oidx[i] = o
         self._prev[i] = self._tail
@@ -315,6 +353,8 @@ class TxQueue:
         self._ocount[o] -= 1
         if not self._ocount[o]:
             self._okey[o] = None
+        if self._flags[i] & _CONTROL:
+            self.control -= 1
         self._msg[i] = None
         self._flags[i] = 0
         self._next[i] = self._free
@@ -332,7 +372,7 @@ class TxQueue:
         current spreading factor. None if no queued message fits a frame now.
         The queue is unchanged until `commit`.
         """
-        size = self.size
+        size = self.entries
         keys = self._keys
         rounds = self._rounds
         rounds[:] = self._zero

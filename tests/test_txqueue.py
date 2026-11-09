@@ -5,7 +5,7 @@ import unittest
 from mesh import frame, ports
 from mesh.airtime import time_on_air_ms
 from mesh.dutycycle import DutyCycle
-from mesh.frame import FIRST_HOP, UPWARD, Header, Message
+from mesh.frame import BROADCAST, FIRST_HOP, LINK_LOCAL, UPWARD, Header, Message
 from mesh.txqueue import (
     ACCEPTED,
     DROPPED,
@@ -202,6 +202,80 @@ class Admission(unittest.TestCase):
         newer = _up(0xA, port=ports.PRESENCE, payload=b"new")
         self.assertEqual(q.offer(newer, _PARENT, replace=True), REPLACED)
         self.assertEqual(q.holding(0xA), 33)
+
+    def test_own_dodag_information_has_a_reserve(self):
+        # A detached relay whose queue is full of held class 1 messages still
+        # queues its solicitation and its advertisement (2 entries beyond the
+        # 64), whatever its own quota; nothing else enters the reserve.
+        q = TxQueue()
+        for origin in range(1, 5):
+            for _ in range(16):
+                q.offer(_up(origin, cls=1), _PARENT)
+        self.assertEqual(q.offer(_own(cls=1), _PARENT, local=True), REFUSED)
+        self.assertEqual(q.reason, FULL)
+        solicitation = Message(LINK_LOCAL, 0, ports.DODAG_INFO, b"")
+        advert = Message(LINK_LOCAL, 0, ports.DODAG_INFO, bytes(9))
+        self.assertEqual(
+            q.offer(solicitation, BROADCAST, local=True, trickle_reset=True), ACCEPTED
+        )
+        self.assertEqual(q.offer(advert, BROADCAST, local=True), ACCEPTED)
+        self.assertEqual((len(q), q.messages(), q.control), (66, 64, 2))
+        # The reserve holds two: a third is refused, as is any other message.
+        third = Message(LINK_LOCAL, 0, ports.DODAG_INFO, b"")
+        self.assertEqual(q.offer(third, BROADCAST, local=True), REFUSED)
+        self.assertEqual(q.offer(_up(0x50, cls=1), _PARENT), UNACKED)
+        # Sent, they free the reserve; the messages keep their 64 entries.
+        sent = _send(q, limit=frame.OVERHEAD + 2 + 2)
+        self.assertEqual(sent, [solicitation])
+        self.assertEqual((len(q), q.messages(), q.control), (65, 64, 1))
+        self.assertEqual(q.offer(third, BROADCAST, local=True), ACCEPTED)
+
+    def test_own_dodag_information_not_counted_by_the_quota(self):
+        q = TxQueue()
+        for _ in range(17):
+            q.offer(_up(0xA), _PARENT)
+        for _ in range(16):
+            q.offer(_own(cls=1), _PARENT, local=True)
+        self.assertEqual(q.offer(_own(cls=1), _PARENT, local=True), REFUSED)
+        self.assertEqual(q.reason, OVER_QUOTA)
+        solicitation = Message(LINK_LOCAL, 0, ports.DODAG_INFO, b"")
+        self.assertEqual(q.offer(solicitation, BROADCAST, local=True), ACCEPTED)
+        self.assertEqual((q.messages(), q.holding(LOCAL)), (33, 17))
+
+    def test_own_acknowledgement_not_subject_to_the_quota(self):
+        # The root holding its own errors beyond its quota still acknowledges.
+        q = TxQueue()
+        for _ in range(17):
+            q.offer(_up(0xA), _PARENT)
+        for _ in range(16):
+            q.offer(_own(cls=1), _PARENT, local=True)
+        ack = Message(LINK_LOCAL, 0, ports.ACK, bytes(4))
+        self.assertEqual(q.offer(ack, BROADCAST, local=True), ACCEPTED)
+        self.assertEqual(q.offer(_own(cls=1), _PARENT, local=True), REFUSED)
+        self.assertEqual(q.reason, OVER_QUOTA)
+        # A full queue still refuses it (no reserve: their number is unbounded).
+        origin = 0x100
+        while q.messages() < 64:
+            q.offer(_up(origin, cls=1), _PARENT)
+            origin += 1
+        self.assertEqual(q.offer(ack, BROADCAST, local=True), REFUSED)
+        self.assertEqual(q.reason, FULL)
+
+    def test_exempt_admitted_beyond_the_quota_not_beyond_the_size(self):
+        q = TxQueue()
+        for _ in range(17):
+            q.offer(_up(0xA), _PARENT)
+        for _ in range(16):
+            q.offer(_own(cls=1), _PARENT, local=True)
+        error = _own(port=ports.ERROR, payload=bytes(10), cls=1)
+        self.assertEqual(q.offer(error, _PARENT, local=True), REFUSED)
+        self.assertEqual(q.offer(error, _PARENT, local=True, exempt=True), ACCEPTED)
+        origin = 0x100
+        while q.messages() < 64:
+            q.offer(_up(origin, cls=1), _PARENT)
+            origin += 1
+        self.assertEqual(q.offer(error, _PARENT, local=True, exempt=True), REFUSED)
+        self.assertEqual(q.reason, FULL)
 
     def test_invalid_messages_raise(self):
         q = TxQueue()

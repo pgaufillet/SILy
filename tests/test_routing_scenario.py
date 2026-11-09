@@ -27,7 +27,7 @@ from mesh.neighbours import popcount16
 from mesh.parents import MIN_HOP, SWITCH_THRESHOLD, link_cost, sequence_newer
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.profile import EU_869
-from mesh.reliable import ATTEMPTS, RETRY_DOUBLINGS, identity
+from mesh.reliable import ATTEMPTS, NO_ROUTE, RETRY_DOUBLINGS, identity
 from mesh.replay import ReplayTable
 from mesh.routing import Routing
 from mesh.security import KeyRing, Security
@@ -1030,10 +1030,16 @@ class LoopCustody(unittest.TestCase):
         rejoined = [t for t, n, p, r in log if n == B and p == A and t > s.detached - start]
         self.assertTrue(rejoined, log)
         # MP5: delivered (once: the root filters the copies that custody
-        # makes travel), or the origin told.
+        # makes travel), or the origin told. Both when a copy taken again
+        # through the loop is failed at the end of its holding after
+        # another one was delivered: a false failure (§12 custody), its
+        # error sent straight to C, B's neighbour (§12 direct error).
         got = [p for o, p in m.root.inbox_from(APP) if o == C]
         failed = [f for f in c.failures if f[3] == sent[0]]
-        self.assertTrue((len(got), len(failed)) in ((1, 0), (0, 1)), (got, failed))
+        outcome = (len(got), len(failed))
+        self.assertTrue(outcome in ((1, 0), (0, 1), (1, 1)), (got, failed))
+        if outcome == (1, 1):
+            self.assertEqual(failed[0][4], NO_ROUTE, failed)
 
 
 class RejoinBest(unittest.TestCase):

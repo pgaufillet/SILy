@@ -147,6 +147,7 @@ COUNTERS = (
     "errors_sent",
     "errors_received",
     "errors_forwarded",
+    "errors_direct",
     "errors_dropped",
     "give_ups",
     "access_dropped",
