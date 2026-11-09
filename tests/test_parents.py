@@ -1479,6 +1479,65 @@ class NewVersion(unittest.TestCase):
         self.assertTrue(events & DETACHED)
 
 
+class Adoptable(unittest.TestCase):
+    """`Parents.adoptable`: would the selection of `on_new_version` find a
+    candidate (§9 DODAG version: an attached node adopts only then)?
+    Attached through A (rank 8, sequence 10): rank 16."""
+
+    def setUp(self):
+        self.net = Net()
+        self.net.hear(A, 8, 0, seq=10)
+        self.p = Parents(self.net.table)
+        self.p.recompute(0)
+
+    def state(self):
+        p = self.p
+        return (p.version, p.members(), p.rank, p.lowest, p.sequence, p.behind, p.detaches)
+
+    def test_only_a_candidate_of_the_new_version(self):
+        net, p = self.net, self.p
+        before = self.state()
+        net.hear(B, 0, 100, version=1, seq=3, margin=20)  # link below 3 dB
+        net.hear(C, 8, 100, version=1, seq=3, floating=True)
+        net.hear(D, 8, 100, version=1, seq=2)  # older in the new version
+        net.hear(E, 8, 100, seq=11)  # newer, of the node's version
+        self.assertFalse(p.adoptable(1, 3, 100))
+        self.assertEqual(self.state(), before)  # read only
+        net.hear(F, 200, 200, version=1, seq=3)  # any rank: path cost 208
+        self.assertTrue(p.adoptable(17, 3, 200))  # 4 bits: version 1
+        self.assertFalse(p.adoptable(2, 3, 200))
+        self.assertFalse(p.adoptable(1, 3, 200 + 5 * _PERIOD // 2))  # F silent
+        self.assertEqual(self.state(), before)
+        net.hear(F, 247, 300, version=1, seq=3)  # path cost 255
+        self.assertFalse(p.adoptable(1, 3, 300))
+        self.assertTrue(p.adoptable(1, 2, 300))  # D, at that sequence
+        # As `on_new_version` selects.
+        self.assertTrue(p.on_new_version(1, 300, 3) & DETACHED)
+
+    def test_floating_preferred_parent_counts(self):
+        # Followed in the new version (`on_new_version`); another floating
+        # neighbour does not count.
+        net, p = self.net, self.p
+        net.hear(B, 0, 100, version=1, seq=3, floating=True)
+        self.assertFalse(p.adoptable(1, 3, 100))
+        net.hear(A, 8, 100, version=1, seq=3, floating=True)
+        self.assertTrue(p.adoptable(1, 3, 100))
+        p.on_new_version(1, 100, 3)
+        self.assertEqual((p.preferred, p.rank, p.detaches), (A, 16, 0))
+
+    def test_preferred_parent_judged_by_etx(self):
+        # The selection of the new version starts without a preferred
+        # parent: A, the last candidate kept above ETX 4 while it answers,
+        # needs ETX <= 4 there.
+        net, p = self.net, self.p
+        net.etx(A, 1, 5, 0)  # ETX 5
+        net.hear(A, 8, 100, version=1, seq=3)
+        p.behind = True
+        self.assertEqual(p.candidate_cost(net.table.get(A), 100), 16)  # kept, own rank
+        self.assertFalse(p.adoptable(1, 3, 100))
+        self.assertTrue(p.on_new_version(1, 100, 3) & DETACHED)
+
+
 class Behind(unittest.TestCase):
     """A node behind a newer version keeps its preferred parent once that
     parent has moved to it, at its own rank (§9; TLA+ `Behind = "keep"`)."""

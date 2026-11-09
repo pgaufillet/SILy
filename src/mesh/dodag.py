@@ -73,7 +73,16 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   suppressed by k = 2 frames of the neighbourhood would not guarantee (in
   a loop, the frames of the loop itself suppress it).
 - **Adoption**: an attached node adopts a newer version from the DODAG
-  information of a neighbour of finite rank; a detached node adopts any
+  information of a neighbour of finite rank, if a neighbour would then be
+  a candidate parent (`Parents.adoptable`: the sender or another one heard
+  in that version, through an eligible link, not floating unless it is
+  the preferred parent); otherwise it would detach at once, and it does
+  not adopt: it is behind (below), its first solicitation after Imin (its
+  parents in that version, adopting about then, advertise within Imin).
+  The preferred parent's information is always adopted (a parent no
+  longer a candidate there, its link above ETX 4, would otherwise keep the
+  node behind for as long as it answers).
+  A detached node adopts any
   other version, but only from a DODAG information heard after the
   solicitation that ends its hold (the rule of the rejoin: during the hold
   a descendant that lost the poison may still advertise, in an older
@@ -92,7 +101,8 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   selecting in its own version, keeps its preferred parent once that parent
   has moved to the newer version (at its own rank) and forwards through it,
   and solicits with backoff until it adopts the version: at once (at most
-  once per Imin), then after Imin, the gap doubling up to the presence
+  once per Imin; after Imin when its frame was a DODAG information not
+  adopted, above), then after Imin, the gap doubling up to the presence
   period; a detach ends them (the hold's solicitation follows). A frame of
   an older version resets the Trickle timer: the solicitations and every
   other frame of a node behind make its newer neighbours answer within
@@ -518,12 +528,17 @@ class Dodag:
             self.trickle.reset(now, True)
         else:
             c.newer += 1
-            p = self.parents
-            if not self.root and not p.behind:
-                p.behind = True  # solicit with backoff until adopted
-                self._ask_gap = self.imin_ms
-                self._ask(now)
+            if not self.root:
+                self._lag(now)
         return n
+
+    def _lag(self, now):
+        # Behind a newer version: solicit with backoff until adopted.
+        p = self.parents
+        if not p.behind:
+            p.behind = True
+            self._ask_gap = self.imin_ms
+            self._ask(now)
 
     def _decoded(self, header, messages, entry, now):
         self._base_decoded(header, messages, entry, now)
@@ -579,10 +594,28 @@ class Dodag:
         version = header.dodag_version
         cmp = compare_versions(version, self.version)
         if not self.root:
+            p = self.parents
             if self.attached:
                 adopt = cmp == 1
+                if (
+                    adopt
+                    and header.source != p.preferred
+                    and not p.adoptable(version, payload[INFO_SEQUENCE], now)
+                ):
+                    # No parent in that version yet (the sender's link not
+                    # eligible, the sender floating): behind, as if the
+                    # information were lost; the first solicitation after
+                    # Imin, within which the parents adopting it advertise.
+                    # The preferred parent's information is adopted: a node
+                    # whose parent is no candidate in the new version (its
+                    # link above ETX 4) selects afresh, as the repair intends,
+                    # instead of staying behind it.
+                    adopt = False
+                    self._lag(now)
+                    t = self._ask_at
+                    if t is None or t <= now:
+                        self._ask_at = now + self.imin_ms
             else:  # another version, heard after the solicitation ending the hold
-                p = self.parents
                 adopt = cmp != 0 and p.hold_until is None and not p.soliciting
             if adopt or not self.configured:
                 self._adopt(version, info, payload[INFO_SEQUENCE], now)

@@ -103,13 +103,20 @@ infinite: no route or poisoned).
   exhaustion, never remembered: a relay parent with another candidate
   is dropped, as is any other hop.
 - **Behind a newer version** (``behind``, set by the Trickle step when a
-  frame of a newer version is heard; cleared by `on_new_version` and the
+  frame of a newer version is heard, its DODAG information included when
+  the node does not adopt it; cleared by `on_new_version` and the
   detach): the preferred parent stays a candidate once it has moved to a
   newer version (finite rank, under the same silence, drop and link
   rules), at the node's own rank as path cost (ranks of different versions
   are not compared), until the node adopts the version (§9 DODAG version).
   The other candidates keep the node's version; the preferred parent of
   another version is never a secondary member.
+- **Adoption condition** (`adoptable`, §9): an attached node adopts a
+  newer version only if a neighbour would be a candidate in it, as the
+  selection of `on_new_version` judges them; otherwise it would detach
+  (the sender's link not eligible, the sender floating, its own parent not
+  yet heard in that version), and it stays behind instead; its preferred
+  parent's information is adopted all the same (`mesh.dodag`).
 - **Parent set**: the `SIZE` (3) candidates of lowest path cost, ordered by
   path cost, then larger margin (§9 tie-break), then lower address (so that
   the result does not depend on the table's slot order). **Preferred
@@ -185,7 +192,11 @@ it; adopting a new version keeps the grounding as it was (the sequence
 taken there restarts G, an ungrounded node stays so until an advance) and
 the preferred parent's following: floating, it is still taken in the new
 version (a node adopting from its floating parent would otherwise detach
-with its subtree);
+with its subtree), as `adoptable` counts it; in the new version the
+preferred parent is no longer the last candidate judged by reachability
+(the selection starts without one): `adoptable` judges its link by
+ETX <= 4, as that selection does (its own information is adopted all
+the same: the node selects afresh rather than stay behind it);
 at boot, a parent at the node's sequence grounds it (above: otherwise a
 node would wait for its parent's next advance before being a candidate
 itself, and the DODAG would form one presence period per hop).
@@ -326,7 +337,7 @@ class Parents:
         bound = self.lowest + self.max_increase
         return bound if bound < MAX_COST else MAX_COST
 
-    def candidate_cost(self, n, now, drops=True):
+    def candidate_cost(self, n, now, drops=True, new=None):
         """Return the path cost through neighbour entry n if it is a candidate, else None.
 
         The preferred parent is one at any rank (its increase is followed,
@@ -338,25 +349,39 @@ class Parents:
         a drop of n after failed attempts (`next_parent`; the other
         neighbours' drops still count). The preferred parent's link is
         judged by reachability alone, without ETX <= 4, when it is the last
-        candidate (`last`).
+        candidate (`last`). new: (version, sequence) to judge n as the
+        selection of `on_new_version` adopting them would (`adoptable`): no
+        preferred parent, the current one followed if floating, L restarted,
+        drops cleared; None for the current state.
         """
         address = n.address
-        if n.floating and address != self.preferred and address != self._kept:
+        if new is None:
+            version = self.version
+            seq = self.sequence
+            lowest = self.lowest
+            preferred = self.preferred
+            kept = self._kept
+        else:
+            version, seq = new
+            lowest = preferred = None
+            kept = self.preferred
+            drops = False
+        if n.floating and address != preferred and address != kept:
             return None  # a floating neighbour is no candidate, the preferred parent followed
-        across = n.version != self.version
+        across = n.version != version
         newer = False
         if across:
-            if not (self.behind and address == self.preferred and n.rank != RANK_INFINITE):
+            if not (self.behind and address == preferred and n.rank != RANK_INFINITE):
                 return None
-            if not 0 < (n.version - self.version) & VERSION_MASK < _HALF:
+            if not 0 < (n.version - version) & VERSION_MASK < _HALF:
                 return None  # not newer
         else:
-            newer = sequence_newer(n.sequence, self.sequence)
-            if address != self.preferred and not newer:
+            newer = sequence_newer(n.sequence, seq)
+            if address != preferred and not newer:
                 # Feasibility: the same sequence and a rank below L.
-                if n.sequence != self.sequence:
+                if n.sequence != seq:
                     return None  # older, unknown or not comparable
-                if self.lowest is not None and n.rank >= self.lowest:
+                if lowest is not None and n.rank >= lowest:
                     return None
         silence = silence_ms(self.table.period_ms)
         if now - n.heard >= silence:
@@ -367,7 +392,7 @@ class Parents:
             return None
         eligible = n.eligible(now, silence)
         reach = False
-        if address == self.preferred and address != ROOT:
+        if address == preferred and address != ROOT:
             # The last candidate's link is judged by reachability instead of
             # ETX <= 4 (the others looked up only when the two disagree).
             if n.eligible(now, silence, True) != eligible and self.last(address, now):
@@ -378,7 +403,7 @@ class Parents:
         if across:
             return self.rank
         cost = n.rank + link_cost(n.link_etx(reach))
-        return cost if cost <= (MAX_COST if newer else self.bound()) else None
+        return cost if cost <= (MAX_COST if newer or lowest is None else self.bound()) else None
 
     def ground_ms(self):
         """Return G (ms): 2.5 + min(8, ceil(rank / 8)) presence periods at the advertised rank."""
@@ -450,15 +475,31 @@ class Parents:
         self.poisoned_at = now
         return True
 
+    def adoptable(self, version, sequence, now):
+        """Return True if `on_new_version` (version, sequence) at now would find a candidate.
+
+        Read only: a neighbour of that version, feasible at that sequence at
+        any rank (path cost within 254), heard within the silence limit,
+        through an eligible link, not floating unless it is the preferred
+        parent (`candidate_cost` with new). An attached node adopts a
+        version only then (`mesh.dodag`, §9): it would otherwise detach.
+        """
+        new = (version & VERSION_MASK, sequence)
+        for n in self.table.entries():
+            if self.candidate_cost(n, now, False, new) is not None:
+                return True
+        return False
+
     def on_new_version(self, version, now, sequence=None):
         """Adopt DODAG version (4 bits) and select again, L restarted; return the events.
 
         sequence: the root sequence of the DODAG information adopted, taken
         (None: no sequence held). Only parents of the new version are
         taken, at any rank at that sequence (or a newer one); without one
-        the node detaches. A detach hold goes on, and after it only
-        neighbours heard after the solicitation are taken. The root only
-        records the version it issued.
+        the node detaches (an attached node adopts only when `adoptable`
+        says one exists: `mesh.dodag`). A detach hold goes on, and after it
+        only neighbours heard after the solicitation are taken. The root
+        only records the version it issued.
         """
         version &= VERSION_MASK
         if self.root:

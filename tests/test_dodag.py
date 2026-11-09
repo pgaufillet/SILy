@@ -35,6 +35,7 @@ from mesh.frame import (
     Message,
 )
 from mesh.link import open_link
+from mesh.neighbours import ACK_MIN
 from mesh.parents import MAX_RANK_INCREASE
 from mesh.ports import DODAG_INFO, PRESENCE
 from mesh.radio import CHANNEL, RX, SENSE, TX, TX_DONE
@@ -69,17 +70,19 @@ class Peer:
         self.address = address
         self.security = _security(seed)
 
-    def frame(self, rank, version, messages=None, dest=BROADCAST):
+    def frame(self, rank, version, messages=None, dest=BROADCAST, floating=0):
         if messages is None:
             messages = [Message(LINK_LOCAL, 0, 20, b"data")]
         buf = bytearray(frame.MAX_FRAME)
-        n = frame.encode(buf, Header(dest, self.address, 0, rank, version), messages)
+        header = Header(dest, self.address, 0, rank, version, floating=floating)
+        n = frame.encode(buf, header, messages)
         self.security.seal(buf, n)
         return bytes(buf[:n])
 
-    def info(self, rank, version, info=INFO, seq=0):
+    def info(self, rank, version, info=INFO, seq=0, floating=0):
         payload = encode_info(info, None, seq)
-        return self.frame(rank, version, [Message(LINK_LOCAL, 0, DODAG_INFO, payload)])
+        msg = Message(LINK_LOCAL, 0, DODAG_INFO, payload)
+        return self.frame(rank, version, [msg], floating=floating)
 
     def presence(self, rank, version, seq, parent=ROOT):
         """Its own presence (mode 6, root sequence seq) to parent: overheard by the bench."""
@@ -148,8 +151,8 @@ class Bench:
         if until > self.now:
             self.now = until
 
-    def rx(self, f):
-        self._do(self.engine.step(self.now, (RX, f, -80, 10)))
+    def rx(self, f, rssi=-80, snr=10):
+        self._do(self.engine.step(self.now, (RX, f, rssi, snr)))
 
     def wake(self):
         """Step now: after a call made outside a step (runner contract)."""
@@ -443,6 +446,65 @@ class Adoption(_Case):
         b.rx(self.p.info(20, 4))
         self.assertEqual((b.dodag.version, b.dodag.parents.preferred, b.engine.rank), (4, P, 28))
         self.assertEqual(b.dodag.counters.poisons, 0)
+
+    def _not_adopted(self, b, start):
+        # Behind, as if the information were lost (§9): version, parent and
+        # rank kept, no poison, the first solicitation after Imin; then the
+        # version adopted through the parent's information.
+        d = b.dodag
+        self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (3, P, 24))
+        self.assertEqual((d.counters.poisons, d.counters.adoptions), (0, 1))
+        self.assertTrue(d.parents.behind)
+        self.assertEqual(d.next_hop(Message(UPWARD, 0, 20, b"up")), P)
+        b.advance(start + b.imin - 1)
+        self.assertEqual(b.solicitations(start), [])
+        b.advance(start + b.imin + 300)
+        sol = b.solicitations(start)
+        self.assertEqual(len(sol), 1)
+        self.assertTrue(sol[0][0] >= start + b.imin, sol[0][0] - start)
+        b.rx(self.p.info(16, 4))
+        self.assertEqual((d.version, d.parents.preferred, b.engine.rank), (4, P, 24))
+        self.assertEqual((d.counters.poisons, d.parents.behind), (0, False))
+
+    def test_newer_version_over_a_link_not_eligible_not_adopted(self):
+        # The root's information of version 4 over a link below the margin,
+        # before P moved to it: adopted, it would leave the node without a
+        # parent of version 4, detached.
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        start = b.now
+        b.rx(Peer(ROOT, 14).info(0, 4), -120, -9)  # margin -1.5 dB at SF7
+        self.assertFalse(b.engine.neighbours.get(ROOT).eligible())
+        self._not_adopted(b, start)
+
+    def test_newer_version_from_a_floating_neighbour_not_adopted(self):
+        # Q, through an eligible link but floating (ungrounded), is no
+        # candidate (§9): the same, P not moved yet.
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        start = b.now
+        b.rx(self.q.info(16, 4, floating=1))
+        self.assertTrue(b.engine.neighbours.get(Q).eligible())
+        self._not_adopted(b, start)
+
+    def test_parent_information_adopted_with_its_link_above_etx_4(self):
+        # P kept as the last candidate while it answers, its link at ETX 5,
+        # is no candidate of the new version: its own information is
+        # adopted all the same, the node selecting afresh (it detaches, no
+        # other parent) instead of staying behind P while it answers.
+        b = self.attached(3)
+        b.steady([(self.p, 16, 3)])
+        table = b.engine.neighbours
+        for i in range(5 * ACK_MIN):
+            table.acked(P, i % 5 == 0, b.now)  # ETX 5, P still answering
+        b.wake()
+        d = b.dodag
+        self.assertFalse(table.get(P).eligible())
+        self.assertEqual((d.parents.preferred, b.engine.rank), (P, 24))  # last candidate
+        self.assertFalse(d.parents.adoptable(4, 0, b.now))
+        b.rx(self.p.info(16, 4))
+        self.assertEqual((d.version, d.parents.behind), (4, False))
+        self.assertEqual(b.engine.rank, RANK_INFINITE)
 
     def test_wrap_around_adoption(self):
         b = self.attached(15)

@@ -955,21 +955,38 @@ acknowledgement window and the time of its newest failure.
 ### DODAG version and global repair
 
 - The **DODAG version** (4 bits, frame header §11) is issued by the root
-  only. A node adopts a newer version when it receives the DODAG information
-  message (port 9, below) of that version from a neighbour of finite rank. It
-  then takes parents of the new version only (never of an older one),
-  restarts L and resets its Trickle timer. Upward traffic keeps flowing during
-  the change.
+  only. An attached node adopts a newer version when it receives the DODAG
+  information message (port 9, below) of that version from a neighbour of
+  finite rank, **if it then has a candidate parent of that version**: the
+  sender or another neighbour heard in it, at the information's root
+  sequence or a newer one (any rank, path cost within 254), heard within
+  the silence limit, through an eligible link, not floating unless it is
+  the node's preferred parent. It then takes parents of the new version
+  only (never of an older one), restarts L and resets its Trickle timer.
+  Without such a candidate, adopting would detach it at once: the sender's
+  link below the margin or the sender floating, while its own parent,
+  adopting at the same moment, has sent nothing in the new version yet
+  (nodes that hear the root over weak links, behind a relay). It does not
+  adopt and is behind (below). The preferred parent's own DODAG
+  information is adopted all the same: a parent that is no candidate in
+  the new version (its link kept above ETX 4 as the last candidate, which
+  a fresh selection does not do) would otherwise keep the node behind for
+  as long as it answers; the node selects afresh, as the repair intends.
+  Upward traffic keeps flowing during the change.
 - **Lagging behind a version** (no detach for lagging: one lost
   advertisement must not detach a subtree): a
   node that hears a frame of a newer version from a neighbour of finite rank
-  without its DODAG information (a lost advertisement) is behind. It keeps
+  without its DODAG information (a lost advertisement), or with a DODAG
+  information it does not adopt (above), is behind. It keeps
   selecting in its own version and keeps its **preferred parent once that
   parent has moved to the newer version** (finite rank, heard within the
   silence limit, not dropped after failed attempts), at the node's own rank
   (ranks of different versions are not compared); it forwards through it in
   the old version and solicits with backoff (Trickle below) until it adopts
-  the version. Its other candidates keep its own version. If the preferred
+  the version; after a DODAG information not adopted, the first
+  solicitation waits Imin, within which the parents adopting the version
+  advertise it (the nodes that heard that information together do not all
+  solicit at once). Its other candidates keep its own version. If the preferred
   parent is lost meanwhile, the node falls back on a candidate of its own
   version or detaches; after its solicitation it adopts the version it then
   hears (TLA+ `DODAG`, `Behind = "keep"`, `Adopt = "fresh"`: no loop with at
@@ -1035,7 +1052,9 @@ acknowledgement window and the time of its newest failure.
   is adopted with its parent at once). An isolated node thus stays audible: any neighbour that hears
   it lists it in its topology report (MP15).
 - A node **behind a newer version** solicits **with backoff** until it
-  adopts it: at once (at most once per Imin), then after Imin, the gap
+  adopts it: at once (at most once per Imin; after Imin when it received
+  the version's DODAG information without adopting it, DODAG version
+  above), then after Imin, the gap
   doubling up to the presence period (10 to 19 Imin at SF7–12): at most 5
   solicitations in the first presence period, then one per period, the rate
   of a node without route. Each one, like any frame of the node (older
@@ -1210,7 +1229,10 @@ frame of the exchange lost on any hop, see below.)
   accepted. Slow hops come mostly from Trickle suppression (a parent that
   heard 2 advertisements of the new version from its own neighbours sends
   none, while the node behind is hidden from them; the hop then exceeds
-  (2^(n+1) − 1) Imin with no frame lost) and from detaches at adoption.
+  (2^(n+1) − 1) Imin with no frame lost) and, in these measurements, from
+  detaches at adoption, which the adoption condition (DODAG version above)
+  has since removed: a node that would have detached now waits behind for
+  its parent's advertisement.
 
 Findings:
 

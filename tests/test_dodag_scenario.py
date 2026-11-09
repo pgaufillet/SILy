@@ -23,6 +23,7 @@ _KEY = bytes(range(16))
 INFO = DodagInfo(0, 10, 60, 32, 56, EU_869)
 PERIOD = 10000
 A, B, C, D = 0x00A1, 0x00B1, 0x00C1, 0x00D1
+R = 0x0101  # a relay
 
 
 def _routing(reports, sequence=None):
@@ -278,6 +279,43 @@ class LostInformation(unittest.TestCase):
         self.assertEqual([x.routing.parents.preferred for x in line.nodes], [ROOT, A, B, C])
         self.assertFalse(d.parents.behind)
         line.check_ranks(self)
+
+
+class WeakRootVersion(unittest.TestCase):
+    """Global repair heard first over links below the margin (the layout of
+    the large-network `star-domain` topology): root — R — {A, B, C}; A, B
+    and C hear each other, and the root at a margin of -1.5 dB. The root's
+    DODAG information of the new version reaches them at the moment R adopts
+    it, before R sends anything in it: adopted then, it would leave them
+    without a parent of that version (the root's link is not eligible) and
+    detach them, ungrounded until they rejoin. They stay behind instead and
+    adopt through R (§9 DODAG version)."""
+
+    def test_new_version_over_a_weak_link_detaches_nobody(self):
+        net = Network(5, _KEY)
+        reports = []
+        boards = [net.add(n, routing=_routing(reports)) for n in (ROOT, R, A, B, C)]
+        net.link_both(ROOT, R)
+        for x in (A, B, C):
+            net.link_both(R, x)
+            net.link_both(ROOT, x, rssi=-120, snr=-9)  # margin -1.5 dB at SF7
+        for x, y in ((A, B), (A, C), (B, C)):
+            net.link_both(x, y)
+        root, nodes = boards[0], boards[2:]
+        imin = root.routing.dodag.imin_ms
+        net.run(30 * imin + 3 * PERIOD)
+        self.assertEqual([b.routing.parents.preferred for b in nodes], [R] * 3)
+        self.assertTrue(all(b.routing.parents.grounded for b in nodes))
+        poisons = [b.routing.dodag.counters.poisons for b in nodes]
+        floats = [b.routing.parents.floats for b in nodes]
+        start = net.now
+        root.routing.dodag.set_version(1, start)
+        root.node.wake()
+        net.run(start + 6 * imin)
+        self.assertEqual([b.routing.dodag.version for b in nodes], [1] * 3)
+        self.assertEqual([b.routing.dodag.counters.poisons for b in nodes], poisons)
+        self.assertEqual([b.routing.parents.floats for b in nodes], floats)
+        self.assertEqual([b.routing.parents.preferred for b in nodes], [R] * 3)
 
 
 class RootBeaconsLost(unittest.TestCase):
