@@ -28,7 +28,16 @@ that message did. Neither control message is any origin's traffic.
 
 - `REPLACED`: class 0 replace by newer (per port, chosen by the caller): the
   newer message takes the place, and the age, of a queued class 0 message of
-  the same origin and port;
+  the same origin and port (the newest one). With ``keep`` (chosen by the
+  caller: the presence reports, each carrying its own flags and
+  application extension), a message held for a bundle is not replaced:
+  the newer one is queued beside it (`ACCEPTED`, or a refusal or eviction
+  as any message). Held: deferred (every queued message of that origin
+  and port then takes the same deferral, the earlier time, so that they
+  leave together, oldest first), or deferred once and not yet on air (its
+  deferral ended, the frame that carries it waits for the channel) while
+  fewer than `KEEP` (2) of that origin and port are queued (beyond, under
+  congestion, the newest is replaced as before);
 - `OVER_QUOTA` refusal: the queue holds more than half its size and the
   origin already holds `quota` messages;
 - `FULL` refusal: no free entry. A forwarded class 0 message then drops the
@@ -43,14 +52,34 @@ retries, MP5 back-pressure). Refusals are counted per class; ``overflow`` is
 set by any refusal or eviction, for the presence flag *queue overflow* (the
 reporter clears it). The caller counts refusals per origin (§13).
 
+**Deferral** (§7 bundling of forwarded reports, §16): a message offered
+with ``until`` (a time, ms) is *deferred*: until then it does not start a
+frame of its own but joins, as a passenger, any frame packed for its next
+hop (after the messages that are due, which it never displaces). A relay
+defers the reports of its children until its own next presence, so that
+they leave in one bundle per period (`mesh.routing`). Only while the queue
+is *lightly loaded*: at most half its size in messages, deferred, due and
+waiting ones alike (the reserve's excluded; the level beyond which the
+quota applies: a message outside the reserve is refused or evicted only
+beyond it). A message
+that would take the queue beyond is not deferred, and every deferred entry
+is then due at once: under load the frames to the next hop are full anyway
+and carry the reports as they come (opportunistic aggregation), and
+deferred ones would hold entries the load needs. The deferral also ends at
+``until``; and when a class 0 replace by newer puts a message not deferred
+in the place of a deferred one (two deferred ones keep the earlier time),
+or queues one beside it (``keep``: they all become due).
+
 **Packing** (§7 opportunistic aggregation, §6 mixed frames): `pack` takes
-the head of the queue (the first message, in queue order, that fits a frame
-on its own), then every other message bound to the same next hop, in queue
-order, while the frame stays within the frame limit and within the allowance
-of the least urgent priority it carries (`DutyCycle.admit`). Messages that
+the head of the queue (the first message, in queue order, that is due and
+fits a frame on its own), then every other due message bound to the same
+next hop, in queue order, then the deferred ones bound to it, in queue order,
+while the frame stays within the frame limit and within the allowance of
+the least urgent priority it carries (`DutyCycle.admit`). Messages that
 can share a header (`frame.same_group`) are arranged consecutively, so that
 `frame.encode` bundles them; the frame size is tracked exactly as `encode`
-computes it.
+computes it. Round robin resumes after the origins of the due messages
+served (deferred passengers do not move it).
 
 **Commit and retries**: `pack` changes nothing; it returns a `Selection`
 (one outstanding at a time: the board transmits one frame at a time). The
@@ -65,7 +94,8 @@ queued message wait without an attempt (held during repair, §12). Entries
 are designated by their slot (``slot`` after `offer`) and checked against
 their message, so that a stale handle never touches a reused slot.
 `redirect` gives the messages not waiting a new next hop (routing, after a
-change of preferred parent: queued upward messages follow it); `select`
+change of preferred parent: queued upward messages follow it, deferred
+ones keeping their deferral); `select`
 lists them, waiting ones included on demand (routing, after a detach: they
 are held or dropped; class 1, the copies a node holds); `promote` raises an
 entry's priority.
@@ -103,6 +133,8 @@ _END = 0x3FFFFFFF  # sorts after every key
 _WAIT = 0x01
 _LOCAL = 0x02
 _CONTROL = 0x04  # the node's own DODAG information: in the reserve
+_HELD = 0x08  # deferred once (`offer` until): kept beside a newer one (keep)
+KEEP = 2  # with keep: messages of one origin and port kept once due (deferred: all)
 
 
 def accepted(outcome):
@@ -168,6 +200,8 @@ class TxQueue:
         self._flags = bytearray(entries)
         self._attempts = bytearray(entries)
         self._oidx = bytearray(entries)
+        self._due = [0] * entries  # deferred until (ms), 0: due
+        self.deferred = 0  # entries deferred
         # Age order: doubly linked list of the entries, oldest first; free
         # slots are chained through _next.
         self._prev = bytearray(entries)
@@ -183,7 +217,9 @@ class TxQueue:
         self._last = bytearray((entries - 1,) * 4)
         # Packing scratch.
         self._keys = [_END] * entries
+        self._hkeys = [_END] * entries  # deferred entries
         self._rounds = bytearray(3 * entries)
+        self._hrounds = bytearray(3 * entries)
         self._zero = bytes(3 * entries)
         self._sel = Selection(entries)
         # Reporting.
@@ -209,7 +245,17 @@ class TxQueue:
 
     # --- Admission ---------------------------------------------------------
 
-    def offer(self, msg, hop, local=False, trickle_reset=False, replace=False, exempt=False):
+    def offer(
+        self,
+        msg,
+        hop,
+        local=False,
+        trickle_reset=False,
+        replace=False,
+        exempt=False,
+        until=None,
+        keep=False,
+    ):
         """Queue msg for next hop hop; return the outcome (`ACCEPTED`...).
 
         local: the node's own message (one origin, `LOCAL`), else forwarded
@@ -217,9 +263,12 @@ class TxQueue:
         port 9 message goes into the reserve, a local port 3 one is not
         subject to the quota (module docstring); trickle_reset: port 9
         priority (`mesh.ports.priority`); replace: class 0 replace by newer
-        for this port; exempt: admitted beyond the
-        origin's quota (an error taking the entry of the message it
-        reports). On a refusal or eviction, ``reason``
+        for this port; exempt: admitted beyond the origin's quota (an error
+        taking the entry of the message it reports); until: deferred until
+        this time (ms) if the queue is lightly loaded (module docstring;
+        None: due at once); keep: with replace, a message held for a bundle
+        is not replaced, the newer one is queued beside it (module
+        docstring). On a refusal or eviction, ``reason``
         is `FULL` or `OVER_QUOTA`; on `EVICTED`, ``victim`` and
         ``victim_origin`` give the message dropped. ``slot`` is the entry of
         the message once queued (or of the message it replaced), None after a
@@ -239,13 +288,21 @@ class TxQueue:
         self.victim = None
         self.victim_origin = None
         self.slot = None
+        held = _NIL
         if replace and msg.cls == 0:
             i = self._older(key, msg.port)
-            if i != _NIL:
+            if i != _NIL and keep and self._held(i):
+                held = i
+            elif i != _NIL:
                 self._msg[i] = msg
                 self._hop[i] = hop
                 self._prio[i] = p
                 self.slot = i
+                due = self._due[i]
+                if due and not until:
+                    self._release(i)
+                elif due and until < due:
+                    self._due[i] = until
                 return REPLACED
         control = local and msg.port == DODAG_INFO
         if control:
@@ -272,8 +329,53 @@ class TxQueue:
             self.overflow = True
             self.reason = FULL
             outcome = EVICTED
+        if until and not self._light(1):
+            until = None  # loaded: due at once
+        if held != _NIL and self._msg[held] is not None and self._due[held]:
+            # Kept beside the deferred one(s) of its origin and port: one
+            # deferral for all (the earlier time; none if it is due).
+            if until and until > self._due[held]:
+                until = self._due[held]
+            self._defer_all(held, until)
         self._insert(msg, hop, p, key, local)
+        if until:
+            self._flags[self.slot] |= _HELD
+            self._due[self.slot] = until
+            self.deferred += 1
+        elif self.deferred and not self._light():
+            self.release()
         return outcome
+
+    def _light(self, more=0):
+        # Lightly loaded (deferral, module docstring): at most half the size
+        # in messages, deferred, due and waiting ones alike, more included.
+        return self._count - self.control + more <= self.size // 2
+
+    def release(self, now=None):
+        """End the deferral of every deferred entry (now: of those deferred until now at most)."""
+        if not self.deferred:
+            return
+        due = self._due
+        for i in range(self.entries):
+            if due[i] and (now is None or due[i] <= now):
+                self._release(i)
+
+    def _release(self, i):
+        self._due[i] = 0
+        self.deferred -= 1
+
+    def next_due(self):
+        """Return the earliest end of deferral of an entry not waiting, or None."""
+        if not self.deferred:
+            return None
+        t = None
+        i = self._head
+        while i != _NIL:
+            d = self._due[i]
+            if d and not self._flags[i] & _WAIT and (t is None or d < t):
+                t = d
+            i = self._next[i]
+        return t
 
     def _refuse(self, msg, local, reason):
         self.reason = reason
@@ -288,17 +390,49 @@ class TxQueue:
         return okey.index(key) if key in okey else _NIL
 
     def _older(self, key, port):
-        # Queued class 0 message of origin key on port, or _NIL.
+        # Newest queued class 0 message of origin key on port, or _NIL.
         o = self._origin(key)
         if o == _NIL:
             return _NIL
-        i = self._head
+        i = self._tail
         while i != _NIL:
             m = self._msg[i]
             if self._oidx[i] == o and m.port == port and m.cls == 0:
                 return i
-            i = self._next[i]
+            i = self._prev[i]
         return _NIL
+
+    def _held(self, i):
+        # Entry i (newest of its origin and port) is held for a bundle (keep).
+        if self._due[i]:
+            return True
+        if not self._flags[i] & _HELD:
+            return False
+        o = self._oidx[i]
+        port = self._msg[i].port
+        n = 0
+        j = self._head
+        while j != _NIL:
+            m = self._msg[j]
+            if self._oidx[j] == o and m.port == port and m.cls == 0:
+                n += 1
+            j = self._next[j]
+        return n < KEEP
+
+    def _defer_all(self, held, until):
+        # The deferred class 0 messages of held's origin and port: deferred
+        # until until (ms), or due if None.
+        o = self._oidx[held]
+        port = self._msg[held].port
+        i = self._head
+        while i != _NIL:
+            m = self._msg[i]
+            if self._due[i] and self._oidx[i] == o and m.port == port and m.cls == 0:
+                if until:
+                    self._due[i] = until
+                else:
+                    self._release(i)
+            i = self._next[i]
 
     def _eviction(self, p):
         # Forwarded class 0 entry of the lowest priority (>= p), oldest first.
@@ -355,6 +489,8 @@ class TxQueue:
             self._okey[o] = None
         if self._flags[i] & _CONTROL:
             self.control -= 1
+        if self._due[i]:
+            self._release(i)
         self._msg[i] = None
         self._flags[i] = 0
         self._next[i] = self._free
@@ -369,11 +505,13 @@ class TxQueue:
         now: time (ms) for the duty-cycle window; dutycycle: the board's
         `DutyCycle`; limit: frame limit in bytes (`frame.frame_limit`);
         toa_ms: function giving the time on air (ms) of a frame length at the
-        current spreading factor. None if no queued message fits a frame now.
-        The queue is unchanged until `commit`.
+        current spreading factor. None if no queued message is due and fits
+        a frame now. The queue is unchanged until `commit`, but for the
+        deferrals that ended by now.
         """
         size = self.entries
         keys = self._keys
+        hkeys = self._hkeys
         rounds = self._rounds
         rounds[:] = self._zero
         last = self._last
@@ -381,24 +519,43 @@ class TxQueue:
         oidx = self._oidx
         flags = self._flags
         nxt = self._next
+        due = self._due
+        deferred = self.deferred
+        if deferred:
+            self.release(now)
+            deferred = self.deferred
+            hrounds = self._hrounds
+            hrounds[:] = self._zero
         # Service order key: priority, round (rank within its origin, by age),
-        # cyclic distance of the origin from the one served last, slot.
+        # cyclic distance of the origin from the one served last, slot. Due
+        # and deferred entries apart: the deferred ones only join a frame.
         n = 0
+        hn = 0
         i = self._head
         while i != _NIL:
             if not flags[i] & _WAIT:
                 p = prio[i]
                 o = oidx[i]
                 r = (p - 1) * size + o
-                keys[n] = p << 24 | rounds[r] << 16 | ((o - last[p] - 1) % size) << 8 | i
-                rounds[r] += 1
-                n += 1
+                k = ((o - last[p] - 1) % size) << 8 | i
+                if deferred and due[i]:
+                    hkeys[hn] = p << 24 | hrounds[r] << 16 | k
+                    hrounds[r] += 1
+                    hn += 1
+                else:
+                    keys[n] = p << 24 | rounds[r] << 16 | k
+                    rounds[r] += 1
+                    n += 1
             i = nxt[i]
         if not n:
             return None
         for j in range(n, size):
             keys[j] = _END
         keys.sort()
+        if hn:
+            for j in range(hn, size):
+                hkeys[j] = _END
+            hkeys.sort()
 
         sel = self._sel
         chosen = sel._sel
@@ -417,8 +574,13 @@ class TxQueue:
         toa = 0
         groups = 0
         count = 0
-        for j in range(n):
-            k = keys[j]
+        for j in range(n + hn):
+            if j < n:
+                k = keys[j]
+            elif hop is None:
+                break  # deferred messages never start a frame
+            else:
+                k = hkeys[j - n]  # passengers, after the due messages
             i = k & 0xFF
             if hop is not None and hops[i] != hop:
                 continue
@@ -456,7 +618,8 @@ class TxQueue:
             fprio = newp
             if hop is None:
                 hop = hops[i]
-            sel_last[p] = oidx[i]
+            if j < n:
+                sel_last[p] = oidx[i]
         if not count:
             return None
 
@@ -597,12 +760,16 @@ class TxQueue:
 
     # --- Inspection and dropping ---------------------------------------------
 
-    def ready(self):
-        """Return the number of queued messages not waiting for an acknowledgement."""
+    def ready(self, now=None):
+        """Return the number of queued messages not waiting for an acknowledgement.
+
+        now: only those due by then (not deferred beyond it).
+        """
         n = 0
+        due = self._due
         i = self._head
         while i != _NIL:
-            if not self._flags[i] & _WAIT:
+            if not self._flags[i] & _WAIT and (now is None or not due[i] or due[i] <= now):
                 n += 1
             i = self._next[i]
         return n

@@ -47,10 +47,12 @@ and driven by its `mesh.dodag.Dodag`:
   sample, `mesh.reliable`), it is one sample of the preferred parent's
   link. To a relay (acknowledgement window, `NeighbourTable.acked`),
   matched by origin: a success when the node overhears the parent's forward of a
-  presence of its origin (passive), a failure after the class 1 timeout
-  towards a relay (`Reliable.timeout_ms`: from the end of the frame, a
-  frame of the frame limit + 6 slots, which covers the relay's forwarding
-  delay of at most one slot, §7). To the root, which forwards nothing (the
+  presence of its origin (passive), a failure `BUNDLE_SHARE` (11/10) of a
+  presence period after the end of the frame plus the class 1 timeout
+  towards a relay (`Reliable.timeout_ms`: a frame of the frame limit + 6
+  slots): the relay forwards the reports of its children with its own next
+  presence (**bundling**, `defer_until`), at most its longest presence
+  interval later. To the root, which forwards nothing (the
   **presence probe**): a success when a root acknowledgement entry for that
   frame comes (``engine.root_entry``; the root sends it with its next
   acknowledgement frame, at the latest with its next beacon), a failure
@@ -64,8 +66,27 @@ and driven by its `mesh.dodag.Dodag`:
   root child and of its subtree, moves with class 1 traffic only, as
   before the probe. It is the probe of an idle root child's link:
   a dead uplink still heard is left after 4 such failures and a silence
-  limit without acknowledgement of the root (§9 reachability). No retry; a
-  newer presence on air replaces the wait.
+  limit without acknowledgement of the root (§9 reachability). No retry.
+  Up to `PROBES` (2) presences await their acknowledgement at once: a
+  relay may forward a presence after the node's next one went on air;
+  the forward of a presence of its origin then acknowledges both (the
+  relay forwards both in one bundle when it held the older one, §7, or
+  the newer one only, class 0 replace by newer). A presence
+  on air towards another parent ends the wait of the former parent's
+  without a sample.
+- **Bundling** (§7, §16; `defer_until`, called by `mesh.routing` for the
+  reports to forward): the presence, topology and node information
+  reports of a child (first hop) are deferred until this node's next
+  presence (`mesh.txqueue` deferral), so that a relay sends its subtree's
+  reports in one bundle per period; any earlier frame to its parent
+  carries them too. The queue defers them only while it is lightly
+  loaded (at most half full): beyond, they are due at once and ride in
+  the frames of the load, as without bundling. Not deferred: the reports
+  of a child whose last presence came more than `REGULAR_SHARE` (1.5)
+  periods ago (new to this node: the presence it sends at once after
+  choosing it reaches the root as before, §9 repair times; or back after
+  losses), and those already bundled by a relay below (one deferral per
+  report).
 - **Topology** every topology period, jittered by ±10 %, the first one at a
   random time within the first presence period after the first attachment;
   with the DODAG information flag *topology report on change* (deployment,
@@ -88,9 +109,10 @@ parent change (an initial backoff window, §8), the margin of a link never measu
 (-128), the order of the non-parent entries, the period of node
 information (with every 8th topology report), "since the last report" read
 as since the last presence on air ("first report since boot" included),
-the timeout of the presence's passive acknowledgement (the class 1 one: a
-forward later than that, behind priority-1 traffic or the relay's own
-duty-cycle allowance, counts as a failure), the deadline of the root's
+the deadline of the presence's passive acknowledgement (the longest
+deferral at the relay and the class 1 timeout: a forward later than that,
+behind priority-1 traffic or the relay's own duty-cycle allowance, counts
+as a failure; one later still is no acknowledgement), the deadline of the root's
 acknowledgement of a presence (a beacon delayed beyond it, by the root's
 medium access or allowance, makes a failure; its entry, late, still ends
 the run of failed samples, `mesh.reliable`), presence and topology withheld
@@ -130,6 +152,11 @@ MAC_SIZE = 6
 NODE_INFO_EVERY = 8  # topology reports per node information report
 CHANGE_SLOTS = 4  # presence after a parent change: random delay in [0, 4 slots] (CW_MIN, §8)
 PROBE_SHARE = (11, 20)  # root acknowledgement of a presence: within 0.55 period (+ root timeout)
+# A relay's forward of a child's presence: within its longest presence
+# interval, 1.1 period (bundling, §7), plus the relay timeout.
+BUNDLE_SHARE = (11, 10)
+REGULAR_SHARE = (3, 2)  # a child is bundled if its last presence came within 1.5 periods
+PROBES = 2  # presences awaiting their acknowledgement at once
 
 
 def _u16(value, name):
@@ -411,10 +438,10 @@ class Reporter:
         self._presence = None  # (slot, message) of the last presence queued
         self._sticky = FIRST_REPORT  # flags not yet carried by a presence on air
         self._carried = 0  # ... of them, those the queued presence carries
-        self._probe_hop = None  # parent whose acknowledgement of the presence on air is awaited
-        self._probe_due = None  # ... until (then a failed sample)
-        self._probe_ctr = 0  # towards the root: the frame's counter (low 16 bits)
-        self._probe_end = 0  # ... and its end (batching delay rule)
+        # Presences on air awaiting their acknowledgement, oldest first: [parent,
+        # deadline (then a failed sample), frame counter (low 16 bits: the
+        # root's entry), end of the frame (batching delay rule)].
+        self._probes = []
         self._rank_errors = 0
         self._auth = 0
         self._info_left = 0  # topology reports before the next node information
@@ -445,6 +472,34 @@ class Reporter:
         """`mesh.dodag.Dodag.changed` events: a new preferred parent sends a presence."""
         if events & PARENT_CHANGED:
             self.parent_changed(now)
+
+    def defer_until(self, msg, source, now):
+        """Return the time until which a report to forward is deferred, or None (§7, §16).
+
+        msg: a report (port 1, 2, 5) received from source, to forward
+        upward. The reports of a child (first hop: its origin is source)
+        wait for this node's next presence, which carries them in one
+        bundle per period (while the queue is lightly loaded, `mesh.txqueue`
+        deferral); not those of a child whose last presence came
+        more than 1.5 periods ago (`REGULAR_SHARE`: new to this node, its
+        presence sent at once after its parent change, §9, or back after
+        losses), nor those already bundled by a relay below.
+        """
+        if msg.origin != source:
+            return None
+        entry = self.engine.neighbours.get(source)
+        if entry is None:
+            return None
+        last = entry.reported
+        if msg.port == PRESENCE:
+            entry.reported = now
+        at = self.presence_at
+        if last is None or at is None or at <= now:
+            return None
+        num, den = REGULAR_SHARE
+        if now - last > self.engine.neighbours.period_ms * num // den:
+            return None
+        return at
 
     def flags(self, now):
         """Return the flags of a presence generated at now (and record what it reports)."""
@@ -522,8 +577,8 @@ class Reporter:
 
     def _tick(self, now):
         self._base_tick(now)
-        if self._probe_due is not None and now >= self._probe_due:
-            self._probe(False, now)
+        while self._probes and now >= self._probes[0][1]:
+            self._probe(self._probes.pop(0), False, now)
         attached = self.dodag.attached
         if self.presence_at is not None and now >= self.presence_at:
             if attached:
@@ -545,9 +600,12 @@ class Reporter:
 
     def _timer(self):
         t = self._base_timer()
-        for u in (self.presence_at, self.topology_at, self._probe_due):
+        for u in (self.presence_at, self.topology_at):
             if u is not None and (t is None or u < t):
                 t = u
+        for p in self._probes:
+            if t is None or p[1] < t:
+                t = p[1]
         return t
 
     def _sent(self, sel, counter, now):
@@ -568,48 +626,60 @@ class Reporter:
         self._carried = 0
         self._presence = None
         # Acknowledgement of the presence (§9): one sample when the parent's
-        # forward is overheard, or the root's entry comes, or the timeout
+        # forward is overheard, or the root's entry comes, or the deadline
         # passes; none for a frame whose class 1/2 messages already give its
-        # sample (`mesh.reliable`).
-        self._probe_hop = None
-        self._probe_due = None
+        # sample (`mesh.reliable`). A presence still awaited towards another
+        # parent gives none (the node left it).
+        hop = sel.dest
+        probes = self._probes
+        for p in [p for p in probes if p[0] != hop]:
+            probes.remove(p)
         if cls:
             return
-        hop = sel.dest
+        if len(probes) >= PROBES:
+            probes.pop(0)  # no sample (not expected: deadlines are below two periods)
         end = now + sel.toa_ms
         rel = self.engine.reliable
-        self._probe_hop = hop
+        period = self.engine.neighbours.period_ms
         if hop == ROOT:
             num, den = PROBE_SHARE
-            self._probe_ctr = counter & 0xFFFF
-            self._probe_end = end
-            self._probe_due = (
-                end + self.engine.neighbours.period_ms * num // den + rel.timeout_ms(ROOT)
-            )
+            due = end + period * num // den + rel.timeout_ms(ROOT)
         else:
-            self._probe_due = end + rel.timeout_ms(hop)
+            num, den = BUNDLE_SHARE
+            due = end + period * num // den + rel.timeout_ms(hop)
+        # Deadlines in sending order (the shorter root deadline only
+        # follows a presence to the same parent, the root).
+        probes.append([hop, due, counter & 0xFFFF, end])
 
     def _root_entry(self, counter, now):
         self._base_root_entry(counter, now)
-        if self._probe_due is not None and self._probe_hop == ROOT and counter == self._probe_ctr:
-            self._probe(True, now)
+        for p in self._probes:
+            if p[0] == ROOT and p[2] == counter:
+                self._probes.remove(p)
+                self._probe(p, True, now)
+                return
 
     def _overheard(self, header, messages, now):
         self._base_overheard(header, messages, now)
-        if self._probe_due is None or header.source != self._probe_hop:
+        source = header.source
+        if not self._probes or source == ROOT:
             return
         own = self.engine.address
         for m in messages:
             if m.port == PRESENCE and m.mode == UPWARD and m.origin == own:
-                self._probe(True, now)
+                # Matched by origin: every presence awaited from this parent
+                # (both in one bundle, or the newer one in place of the older).
+                for p in [p for p in self._probes if p[0] == source]:
+                    self._probes.remove(p)
+                    self._probe(p, True, now)
                 return
 
-    def _probe(self, ok, now):
-        hop = self._probe_hop
+    def _probe(self, probe, ok, now):
+        hop = probe[0]
         table = self.engine.neighbours
         if hop != ROOT:
             table.acked(hop, ok, now)
-        elif not ok and self.engine.reliable.root_failure(self._probe_end):
+        elif not ok and self.engine.reliable.root_failure(probe[3]):
             # Towards the root: reachability only (its entry, `answered`,
             # ends the run), one failure per batching delay (§9).
             table.missed(ROOT, now)
@@ -617,8 +687,6 @@ class Reporter:
             self.counters.presence_acked += 1
         else:
             self.counters.presence_unacked += 1
-        self._probe_hop = None
-        self._probe_due = None
 
     # --- Sending ----------------------------------------------------------------------
 

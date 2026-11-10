@@ -31,7 +31,7 @@ from mesh.reliable import ATTEMPTS, NO_ROUTE, RETRY_DOUBLINGS, identity
 from mesh.replay import ReplayTable
 from mesh.routing import Routing
 from mesh.security import KeyRing, Security
-from sim.medium import OK
+from sim.medium import COLLISION, HALF_DUPLEX, OK
 from sim.medium import Observer as RadioObserver
 from sim.net import Network, Observer
 from sim.platform import FakePlatform
@@ -297,7 +297,9 @@ class Forming(unittest.TestCase):
         # node had when it sent it (restored by the first relay, §11).
         lost = 0
         for n in NODES:
-            sent = dict((c, p) for t, c, p in m.generated[n] if window <= t < m.net.now - 2000)
+            # Reports of the last 1.1 period may still be bundled at a relay (§7).
+            recent = m.net.now - 11 * P // 10 - 2000
+            sent = dict((c, p) for t, c, p in m.generated[n] if window <= t < recent)
             got = dict((c, p) for t, c, p in m.presences.get(n, []))
             self.assertTrue(len(sent) >= 10, (n, sent))
             missing = [c for c in sent if c not in got]
@@ -375,9 +377,16 @@ class RelayKilled(unittest.TestCase):
                 self.assertTrue(after, (n, t))
                 self.assertEqual(set(after), set((other,)), (n, after))
                 # A presence lost on the way (no retry, §8 K_MISS) is a
-                # reception lost at the other relay or at the root.
+                # reception lost at the other relay or at the root (those of
+                # the last 1.1 period may still be bundled there, and one
+                # replaced there by the next one before the bundle left
+                # reaches the root as that one, §7).
                 got = set(c for tp, c, p in m.presences[n])
-                lost += len([c for tg, c, p in gen if tg < end - 2000 and c not in got])
+                recent = end - 11 * P // 10 - 2000
+                for i, (tg, c, _p) in enumerate(gen):
+                    replaced = i + 1 < len(gen) and gen[i + 1][1] in got
+                    if tg < recent and c not in got and not replaced:
+                        lost += 1
             self.assertTrue(lost <= self._losses(m, other) - losses, lost)
             self.assertEqual(m.consistent((other, C, D, E)), [])
 
@@ -388,10 +397,10 @@ class RelayKilled(unittest.TestCase):
             reporter = m.b(n).routing.reporter
             failed[n] = []
 
-            def probe(ok, now, probe=reporter._probe, reporter=reporter, out=failed[n]):
-                if not ok and reporter._probe_hop == relay:
+            def probe(entry, ok, now, probe=reporter._probe, out=failed[n]):
+                if not ok and entry[0] == relay:
                     out.append(now)
-                probe(ok, now)
+                probe(entry, ok, now)
 
             reporter._probe = probe
         return failed
@@ -408,6 +417,7 @@ class RelayKilled(unittest.TestCase):
         m, relay, other, children = self._formed(4)
         kill = m.net.now
         log = m.watch((C, D), kill)
+        failed = self._failed_samples(m, children, relay)
         m.b(relay).power_loss(off_ms=OFF)
         c = m.b(C)
         sent = []
@@ -417,10 +427,6 @@ class RelayKilled(unittest.TestCase):
                 sent.append((m.net.now, c.submit(APP, 1, ROOT, b"p%d" % len(sent))))
                 m.net.at(m.net.now + 2000, submit)
 
-        m.net.at(kill + 100, submit)
-        m.run(kill + 3 * P)
-        t, parent = switched(log, C, relay)
-        self.assertEqual(parent, other)
         # Switch with traffic through a relay (§9 table): 3 attempts, each
         # the frame and its acknowledgement timeout, the last 2 after a
         # retry delay (at most 256 slots: C's other frames timing out double
@@ -429,8 +435,15 @@ class RelayKilled(unittest.TestCase):
         rel = c.engine.reliable
         frame_ms = c.engine.toa_ms(frame.OVERHEAD + 2 + 2 + 2)
         slot = c.engine.slot_ms
-        bound = ATTEMPTS * (frame_ms + rel.relay_timeout_ms + 4 * slot)
-        bound += 2 * (rel.retry_ms << RETRY_DOUBLINGS)
+        hop = frame_ms + rel.relay_timeout_ms + 4 * slot
+        bound = ATTEMPTS * hop + 2 * (rel.retry_ms << RETRY_DOUBLINGS)
+        m.net.at(kill + 100, submit)
+        # The last message (submitted 4.1 s after the kill) may take the
+        # whole bound through the dead relay, then one attempt through the
+        # other relay and that relay's forward to the root.
+        m.run(max(kill + 3 * P, kill + 4100 + bound + 2 * hop))
+        t, parent = switched(log, C, relay)
+        self.assertEqual(parent, other)
         took = t - 100
         self.assertTrue(took <= bound, (took, bound))
         # At least one timeout: the failed attempts raise A's ETX (p_ack), so
@@ -440,8 +453,11 @@ class RelayKilled(unittest.TestCase):
         # periods. (A node that rejoins after its solicitation takes the
         # best candidate heard in its answer window, §9: it may be D, whose
         # parent is the dead relay; D then has traffic.)
+        # Earlier only on failed samples, as for idle children (above).
         if D in children and not m.b(D).engine.counters.tx_messages[APP]:
-            self.assertTrue(switched(log, D, relay)[0] >= 5 * P // 2 - 11 * P // 10)
+            td = switched(log, D, relay)[0]
+            if td < 5 * P // 2 - 11 * P // 10:
+                self.assertTrue([u for u in failed[D] if u <= kill + td], (td, failed[D]))
         # Every class 1 message reached the root once (local repair, §1).
         got = [p for o, p in m.root.inbox_from(APP) if o == C]
         self.assertEqual(sorted(got), [b"p0", b"p1", b"p2"])
@@ -753,7 +769,11 @@ class PartitionAndReturn(unittest.TestCase):
         heal = m.net.now
         m.run(heal + 500)
         m.net.medium.heal(sub, (ROOT, A, B))
-        m.run(heal + 3 * P)
+        # Three periods, and the 1.1 period a relay may hold a report for
+        # its bundle (§7) with its forwarding delay: the first report of the
+        # subtree after the heal (its children, synchronised by the heal,
+        # may also collide) is still on its way at heal + 3 periods.
+        m.run(heal + 3 * P + 11 * P // 10 + 2000)
         # Back: reattached within one solicitation period, routes consistent.
         for n in sub:
             back = [t for t, x, p, r in log if x == n and t > heal - start and r != RANK_INFINITE]
@@ -1056,7 +1076,9 @@ class RejoinBest(unittest.TestCase):
     (§9). Only a frame carrying a root sequence makes a candidate: when
     D's answer is lost to a collision at C (D and E answer at the same
     time), C has no candidate at the close and takes the first one heard
-    after it."""
+    after it. When C's solicitation is lost at D (to a frame of F, hidden
+    from C), D does not answer: C takes E, alone in its window, and keeps
+    it."""
 
     def test_rejoin_through_the_best_candidate_of_the_window(self):
         f = 0x00F1
@@ -1122,6 +1144,8 @@ class RejoinBest(unittest.TestCase):
         c.engine.sent = sent
         c.engine.heard = on_heard
         c.engine.decoded = decoded
+        asked = _SequenceFrames(C, D, _solicits)  # C's solicitations at D
+        medium.observers.append(asked)
         kill = m.net.now
         log = m.watch((C,), kill)
         m.b(A).power_loss(off_ms=OFF)
@@ -1132,24 +1156,39 @@ class RejoinBest(unittest.TestCase):
         close = solicited[0] + c.routing.dodag.imin_ms + 8 * c.engine.slot_ms
         rejoin = [(t + kill, x) for t, n, x, r in log if t + kill > solicited[0]]
         self.assertTrue(rejoin, log)
-        if D in [s for t, s in candidates if t < close]:
+        window = [s for t, s in candidates if t < close]
+        # C's solicitation lost at D (to a frame of F, hidden from C): D
+        # does not answer it.
+        fate = [x for t0, t1, x in asked.frames if t0 == solicited[0]]
+        unasked = fate in ([COLLISION], [HALF_DUPLEX])
+        if D in window:
             # Both heard in the window.
             sources = [s for t, s in heard if t < close]
             self.assertTrue(E in sources and D in sources, heard)
             # C rejoined at the close, through D, and keeps it.
             self.assertEqual(rejoin[0][1], D, log)
             self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
+            parent = D
+        elif window:
+            # D unasked: E alone in the window, taken at the close and kept
+            # (D, better by less than the switch threshold, comes after).
+            self.assertTrue(unasked, (fate, candidates))
+            self.assertEqual(set(window), set((E,)), candidates)
+            self.assertEqual(rejoin[0][1], E, log)
+            self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
+            parent = E
         else:
-            # D's answer lost at C: no selection before the close, then the
-            # first candidate heard (the best of none, §9).
+            # D's answer lost at C, or D unasked and E's answer lost: no
+            # selection before the close, then the first candidate heard
+            # (the best of none, §9), kept.
             self.assertEqual(len(lossy), 2, lossy)
-            self.assertTrue(lossy[1] > lossy[0], (lossy, heard))
+            self.assertTrue(lossy[1] > lossy[0] or unasked, (lossy, fate, heard))
             self.assertTrue(rejoin[0][0] >= close, (close, rejoin[0]))
-            t1, first = [x for x in candidates if x[0] >= close][0]
-            self.assertEqual(rejoin[0][1], first, (candidates, rejoin))
+            t1, parent = [x for x in candidates if x[0] >= close][0]
+            self.assertEqual(rejoin[0][1], parent, (candidates, rejoin))
             self.assertTrue(t1 <= rejoin[0][0] <= t1 + 10, (t1, rejoin[0]))
-        self.assertEqual([x for t, x in rejoin if x != D], [], log)
-        self.assertEqual([p.preferred, m.preferred(D), m.preferred(E)], [D, f, D])
+        self.assertEqual([x for t, x in rejoin if x != parent], [], log)
+        self.assertEqual([p.preferred, m.preferred(D), m.preferred(E)], [parent, f, D])
         self.assertEqual(m.consistent((B, C, D, E, f)), [])
 
 
@@ -1159,6 +1198,11 @@ def _carries_sequence(msg):
     if msg.port == PRESENCE:
         return msg.mode == frame.FIRST_HOP
     return msg.port == DODAG_INFO and len(msg.payload) > 0
+
+
+def _solicits(msg):
+    # A solicitation: DODAG information without payload (§9).
+    return msg.port == DODAG_INFO and not len(msg.payload)
 
 
 def _flagged_frames(board):
@@ -1177,18 +1221,20 @@ def _flagged_frames(board):
 
 
 class _SequenceFrames(RadioObserver):
-    """(start, end, fate at dst) of the frames of source carrying a root sequence."""
+    """(start, end, fate at dst) of the frames of source carrying a root
+    sequence (or a message for which carries is true)."""
 
-    def __init__(self, source, dst):
+    def __init__(self, source, dst, carries=_carries_sequence):
         self.source = source
         self.dst = dst
+        self.carries = carries
         self.frames = []
         self._on_air = {}
 
     def transmitting(self, source, f, start, end, receivers):
         if source == self.source:
             _, msgs = _open(f)
-            if any(_carries_sequence(x) for x in msgs):
+            if any(self.carries(x) for x in msgs):
                 self._on_air[start] = [r[0] for r in receivers]
 
     def ended(self, source, start, end, fates):
@@ -1236,7 +1282,7 @@ class FloatAndGround(unittest.TestCase):
         unground = pb._unground
 
         def on_unground(at):
-            floats.append((at, pb.sequence_at, pb.ground_ms()))
+            floats.append((at, pb.sequence_at, pb.ground_ms(), m.net.now))
             return unground(at)
 
         pb._unground = on_unground
@@ -1266,14 +1312,18 @@ class FloatAndGround(unittest.TestCase):
         while pb.grounded and m.net.now < start + 8 * P:
             m.run(m.net.now + 100)
         self.assertFalse(pb.grounded)
-        lost, last, g = floats[0]
+        lost, last, g, checked = floats[0]
         h = min(8, (pb.rank + MIN_HOP - 1) // MIN_HOP)
         self.assertEqual((lost - last, g), ((5 + 2 * h) * P // 2,) * 2)
         self.assertEqual((pb.preferred, pb.detaches, pc.preferred), (A, 0, B))
-        # One period ungrounded: B's frames flagged, C ungrounded at once by
-        # the first one, nothing of B's traffic forwarded meanwhile.
-        m.run(lost + P)
-        mine = [f for f in frames_b if f[0] > lost]
+        # One period ungrounded: B's frames flagged from the check that
+        # ungrounded it (as of G after its last advance, which a fall of
+        # B's rank, shortening G, may place before the check), C ungrounded
+        # at once by the first one, nothing of B's traffic forwarded
+        # meanwhile.
+        self.assertTrue(lost <= checked, (lost, checked))
+        m.run(checked + P)
+        mine = [f for f in frames_b if f[0] > checked]
         self.assertTrue(mine and all(f[1] for f in mine), frames_b[-5:])
         self.assertEqual([f for f in mine if APP in f[2]], [])
         self.assertFalse(pc.grounded)

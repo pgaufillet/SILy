@@ -448,13 +448,68 @@ gets its share, not its relays' capacity.
   (§12 queues and resources).
 - **Strict priority between levels**: under sustained priority-1 load,
   priority-3 messages wait. Periodic reports replace older ones in the queue
-  (class 0, replace by newer, §12), so waiting costs no memory.
+  (class 0, replace by newer, §12; a presence held for a bundle excepted,
+  below), so waiting costs no memory.
 - A board transmits at most one frame at a time and returns to receive
   immediately (half duplex).
 - Periodic timers (presence, topology, root beacon) are jittered by ±10 % so
   that boards switched on together do not stay synchronised.
 - A relay waits a random delay in [0, ToA(presence frame)] before forwarding,
   to desynchronise relays that heard the same frame.
+- **Bundling of reports** (§16): a relay defers the presence, topology and
+  node information reports of its children (received on their first hop)
+  until its own next presence, which carries them in one bundle per
+  period; they also ride, as passengers, in any frame it sends to its
+  parent before (class 1 traffic). A deferred message never starts a frame
+  nor displaces a due one. Not deferred: the reports of a child whose last
+  presence came more than 1.5 periods ago (new to the relay: the presence
+  it sends at once after choosing it reaches the root as before, §9 repair
+  times, finding 2; or back after losses), and those already bundled by a
+  relay below (one deferral per report, whatever the depth). **Only
+  while the queue is lightly loaded**: at most half its size, every
+  message counted, deferred, due or waiting for an acknowledgement (the
+  level beyond which the origin quota applies: a message outside the
+  reserve is refused or evicted only beyond it, §12). A report that
+  would take the queue beyond is not deferred, and every deferred one is
+  then due at once: under load the relay's frames to its parent are full
+  anyway and carry the reports as they come (opportunistic aggregation,
+  below), and deferred reports would hold entries the load needs. The
+  rule only advances a report, so that the deadline of a child's
+  presence acknowledgement (§9) holds. An earlier rule counted the
+  deferred reports only (due at once beyond half the queue): under and
+  after an overload of the hidden-root star they kept part of the
+  relay's queue, which stayed fuller and drained later, and one host
+  scenario no longer recovered in time. A lower level, a quarter, splits
+  the bundle of an idle relay of 29 children (their reports of one
+  period outnumber a quarter of the queue): 102 s/h on air at SF8
+  instead of 95 s/h, beyond the 96 s/h of the budget (§16). **A held
+  presence is not replaced**: a child's next presence may come while the
+  relay still holds the previous one (0.9 period apart by the jitter,
+  held up to 1.1 period); each carries its own flags (first report,
+  queue overflow, errors, duty cycle high, which the child clears once
+  its presence is on air) and application extension, so the newer one is
+  queued beside it, deferred as long (the earlier time of the two), and
+  both leave in the same bundle, oldest first. Held: deferred, or due and
+  waiting for the frame that carries it (the relay's presence waiting for
+  the channel), while fewer than two presences of that child are queued
+  (beyond, under congestion, the newest due one is replaced as before).
+  A relay above keeps both too: a presence does not replace one of the
+  same origin that came in the same frame. Replace by newer stays for
+  the other cases (topology and node information, a presence that was
+  never deferred, the node's own reports). Before this rule the older
+  presence was replaced, lost without a count (about 2 % of the relayed
+  periods of a child in the host scenarios). Cost: a
+  child's report reaches the root up to 1.1 period later (the relay's
+  longest presence interval) and is lost with its relay if the relay dies
+  meanwhile. After a relay failure the root then hears nothing from a
+  child for at most 3.7 periods (no false alarm at 4.5, as before
+  bundling) while the relay's last frame is its presence (its bundle);
+  when the relay sent another frame after it (an advertisement, an
+  acknowledgement to a child), which keeps the children's silence clock
+  fresh, up to 4.8 periods: a false alarm at 4.5 periods is possible in
+  the worst phase (TLA+ `KMiss`, `Bundle`, `Other`). Ending every
+  deferral at such a frame restores 3.7 periods in the model, but its
+  extra frame slowed a global repair wave in a host scenario: not adopted.
 - **Opportunistic aggregation**: when a board gets the channel, it packs the
   queued messages bound to the next hop of the head of the queue into one
   frame, in queue order, up to 255 B (or the profile's maximum transmission
@@ -545,9 +600,19 @@ acknowledgement window and the time of its newest failure.
   matched by origin: a presence sent to a preferred parent other than the
   root, in a frame without class 1/2 message, is one sample, a success when
   the node overhears the parent forward a presence of its origin, a failure
-  after the class 1 timeout towards a relay (§12: a forward later than that,
-  behind priority-1 traffic or the parent's own allowance, counts as a
-  failure); no retry. **Presence probe**: when the parent is the root,
+  1.1 period plus the class 1 timeout towards a relay after the end of its
+  frame (the parent forwards it with its own next presence, §7 bundling;
+  a forward later than that, behind priority-1 traffic or the parent's own
+  allowance, counts as a failure); no retry. Two presences may await their
+  acknowledgement at once (the parent forwarding the older one after the
+  newer went on air): the forward of a presence of the node's origin
+  acknowledges both, whether the parent forwards both in one bundle (it
+  keeps a presence it holds, §7) or the newer one only (class 0 replace
+  by newer), so that an older one lost and a newer one received both read
+  as successes. Before bundling, the deadline was the class 1 timeout
+  alone; a parent slowed by its own traffic beyond it (2.3–3.7 s at SF8)
+  made an idle node leave it and detach after 4 such presences and a
+  silence limit. **Presence probe**: when the parent is the root,
   which forwards nothing, the root acknowledges the frame carrying the
   node's own presence (first hop, no class 1/2 message) with a **lazy**
   entry (§12, §16): no batching delay of its own, it goes with the root's
@@ -1162,7 +1227,9 @@ frame of the exchange lost on any hop, see below.)
   collisions at the relay (hidden terminals: the 30-node star, D28)
   (TLA+ `DODAG`, Exhaust = "keepboth", Elig = "reachall"). A node with
   presence reports only probes the relay once per period: 4 failed
-  presences and a silence limit, 4.4 periods at most, then the selection.
+  presences, the last one decided 1.1 period and a relay timeout after its
+  frame (§7 bundling), and a silence limit, 5.5 periods and a relay
+  timeout at most, then the selection.
 - **Switch, idle**: no frame from the preferred parent for 2.5 presence
   periods, the silence limit (a parent sends at least its own presence
   report each period, the root its beacon each half period).
@@ -1269,7 +1336,8 @@ Findings:
    periods (75 s at SF7–8, 150 s at SF9), and costs no airtime, when the
    parent falls silent; a dead uplink to a parent still heard is left
    after 4 failed presence samples (5.5 periods at most from the root,
-   167 s at SF7, 337 s at SF9; 4.4 periods and a selection from a relay),
+   167 s at SF7, 337 s at SF9; 5.5 periods, a relay timeout and a
+   selection from a relay),
    the root's acknowledgements of its children's presence riding in its
    beacons. The children
    of a failed relay re-attach and send their presence before the root
@@ -1580,7 +1648,9 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   are counted locally, §13).
 - **Replace by newer** (optional, per port): a queued class 0 message is
   replaced by a newer one with the same origin and port. The mesh's own
-  presence and topology reports use it.
+  presence and topology reports use it; a forwarded presence held for a
+  bundle, or that came in the same frame, is kept, the newer one queued
+  beside it (§7 bundling).
 - Broadcasts are class 0 in v1 (§9); class 1 or 2 broadcasts are refused.
   Applications confirm themselves when they need to (SILy: each node confirms
   its mode in the presence application extension, and the Gateway
@@ -2438,7 +2508,10 @@ preamble per one or two entries).
   extension (§11); the last punch sequence is the class 2 tail carried by
   presence until acknowledged (MP4).
 - **Opportunistic aggregation** of opaque messages per next hop (§7), with
-  bundling of same-size messages and first-hop compression (§11).
+  bundling of same-size messages and first-hop compression (§11); a relay
+  defers its children's reports to its own presence while its queue is
+  lightly loaded, so that it sends one bundle per period, as budgeted
+  above (§7 bundling of reports); under load its frames carry them.
 - **Routing information travels in frame headers** (version, rank); only the
   root emits a periodic beacon, every half presence period (its own jittered
   timer, §9: three consecutive lost beacons tolerated by its children),

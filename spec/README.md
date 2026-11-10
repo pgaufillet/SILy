@@ -194,6 +194,7 @@ they mirror (file:line, `src/mesh`).
 | Minimum samples (P4 with one sample per lost acknowledgement) | NMin = 3 for P4 (rank + 4), NMin = 4 for P4Strong; NMin = 2 fails | `AckWindow_nmin*` |
 | Bad-link detection (NMin = 4, with or without latch) | 4 consecutive failures on a fresh window, 13 whatever the history (as the code); 3 and 12 do not suffice | `AckWindow_nmin4_detect*`, `AckWindow_latch_detect` |
 | Root threshold Tr, no false alarm (report within 1 tick) | Tr ≥ 74 ticks = 3.7T (22 + 50 + 1 < Tr) | `KMiss_Tr74`, `KMiss_Tr73` |
+| Bundling (MESH_DESIGN §7: X forwards C's presence with its own next presence, lost if X fails first) | the same bound, 3.7T, when X's frames are its presences; when X also sends other frames, the deferral kept across them (the code) needs 4.8T (false alarm at 4.5T), 3.7T again if they ended it (a candidate not adopted) | `KMiss_bundle_Tr74`, `_Tr73`, `_Tr90`, `KMiss_bundle_flush_Tr90`, `_flush_Tr73`, `KMiss_bundle_keep_Tr90` |
 | Tr, 2 lost presences tolerated | Tr ≥ 67 ticks = 3.35T | `Silence_root_P1_Tr67`, `_Tr66` |
 | Tr, 3 lost presences detected | Tr ≤ 72 ticks = 3.6T | `Silence_root_P2_Tr72`, `_Tr73` |
 | Tr band | **empty** (74 > 72), at D = 0 | `KMiss_Tr72` |
@@ -230,7 +231,11 @@ they mirror (file:line, `src/mesh`).
   rerouting or root acknowledgement batching.
 - **Presence** (`LinkCut`): every T ticks exactly, without jitter; the
   parent's forwarding frame is not counted as one of its frames
-  (conservative for P3).
+  (conservative for P3). Its sample is taken at once; in the code (bundling,
+  MESH_DESIGN §7) the parent forwards it with its own next presence, and a
+  failure is decided up to 1.1T and a relay timeout after the presence: for
+  a link sampled by presence only, P3's bound from the end of the cut is
+  that much longer (not modelled).
 - **Root alarm**: K_MISS is not implemented in the code; it is modelled as
   a silence threshold `Tr` on C's presence at the root (`RootTh`).
 

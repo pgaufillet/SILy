@@ -558,6 +558,47 @@ class ForwardingDelay(unittest.TestCase):
         self.assertTrue(len(delays) > 20, sorted(delays))
 
 
+class Deferral(unittest.TestCase):
+    """§7: a deferred forward (a child's report, until the relay's next
+    presence) leaves at its time, or earlier with a frame to its next hop."""
+
+    def _report(self, relay, now, until):
+        h = Header(B, A, 1, 16, 0)
+        msg = Message(frame.UPWARD, 0, ports.PRESENCE, b"\x10\x00\x00\x01", origin=A)
+        relay.forward(msg, h, now, True, until)
+        return _actions(relay, now)  # as after a reception
+
+    def _decoded(self, data):
+        # (origin, port) of the messages of a frame, as the root receives them.
+        root = _engine(ROOT, seed=3)
+        inbox = _Inbox()
+        root.bind(20, inbox)
+        root.bind_mesh(ports.PRESENCE, inbox)
+        _rx(root, 0, data)
+        return sorted((origin, port) for origin, port, _ in inbox.messages)
+
+    def test_leaves_at_its_time(self):
+        relay = _engine(B, hop=ROOT)
+        self.assertEqual(self._report(relay, 0, 5000), [])
+        now = relay.deadline()
+        self.assertTrue(now <= relay.slot_ms)
+        self.assertEqual(_actions(relay, now), [])  # not due: no carrier sense
+        self.assertEqual(relay.deadline(), 5000)
+        frames, _ = _drain(relay, 5000)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(self._decoded(frames[0]), [(A, ports.PRESENCE)])
+
+    def test_joins_a_frame_to_its_next_hop(self):
+        relay = _engine(B, hop=ROOT)
+        self._report(relay, 0, 50000)
+        _actions(relay, relay.deadline())
+        self.assertTrue(relay.submit(20, 0, ROOT, b"own") >= 0)
+        frames, _ = _drain(relay, 1000)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(self._decoded(frames[0]), [(A, ports.PRESENCE), (B, 20)])
+        self.assertEqual((len(relay.queue), relay.deadline()), (0, None))
+
+
 class EngineChecks(unittest.TestCase):
     def test_bad_address(self):
         p = FakePlatform(XorShift32(1))

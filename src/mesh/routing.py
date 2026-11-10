@@ -19,9 +19,19 @@ those waiting for an acknowledgement included (not retried towards a
 parent of rank 255; §12 holding during repair, resumed on the next parent),
 class 0 ones are dropped (counted as ``no_route`` by the link).
 Forwarded presence, topology and node information reports replace an older
-report of the same origin still queued (class 0 replace by newer, §12): the
-relay aggregates the reports of its subtree into the frames it sends anyway
-(§7, §16; bundling by `mesh.txqueue` and `mesh.frame`).
+report of the same origin still queued (class 0 replace by newer, §12),
+but for a presence held for a bundle (bundling, below) or one that came in
+the same frame (a bundle from below): each presence carries its own flags
+and application extension, so the newer one is queued beside it and they
+leave together (`TxQueue.offer` ``keep``).
+**Bundling** (§7, §16): the reports of the node's children (first hop) are
+deferred until its own next presence (`Reporter.defer_until`,
+`mesh.txqueue` deferral), so that they leave with it in one bundle per
+period (`mesh.frame`), or earlier in any frame the node sends to its
+parent (class 1 traffic), or at once when its queue is more than half
+full (the load's frames carry them); those of a child new to the node
+(the presence it sends at once after choosing it, §9) and those already
+bundled by a relay below leave at once (one deferral per report).
 
 **First-hop compression** (§11): a node's own reports leave in mode 6; the
 node that receives them rewrites them in mode 1 (origin = link source) and
@@ -116,6 +126,11 @@ class Routing:
         self.parents = self.dodag.parents
         self.counters = Counters()
         self.on_report = None
+        # Frame being forwarded (source, counter) and the origins of the
+        # presences forwarded from it.
+        self._rx_source = None
+        self._rx_counter = None
+        self._rx_origins = []
         engine.next_hop = self.dodag.next_hop
         engine.reroute = self.parents.reroute
         self._base_forward = engine.forward
@@ -171,7 +186,24 @@ class Routing:
             key = identity(msg, header.source, None)
             if not msg.cls or self.engine.reliable.holding(key, header.source):
                 return DELIVERED
-        return self._base_forward(msg, header, now, not msg.cls and msg.port in _REPORTS)
+        if msg.cls or msg.port not in _REPORTS:
+            return self._base_forward(msg, header, now)
+        until = self.reporter.defer_until(msg, header.source, now)
+        if msg.port != PRESENCE:
+            return self._base_forward(msg, header, now, True, until)
+        return self._base_forward(msg, header, now, self._first(msg, header), until, True)
+
+    def _first(self, msg, header):
+        # False if a presence of msg's origin was forwarded from the same
+        # frame (two held together below: not replaced, §7).
+        if header.source != self._rx_source or header.counter != self._rx_counter:
+            self._rx_source = header.source
+            self._rx_counter = header.counter
+            del self._rx_origins[:]
+        if msg.origin in self._rx_origins:
+            return False
+        self._rx_origins.append(msg.origin)
+        return True
 
     def _repeated(self, msg, header, now):
         self._base_repeated(msg, header, now)

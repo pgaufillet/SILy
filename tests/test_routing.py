@@ -152,7 +152,8 @@ class DataPathValidation(unittest.TestCase):
         line.run(3000)
         c = relay.engine.counters
         self.assertEqual((c.duplicates, c.retaken), (0, 1))
-        self.assertEqual(line.node.engine.counters.acks_explicit, 1)
+        # Its frame gets an explicit entry (N may overhear the forward first).
+        self.assertEqual(c.ack_entries, 1)
         self.assertEqual((len(line.node.engine.queue), line.node.engine.counters.retries), (0, 0))
         self.assertEqual(line.root.inbox_from(APP), [(X, b"m")])
         self.assertEqual(line.root.engine.counters.duplicates, 1)
@@ -190,13 +191,12 @@ class DataPathValidation(unittest.TestCase):
 
 
 class Forwarding(unittest.TestCase):
-    def _header(self, line):
-        return Header(R, N, 1, 16, line.relay.engine.dodag_version)
+    def _header(self, line, counter=1):
+        return Header(R, N, counter, 16, line.relay.engine.dodag_version)
 
     def test_reports_replace_older_ones_of_the_same_origin(self):
         line = Line(7)
         e = line.relay.engine
-        h = self._header(line)
         now = line.net.now
         base = len(e.queue)
         p1 = Message(UPWARD, 0, PRESENCE, b"\x10\x00\x00\x01", origin=X)
@@ -204,8 +204,8 @@ class Forwarding(unittest.TestCase):
         t1 = Message(UPWARD, 0, TOPOLOGY, b"\x00", origin=X)
         a1 = Message(UPWARD, 0, APP, b"a", origin=X)
         a2 = Message(UPWARD, 0, APP, b"b", origin=X)
-        for m in (p1, p2, t1, a1, a2):
-            self.assertEqual(e.forward(m, h, now), QUEUED)
+        for c, m in enumerate((p1, p2, t1, a1, a2)):
+            self.assertEqual(e.forward(m, self._header(line, c + 1), now), QUEUED)
         # Presence replaced; topology and application messages kept.
         self.assertEqual(len(e.queue), base + 4)
         queued = [m for m in e.queue._msg if m is not None and m.origin == X]
@@ -213,12 +213,34 @@ class Forwarding(unittest.TestCase):
             sorted(bytes(m.payload) for m in queued if m.port == PRESENCE), [b"\x10\x00\x00\x02"]
         )
 
+    def test_presences_of_one_origin_in_one_frame_are_kept(self):
+        # A relay below held two presences of X for its bundle (§7): both
+        # are forwarded, oldest first, and both reach the root.
+        line = Line(10)
+        e = line.relay.engine
+        h = self._header(line)
+        now = line.net.now
+        base = len(e.queue)
+        p1 = Message(UPWARD, 0, PRESENCE, b"\x10\x00\x00\x01", origin=X)
+        p2 = Message(UPWARD, 0, PRESENCE, b"\x10\x00\x00\x02", origin=X)
+        for m in (p1, p2):
+            self.assertEqual(e.forward(m, h, now), QUEUED)
+        self.assertEqual(len(e.queue), base + 2)
+        line.run(3000)
+        got = [rep.extension for rep in line.presences(X, now)]
+        self.assertEqual(got, [b"\x01", b"\x02"])
+        # A later frame's presence of X replaces an older one still queued.
+        self.assertEqual(e.forward(p1, h, line.net.now), QUEUED)
+        self.assertEqual(e.forward(p2, self._header(line, 2), line.net.now), QUEUED)
+        queued = [m for m in e.queue._msg if m is not None and m.origin == X]
+        self.assertEqual([bytes(m.payload) for m in queued], [b"\x10\x00\x00\x02"])
+
     def test_root_decodes_reports_and_counts_malformed(self):
         line = Line(8)
         # A first-hop presence without flags: the relay restores the parent,
         # the root finds it too short.
         line.send_from_node(Message(FIRST_HOP, 0, PRESENCE, b""))
-        line.run(3000)
+        line.run(12 * PERIOD // 10)  # bundled with R's next presence (§7)
         self.assertEqual(line.root.routing.counters.malformed, 1)
         self.assertTrue(line.root.routing.counters.reports >= 4)
 
@@ -337,7 +359,8 @@ class LocalRepair(unittest.TestCase):
         self.assertEqual(reroutes[0][:2], (ROOT, True))
         self.assertEqual((parents.preferred, parents.detaches, parents.drops), (ROOT, 0, 0))
         rel = r.engine.reliable
-        self.assertEqual((len(r.engine.queue), rel.held()), (1, 0))
+        own = [m for m in r.engine.queue._msg if m is not None and m.port == APP]
+        self.assertEqual((len(own), rel.held()), (1, 0))
         # Left once the link is unreachable: a detach (no other candidate),
         # about one silence limit after the last acknowledgement.
         while not parents.detaches:

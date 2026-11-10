@@ -470,6 +470,170 @@ class Packing(unittest.TestCase):
                     previous = k
 
 
+class Deferral(unittest.TestCase):
+    """§7 bundling: a deferred message starts no frame before its time but
+    joins any frame to its next hop."""
+
+    def _report(self, origin):
+        return _up(origin, port=ports.PRESENCE, payload=b"\x07\x1b\x00\x05")
+
+    def test_not_a_head_before_its_time(self):
+        q = TxQueue()
+        q.offer(self._report(0xA), _PARENT, replace=True, until=5000)
+        self.assertEqual((q.deferred, q.ready(0), q.ready(), q.next_due()), (1, 0, 1, 5000))
+        self.assertEqual(_send(q, now=4999), [])
+        self.assertEqual(len(q), 1)
+        self.assertEqual([m.origin for m in _send(q, now=5000)], [0xA])
+        self.assertEqual((len(q), q.deferred, q.next_due()), (0, 0, None))
+
+    def test_joins_a_frame_to_its_next_hop_after_the_due_messages(self):
+        q = TxQueue()
+        q.offer(self._report(0xA), _PARENT, replace=True, until=5000)
+        q.offer(self._report(0xB), _OTHER, replace=True, until=5000)
+        q.offer(_up(0xC, port=_APP_HIGH, payload=b"x" * 40), _PARENT)
+        sel = q.pack(0, DutyCycle(_BUDGET), frame.MAX_FRAME, _toa)
+        self.assertEqual(sel.dest, _PARENT)
+        self.assertEqual(sorted(m.origin for m in sel.messages), [0xA, 0xC])
+        q.commit(sel)
+        # The one bound to another next hop stays deferred.
+        self.assertEqual((len(q), q.deferred, q.next_due()), (1, 1, 5000))
+        # A frame that has room for the due message only: it is not displaced.
+        q.offer(self._report(0xD), _OTHER, replace=True, until=5000)
+        q.offer(_up(0xE, payload=b"x" * 40), _OTHER)
+        sel = q.pack(0, DutyCycle(_BUDGET), _ONE, _toa)
+        self.assertEqual([m.origin for m in sel.messages], [0xE])
+
+    def test_passengers_do_not_move_the_round_robin(self):
+        # The next frame of due messages starts with the origin after the
+        # last due one served, whatever passengers rode before.
+        q = TxQueue()
+        q.offer(_up(0xA, payload=b"x" * 40), _PARENT)
+        q.offer(_up(0xB, payload=b"x" * 40), _PARENT)
+        q.offer(self._report(0xC), _PARENT, replace=True, until=5000)
+        self.assertEqual(sorted(m.origin for m in _send(q, limit=_ONE + 9)), [0xA, 0xC])
+        q.offer(_up(0xA, payload=b"x" * 40), _PARENT)
+        self.assertEqual([m.origin for m in _send(q, limit=_ONE)], [0xB])
+
+    def test_replace_by_newer(self):
+        q = TxQueue()
+        q.offer(self._report(0xA), _PARENT, replace=True, until=5000)
+        self.assertEqual(q.offer(self._report(0xA), _PARENT, replace=True, until=9000), REPLACED)
+        self.assertEqual((q.deferred, q.next_due()), (1, 5000))  # the earlier time
+        self.assertEqual(q.offer(self._report(0xA), _PARENT, replace=True, until=3000), REPLACED)
+        self.assertEqual(q.next_due(), 3000)
+        # A newer one not deferred: due at once.
+        self.assertEqual(q.offer(self._report(0xA), _PARENT, replace=True), REPLACED)
+        self.assertEqual((q.deferred, q.ready(0)), (0, 1))
+
+    def _numbered(self, origin, n):
+        return _up(origin, port=ports.PRESENCE, payload=b"\x07\x1b\x00" + bytes((n,)))
+
+    def _offer(self, q, n, until=None):
+        return q.offer(self._numbered(0xA, n), _PARENT, replace=True, until=until, keep=True)
+
+    def test_held_presence_kept_beside_the_newer_one(self):
+        # keep (the presence reports): a deferred one is not replaced; they
+        # all leave in one frame, oldest first, at the earliest time.
+        q = TxQueue()
+        self._offer(q, 1, 5000)
+        self.assertEqual(self._offer(q, 2, 9000), ACCEPTED)
+        self.assertEqual((len(q), q.deferred, q.next_due()), (2, 2, 5000))
+        # A third one (more than a hold apart: a presence of the relay
+        # missed) replaces neither.
+        self.assertEqual(self._offer(q, 3, 3000), ACCEPTED)
+        self.assertEqual((len(q), q.deferred, q.next_due()), (3, 3, 3000))
+        self.assertEqual(_send(q, now=2999), [])
+        self.assertEqual([m.payload[-1] for m in _send(q, now=3000)], [1, 2, 3])
+        self.assertEqual((len(q), q.deferred), (0, 0))
+
+    def test_newer_presence_due_at_once_releases_the_held_one(self):
+        q = TxQueue()
+        self._offer(q, 1, 5000)
+        self.assertEqual(self._offer(q, 2), ACCEPTED)
+        self.assertEqual((len(q), q.deferred, q.ready(0)), (2, 0, 2))
+        self.assertEqual([m.payload[-1] for m in _send(q)], [1, 2])
+
+    def test_presence_held_until_its_frame_leaves(self):
+        # Its deferral ended (the frame that carries it waits for the
+        # channel): still kept beside a newer one, which keeps its own
+        # deferral; up to two of them (congestion: the frames do not
+        # leave), then the newest one, due, is replaced.
+        q = TxQueue()
+        self._offer(q, 1, 5000)
+        q.release(5000)
+        self.assertEqual(self._offer(q, 2, 15000), ACCEPTED)
+        self.assertEqual((len(q), q.deferred, q.ready(5000), q.next_due()), (2, 1, 1, 15000))
+        q.release(15000)
+        self.assertEqual(self._offer(q, 3, 25000), REPLACED)
+        self.assertEqual([m.payload[-1] for m in _send(q, now=15000)], [1, 3])
+
+    def test_presence_never_deferred_is_replaced(self):
+        # keep spares the held ones only: one due from the start (bundled
+        # by a relay below, or of a node that is not a child) is replaced.
+        q = TxQueue()
+        self._offer(q, 1)
+        self.assertEqual(self._offer(q, 2, 5000), REPLACED)
+        self.assertEqual([m.payload[-1] for m in _send(q)], [2])
+
+    def test_more_than_half_deferred_released(self):
+        q = TxQueue(8)
+        for i in range(4):
+            q.offer(self._report(0x10 + i), _PARENT, replace=True, until=5000)
+        self.assertEqual((q.deferred, q.ready(0)), (4, 0))
+        q.offer(self._report(0x20), _PARENT, replace=True, until=5000)
+        self.assertEqual((q.deferred, q.ready(0), q.next_due()), (0, 5, None))
+        self.assertEqual(len(_send(q)), 5)
+
+    def test_deferral_only_while_lightly_loaded(self):
+        # Every message counts, deferred or not, waiting ones included:
+        # beyond half the queue, the deferred ones are due at once and a
+        # new one is not deferred; below again, deferral resumes.
+        q = TxQueue(8)
+        q.offer(self._report(0xA), _PARENT, replace=True, until=5000)
+        for i in range(3):
+            q.offer(_up(0x10 + i, cls=1), _PARENT)
+        self.assertEqual((len(q), q.deferred, q.ready(0)), (4, 1, 3))
+        one = frame.OVERHEAD + 2 + frame.element_size(_up(0x10, cls=1))
+        q.commit(q.pack(0, DutyCycle(_BUDGET), one, _toa))  # one waits for its ack
+        self.assertEqual(q.offer(_up(0x20), _PARENT), ACCEPTED)
+        self.assertEqual((len(q), q.deferred, q.ready(0), q.next_due()), (5, 0, 4, None))
+        q.offer(self._report(0xB), _PARENT, replace=True, until=5000)
+        self.assertEqual((len(q), q.deferred, q.ready(0)), (6, 0, 5))
+        while _send(q):
+            pass
+        self.assertEqual(len(q), 3)  # waiting for their acknowledgements
+        q.offer(self._report(0xC), _PARENT, replace=True, until=5000)
+        self.assertEqual((q.deferred, q.next_due()), (1, 5000))
+
+    def test_held_presence_released_by_load_kept_beside_the_newer_one(self):
+        # Released beyond half the queue, a held presence is due and still
+        # kept beside a newer one, which is not deferred: both leave in one
+        # frame; a third one replaces the newer (`KEEP`).
+        q = TxQueue(8)
+        self._offer(q, 1, 5000)
+        for i in range(4):
+            q.offer(_up(0x10 + i, payload=b"x" * 20), _PARENT)
+        self.assertEqual((q.deferred, q.ready(0)), (0, 5))
+        self.assertEqual(self._offer(q, 2, 9000), ACCEPTED)
+        self.assertEqual(self._offer(q, 3, 9000), REPLACED)
+        self.assertEqual((len(q), q.deferred, q.ready(0)), (6, 0, 6))
+        sent = _send(q)
+        self.assertEqual(len(sent), 6)
+        self.assertEqual([m.payload[-1] for m in sent if m.port == ports.PRESENCE], [1, 3])
+
+    def test_removed_and_redirected_entries(self):
+        q = TxQueue()
+        q.offer(self._report(0xA), _PARENT, replace=True, until=5000)
+        slot = q.slot
+        q.offer(self._report(0xB), _PARENT, replace=True, until=6000)
+        self.assertEqual(q.redirect(lambda m: True, _OTHER), 2)
+        self.assertEqual((q.deferred, q.next_due()), (2, 5000))
+        self.assertTrue(q.remove(slot, q._msg[slot]))
+        self.assertEqual((q.deferred, q.next_due()), (1, 6000))
+        self.assertEqual(q.drop(lambda m, p, local: True), 1)
+        self.assertEqual((q.deferred, q.next_due()), (0, None))
+
+
 class Commit(unittest.TestCase):
     def test_reliable_messages_wait_for_acknowledgement(self):
         q = TxQueue()

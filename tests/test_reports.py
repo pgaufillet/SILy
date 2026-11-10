@@ -288,9 +288,12 @@ class Presences(unittest.TestCase):
         self.assertTrue(max(gaps) - min(gaps) > 300, gaps)  # jittered, not fixed
         self.assertEqual(line.node.routing.reporter.counters.presence, len(generated))
         # Every one reaches the root, but those lost to a collision at R (the
-        # root and N are hidden from each other, §8).
+        # root and N are hidden from each other, §8) and those R still
+        # bundles (deferred to its next presence, at most 1.1 period, §7).
         lost = len(generated) - len(times)
-        self.assertTrue(0 <= lost <= line.net.medium.stats(R).rx_collision, (lost, times))
+        recent = len([g for g in generated if g > line.net.now - 11 * PERIOD // 10])
+        bound = line.net.medium.stats(R).rx_collision + recent
+        self.assertTrue(0 <= lost <= bound, (lost, times))
 
     def test_flags_since_last_report(self):
         line = Line(5)
@@ -382,21 +385,34 @@ class Presences(unittest.TestCase):
         self.assertEqual(rep._presence[0], first[0])
         self.assertFalse(e.queue.holds(first[0], first[1]))
         line.node.node.wake()
-        line.net.run(now + 1000)
-        got = line.of(PRESENCE, N)[before:]
-        self.assertEqual([r.flags for t, r in got], [QUEUE_OVERFLOW])
+        line.net.run(now + 12 * PERIOD // 10)  # bundled with R's next presence (§7)
+        own = [
+            decode_presence(m.payload, parent=False).flags
+            for t, _h, msgs, _ in line.frames(N)
+            if t > now
+            for m in msgs
+            if m.port == PRESENCE
+        ]
+        self.assertEqual(own[:1], [QUEUE_OVERFLOW])  # then N's next regular one
+        # At the root once, with N's presence sent before if R still held
+        # it for its bundle (not replaced, §7).
+        got = [r.flags for t, r in line.of(PRESENCE, N)[before:]]
+        self.assertEqual(got.count(QUEUE_OVERFLOW), 1, got)
 
     def test_extension_hook_and_bound(self):
+        # Each value is read by the next presence (within 1.1 period), which
+        # reaches the root with R's next presence (within 1.1 period, §7).
         values = [b"\x01", b"\x02\x03", bytes(MAX_EXTENSION + 1)]
         line = Line(8, extension=lambda: values[0])
         line.formed()
-        line.net.run(line.net.now + PERIOD + 1500)
+        wait = 23 * PERIOD // 10
+        line.net.run(line.net.now + wait)
         self.assertEqual(line.of(PRESENCE, N)[-1][1].extension, b"\x01")
         values[0] = b"\x02\x03"
-        line.net.run(line.net.now + PERIOD + 1500)
+        line.net.run(line.net.now + wait)
         self.assertEqual(line.of(PRESENCE, N)[-1][1].extension, b"\x02\x03")
         values[0] = bytes(MAX_EXTENSION + 1)
-        line.net.run(line.net.now + PERIOD + 1500)
+        line.net.run(line.net.now + wait)
         self.assertEqual(line.of(PRESENCE, N)[-1][1].extension, b"")
         self.assertTrue(line.node.routing.reporter.counters.bad_extension >= 1)
 
@@ -405,11 +421,12 @@ class Presences(unittest.TestCase):
         line = Line(9, tails=lambda: tails)
         line.formed()
         tails.append((200, 7, 9))
-        line.net.run(line.net.now + PERIOD + 1500)
+        wait = 23 * PERIOD // 10  # next presence, then R's (§7)
+        line.net.run(line.net.now + wait)
         last = line.of(PRESENCE, N)[-1][1]
         self.assertEqual((last.flags & TAILS, last.tails), (TAILS, ((200, 7, 9),)))
         tails.pop()
-        line.net.run(line.net.now + PERIOD + 1500)
+        line.net.run(line.net.now + wait)
         last = line.of(PRESENCE, N)[-1][1]
         self.assertEqual((last.flags & TAILS, last.tails), (0, ()))
 
@@ -428,6 +445,91 @@ class Presences(unittest.TestCase):
         line.net.run(healed + 2 * PERIOD)
         self.assertTrue(line.node.routing.attached)
         self.assertTrue(line.of(PRESENCE, N)[-1][0] > healed)
+
+
+class Bundling(unittest.TestCase):
+    """§7, §16: a relay sends the reports of its children with its own
+    presence, one bundle per period, but forwards at once the presence of a
+    child new to it."""
+
+    def _forwards(self, line, port=PRESENCE):
+        # R's frames carrying a report of N: (end time, an own report of R in it).
+        out = []
+        for t, _h, msgs, _ in line.frames(R):
+            if any(m.port == port and m.mode == UPWARD and m.origin == N for m in msgs):
+                out.append((t, any(m.mode == FIRST_HOP for m in msgs)))
+        return out
+
+    def test_children_reports_leave_with_the_relay_presence(self):
+        line = Line(19, node_info=NodeInfo(b"\x24\x0a\xc4\x00\x00\xa1", 1, "N"))
+        line.formed()
+        start = line.net.now
+        line.net.run(start + 8 * PERIOD)
+        # N's presence, topology and node information ride in frames R
+        # sends anyway: its own presence (or topology) report.
+        for port in (PRESENCE, TOPOLOGY, NODE_INFO):
+            fwd = [own for t, own in self._forwards(line, port) if t > start - 2 * PERIOD]
+            self.assertTrue(fwd, port)
+            self.assertEqual(set(fwd), set((True,)), port)
+        self.assertTrue(len([t for t, own in self._forwards(line) if t > start]) >= 6)
+        # Hence one frame of R per period (its presence), one more per
+        # topology period (its topology report).
+        frames = [h for t, h, m, n in line.frames(R) if t > start and h.dest == ROOT]
+        self.assertTrue(len(frames) <= 8 + 2, len(frames))
+
+    def test_two_presences_held_together_both_reach_the_root(self):
+        # N's next presence comes while R still holds the previous one for
+        # its bundle: not replaced (each carries its own flags and
+        # extension); both leave in R's presence frame, oldest first, and
+        # that one forward acknowledges both to N (matched by origin).
+        count = [0]
+
+        def extension():
+            count[0] += 1
+            return bytes((count[0],))
+
+        line = Line(22, extension=extension)
+        line.formed()
+        relay = line.relay.routing.reporter
+        node = line.node.routing.reporter
+        line.net.run(relay.presence_at + 500)  # R's presence on air
+        start = line.net.now
+        held = relay.presence_at
+        acked = node.counters.presence_acked
+        unacked = node.counters.presence_unacked
+        sent = []
+        for _ in range(2):
+            node.presence_at = line.net.now
+            line.node.node.wake()
+            line.net.run(line.net.now + 1000)
+            sent.append(count[0])
+        self.assertTrue(line.net.now < held)
+        self.assertEqual(len(node._probes), 2)
+        line.net.run(held + 2000)
+        got = [(t, r.extension[0]) for t, r in line.of(PRESENCE, N) if t > start]
+        self.assertEqual([x for t, x in got], sent)
+        self.assertTrue(got[0][0] >= held)
+        both = [
+            t
+            for t, _h, msgs, _ in line.frames(R)
+            if len([m for m in msgs if m.port == PRESENCE and m.origin == N]) == 2
+        ]
+        self.assertEqual(len(both), 1)
+        self.assertEqual(node.counters.presence_acked - acked, 2)
+        self.assertEqual(node.counters.presence_unacked, unacked)
+
+    def test_new_child_presence_forwarded_at_once(self):
+        # N's first presence to R (sent at once after choosing it, §9) is
+        # forwarded within the forwarding delay, not with R's presence, so
+        # that it reaches the root as before bundling (the root alarm after
+        # a relay failure, §9 repair times, finding 2).
+        line = Line(20)
+        line.formed()
+        own = [t for t, h, m, n in line.frames(N) if m[0].port == PRESENCE and h.dest == R]
+        fwd = self._forwards(line)
+        rel = line.node.engine.reliable
+        self.assertTrue(fwd[0][0] - own[0] <= rel.timeout_ms(R), (own[:2], fwd[:2]))
+        self.assertFalse(fwd[0][1])  # alone, not in R's presence frame
 
 
 class PresenceAcknowledgement(unittest.TestCase):
@@ -458,6 +560,34 @@ class PresenceAcknowledgement(unittest.TestCase):
         self.assertTrue(rr.presence_acked >= 6, rr.presence_acked)
         self.assertEqual(root.ack_count, 0)
         self.assertTrue(line.net.now - root.answered < PERIOD + PERIOD // 2)
+
+    def test_bundled_forward_later_than_the_relay_timeout_is_a_success(self):
+        # R forwards N's presence with its own next presence (§7), up to
+        # 1.1 period later, most often beyond the class 1 relay timeout:
+        # still its acknowledgement (deadline 1.1 period + relay timeout),
+        # not a failure (4 such failures and a silence limit made an idle
+        # node leave its live relay and detach).
+        line = Line(21)
+        line.formed()
+        rep = line.node.routing.reporter.counters
+        acked = rep.presence_acked
+        start = line.net.now
+        line.net.run(start + 10 * PERIOD)
+        timeout = line.node.engine.reliable.timeout_ms(R)
+        sent = [t for t, h, m, n in line.frames(N) if m[0].port == PRESENCE and t > start]
+        late = 0
+        for t, _h, msgs, _ in line.frames(R):
+            if t > start and any(m.port == PRESENCE and m.origin == N for m in msgs):
+                before = [s for s in sent if s < t]
+                if before and t - before[-1] > timeout:
+                    late += 1
+        self.assertTrue(late >= 5, late)
+        self.assertEqual(rep.presence_unacked, 0)
+        self.assertTrue(rep.presence_acked - acked >= 8, rep.presence_acked)
+        entry = line.node.engine.neighbours.get(R)
+        self.assertEqual(entry.acknowledged(), entry.ack_count)
+        self.assertEqual(line.node.routing.parents.preferred, R)
+        self.assertEqual(line.node.routing.parents.detaches, 0)
 
     def test_root_acknowledges_presence_in_its_beacon_frame(self):
         # The root acknowledges each frame of R carrying R's own presence
@@ -529,7 +659,9 @@ class Topologies(unittest.TestCase):
         topo = line.of(TOPOLOGY, N)
         self.assertTrue(4 <= len(topo) <= 5, len(topo))
         gaps = [b[0] - a[0] for a, b in zip(topo, topo[1:])]
-        self.assertTrue(min(gaps) >= 54000 - 300 and max(gaps) <= 66000 + 300, gaps)
+        # +-10 %, and up to 1.1 presence period in R's bundle (§7).
+        late = 11 * PERIOD // 10
+        self.assertTrue(min(gaps) >= 54000 - late and max(gaps) <= 66000 + late, gaps)
         # Parent set first, flagged; margin: 10 dB SNR above the SF7 limit of
         # -7.5 dB. The relay, between two boards hidden from each other, may
         # lose a frame to a collision: its ratios stay close to 100 %.

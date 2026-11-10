@@ -537,7 +537,7 @@ class LinkEngine(Core):
         """A class 1/2 message already in the duplicate cache (acknowledged, dropped)."""
         self.counters.duplicates += 1
 
-    def forward(self, msg, header, now, replace=False):
+    def forward(self, msg, header, now, replace=False, until=None, keep=False):
         """A message for another node: queue a copy towards next_hop(msg).
 
         Returns `QUEUED`, `HELD` (class 1/2 without next hop: held, §12) or
@@ -546,6 +546,12 @@ class LinkEngine(Core):
         on air within half a timeout (`Reliable.owe`). replace: class 0
         replace by newer (§12: a queued message of the same origin and port
         gives its place to the copy; routing sets it for the mesh reports).
+        until: deferred until this time (`TxQueue.offer`; routing defers the
+        reports of the node's children to its next presence, §7, §16): it
+        leaves then, or earlier in any frame to the same next hop. keep:
+        with replace, a deferred message of the same origin and port is
+        kept, the copy queued beside it (`TxQueue.offer`; routing sets it
+        for the presence reports).
         """
         hop = self.next_hop(msg) if self.next_hop is not None else None
         if hop is None and not msg.cls:
@@ -561,7 +567,9 @@ class LinkEngine(Core):
             msg.seq,
             msg.route,
         )
-        outcome = self.queue.offer(copy, BROADCAST if hop is None else hop, replace=replace)
+        outcome = self.queue.offer(
+            copy, BROADCAST if hop is None else hop, replace=replace, until=until, keep=keep
+        )
         if not accepted(outcome):
             self._count_refusal(ROOT if msg.origin is None else msg.origin)
             return NOT_TAKEN
@@ -575,7 +583,8 @@ class LinkEngine(Core):
             self.reliable.owe(self.queue.slot, copy, header.source, header.counter, now)
         # §7: a relay waits a random delay in [0, ToA(presence frame)]
         # before forwarding, so that relays (and the sender's next frame)
-        # do not sense the end of one frame together.
+        # do not sense the end of one frame together (a deferred message
+        # then waits for its time, `_access`).
         self.access_at(now + randbelow(self.random, self.slot_ms + 1))
         return QUEUED
 
@@ -649,13 +658,17 @@ class LinkEngine(Core):
             self._exhausted()
             return
         self._drop_refused(now)
-        sel = self.queue.pack(now, self.dutycycle, self.limit, self._toa)
+        q = self.queue
+        sel = q.pack(now, self.dutycycle, self.limit, self._toa)
         if sel is None:
             self._attempts = 0
             self._cw = CW_MIN
-            if self.queue.ready():
+            if q.ready(now):
                 self.counters.duty_waits += 1
                 self._wake = self.dutycycle.next_release(now)
+            t = q.next_due()  # deferred messages: due later
+            if t is not None and (self._wake is None or t < self._wake):
+                self._wake = t
             return
         self._sel = sel
         self._attempts += 1

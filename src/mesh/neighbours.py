@@ -164,7 +164,8 @@ class Neighbour:
     (`ACK_MIN` samples reached once); run (failed samples since the last
     acknowledgement or ageing, saturated at `UNREACH_RUN`), answered (ms,
     last acknowledgement, or creation of the entry); margin_ok (hysteresis
-    state).
+    state); reported (ms, its last own presence received, the neighbour
+    being a child, or None; set by `mesh.reports.Reporter.defer_until`).
     """
 
     def __init__(self):
@@ -193,6 +194,7 @@ class Neighbour:
         self.m_next = 0
         self.m_sum = 0
         self.margin_ok = True
+        self.reported = None
 
     # --- Inbound delivery ratio ----------------------------------------------
 
