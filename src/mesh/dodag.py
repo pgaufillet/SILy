@@ -46,7 +46,14 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
   arrivals held and acknowledged explicitly; failed 2 presence periods
   after the loss of grounding; resumed when grounded again, §12). Its
   class 0 messages, its own presence included, still go to the preferred
-  parent. The root is always grounded.
+  parent. The root is always grounded. One presence period before G runs
+  out, an attached grounded node solicits, once per advance of its
+  sequence (counted in ``ground_solicits``; the limit of one per Imin is
+  shared with the solicitations of a node behind): in steady state its
+  parent's presence is the only frame carrying the parent's sequence,
+  and hidden terminals can lose several in a row; the neighbours answer
+  within Imin, the parent's DODAG information carrying its sequence. If
+  the answers are lost too, the node floats when G runs out.
 - **Selection**: the parent set is recomputed after every step in which a
   frame was heard (after the frame's messages, so that a DODAG information
   message of a new version is adopted first), when a member falls silent
@@ -126,7 +133,8 @@ port 9 handler. It owns the board's `mesh.parents.Parents` and its
 - **Solicitation**: a node without route solicits at boot after a random
   delay in [0, Imin], at the end of the detach hold, then once per presence
   period while it has no route; a node behind a newer version, with
-  backoff (above).
+  backoff (above); an attached grounded node, once one presence period
+  before G runs out (grounding, above).
 - **Answer window**: a solicitation of a node without route (at boot, at
   the end of the hold, the periodic ones; `Parents.solicited`) opens a
   window of Imin + `WINDOW_SLOTS` slots from the time it goes on air
@@ -353,6 +361,7 @@ class Counters:
     def __init__(self):
         self.adverts = 0  # advertisements queued (poison included)
         self.solicits = 0  # solicitations queued
+        self.ground_solicits = 0  # of them, one presence period before G runs out (§9)
         self.solicited = 0  # solicitations received
         self.adoptions = 0  # versions adopted (first one after boot included)
         self.poisons = 0  # detaches advertised (rank 255)
@@ -411,6 +420,7 @@ class Dodag:
         self._ask_at = None  # solicitation for the DODAG information of another version
         self._asked = None  # time of the last one (at most one per Imin)
         self._ask_gap = None  # behind a newer version: gap to the next one (backoff)
+        self._ground_asked = None  # sequence advance (`Parents.sequence_at`) solicited for
         self._advert = None  # (slot, message) of the last advertisement queued
         self._rank_advert = None  # time of the last advertisement after a rank error
         self._solicit = None  # ... and of the last solicitation
@@ -656,6 +666,7 @@ class Dodag:
             self._solicit_at,
             self._poison_at,
             self._ask_at,
+            self._ground_ask_at(),
         ):
             if u is not None and (t is None or u < t):
                 t = u
@@ -678,12 +689,30 @@ class Dodag:
     def _desync(self):
         return randbelow(self.engine.random, DESYNC_SLOTS * self.engine.slot_ms + 1)
 
+    def _ground_ask_at(self):
+        # One presence period before G runs out without advance (§9), once
+        # per advance; None on the root, on a node ungrounded or detached,
+        # or holding no sequence.
+        p = self.parents
+        at = p.sequence_at
+        if at is None or at == self._ground_asked:
+            return None
+        t = p.float_at()
+        return None if t is None else t - self.engine.neighbours.period_ms
+
     def _routing(self, now):
         if self._poison_at is not None and now >= self._poison_at:
             self._poison_at = None
             if not self.attached:
                 self._advertise(True)
         p = self.parents
+        t = self._ground_ask_at()
+        if t is not None and now >= t:
+            # Its parent's presences lost: the neighbours' answers carry
+            # their sequence (at most one solicitation per Imin, shared).
+            self._ground_asked = p.sequence_at
+            self.counters.ground_solicits += 1
+            self._ask(now)
         if self._ask_at is not None and now >= self._ask_at:
             self._ask_at = None
             self._asked = now

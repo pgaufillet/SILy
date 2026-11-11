@@ -988,6 +988,28 @@ acknowledgement window and the time of its newest failure.
   the preferred parent, followed) and its sequence grounds no one; a node
   whose preferred parent's frame carries it is ungrounded at once, so a
   subtree floats with its top instead of waiting for G at each hop.
+- **Solicitation before G runs out**: in steady state (Trickle at Imax)
+  the only frame of a parent carrying its sequence is its own presence,
+  once per period. Hidden terminals make its losses correlated: the parent
+  sends its presence right after forwarding the child's frame, when the
+  child's own children, hidden from the parent, send to the child; a few
+  lost in a row exhaust G, the node floats falsely, its subtree follows
+  through the floating flag and is grounded again one presence period per
+  hop, its upward messages held meanwhile (up to about a minute in the
+  host simulator on grids with lossy links). So **one presence period
+  before G runs out**, an attached grounded node that has not taken a
+  newer sequence sends **one solicitation**, once per advance of its
+  sequence; its neighbours reset their Trickle timers and answer within
+  Imin, and the parent's DODAG information carries its sequence. The
+  solicitation shares the limit of one per Imin with those of a node
+  behind a newer version. Left open: the solicitation or its answers lost
+  too (the same collisions); the node then floats when G runs out, as
+  before. A node the sequence no longer reaches while its parent is still
+  heard (the root dead, or a link above lost downwards) spends one
+  solicitation before floating, at most one per G; its descendants usually
+  float through the flag before their own time. The solicitation and the
+  advertisements it triggers are rare (lost presences only): no budget
+  figure of §16 counts them.
 - **Wrap-around, boot, versions**: sequences less than 128 apart are
   compared; a node whose sequence has not advanced for 50 presence periods
   forgets it and L (the root's beacons, every half period ±10 %, are at
@@ -1100,8 +1122,10 @@ acknowledgement window and the time of its newest failure.
 - **Solicitation**: a DODAG information message with an empty payload, sent
   to every neighbour by a node without route: at boot after a random delay in
   [0, Imin], at the end of the detach hold, then once per presence period
-  while it has no route. The neighbours reset their Trickle timers and answer
-  within Imin. Each of these solicitations opens an **answer window** of
+  while it has no route; also by an attached node, once one presence period
+  before G runs out (root sequence and grounding, above). The neighbours
+  reset their Trickle timers and answer within Imin. Each solicitation of
+  a node without route opens an **answer window** of
   **Imin + 8 slots** from the time it goes on air, during which the node
   selects no parent: an answer leaves in [Imin/2, Imin) after the
   solicitation is received (at most 1 slot on air), then waits at most one

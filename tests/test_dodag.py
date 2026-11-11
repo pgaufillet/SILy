@@ -672,9 +672,9 @@ class Resets(_Case):
         b = self.attached(3)
         b.steady([(self.p, 16, 3)])
         start = b.now
-        for _ in range(10):
+        for k in range(10):  # P's presences carry a newer sequence: no solicitation
             b.advance(b.now + 4000)
-            b.rx(self.p.frame(16, 3))
+            b.rx(self.p.presence(16, 3, k + 1))
         self.assertEqual(b.port9(start), [])
         self.assertEqual(b.dodag.parents.preferred, P)
 
@@ -1025,6 +1025,69 @@ class Sequence(_Case):
         self.assertIsNone(b._opener.receive(buf, len(buf), h))
         self.assertFalse(p.grounded)
         self.assertEqual(h.floating, 1)
+
+    def _parent_heard_until(self, b, until, answer=None):
+        # P heard every 4 s, its frames without sequence (data frames,
+        # acknowledgements: its presences lost); answer: the sequence of
+        # its DODAG information heard once the node's first solicitation
+        # since now is on air (sealed then: a gap in its frame counter
+        # would count as a loss).
+        start = b.now
+        while b.now < until:
+            b.advance(min(b.now + 4000, until))
+            if answer is not None and b.solicitations(start):
+                b.rx(self.p.info(16, 3, seq=answer))
+                answer = None
+            else:
+                b.rx(self.p.frame(16, 3))
+
+    def test_solicits_one_period_before_g_runs_out(self):
+        # In steady state only the parent's presence carries its sequence:
+        # one presence period before G runs out without advance, the node
+        # solicits once; the parent's answer carries a newer sequence and
+        # the node stays grounded past G (§9).
+        b = self.attached(3)
+        p = b.dodag.parents
+        due = p.float_at()
+        start = b.now
+        self._parent_heard_until(b, due - PERIOD - 1)
+        self.assertEqual(b.solicitations(start), [])
+        b.advance(due - PERIOD + 200)
+        sent = b.solicitations(start)
+        self.assertEqual(len(sent), 1)
+        t, h = sent[0]
+        self.assertTrue(due - PERIOD <= t < due - PERIOD + 200, t - due)
+        self.assertEqual((h.rank, h.floating), (24, 0))  # attached, grounded
+        self.assertEqual(b.dodag.counters.ground_solicits, 1)
+        b.rx(self.p.info(16, 3, seq=1))  # the parent's answer
+        self.assertEqual((p.sequence, p.sequence_at), (1, b.now))
+        self._parent_heard_until(b, due + PERIOD)
+        self.assertTrue(p.grounded)
+        self.assertEqual(p.floats, 0)
+
+    def test_solicits_once_per_sequence_advance(self):
+        # An answer without a newer sequence: no other solicitation, G runs
+        # out (the node floats as before). A newer sequence grounds it
+        # again: one solicitation one period before the new G.
+        b = self.attached(3)
+        p = b.dodag.parents
+        due = p.float_at()
+        start = b.now
+        self._parent_heard_until(b, due - 1, 0)
+        self.assertEqual(len(b.solicitations(start)), 1)
+        self.assertTrue(p.grounded)
+        b.advance(due)
+        self.assertFalse(p.grounded)
+        self._parent_heard_until(b, due + PERIOD)  # floating: no solicitation
+        self.assertEqual(len(b.solicitations(start)), 1)
+        b.rx(self.p.presence(16, 3, 1))
+        self.assertTrue(p.grounded)
+        again = p.float_at()
+        self._parent_heard_until(b, again - PERIOD - 1)
+        self.assertEqual(len(b.solicitations(start)), 1)
+        b.advance(again - PERIOD + 200)
+        self.assertEqual(len(b.solicitations(start)), 2)
+        self.assertEqual(b.dodag.counters.ground_solicits, 2)
 
 
 class Root(_Case):
