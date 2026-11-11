@@ -173,28 +173,45 @@ class Acknowledgements(unittest.TestCase):
 
 class RootBatching(unittest.TestCase):
     def test_eight_entries_per_frame_then_delay(self):
-        line = Line(14)
+        # Three root children in turn: a child waits for the reply window
+        # after each of its frames to the root (§8), so one child alone
+        # cannot send 8 frames within a batching delay.
+        net = Network(14, _KEY)
+        kids = (0x00A1, 0x00B1, 0x00C1)
+        root = net.add(ROOT, next_hop=lambda m: m.dest)
+        boards = [net.add(x, next_hop=lambda m: ROOT) for x in kids]
+        net.full_mesh((ROOT,) + kids)
+        eve = net.sniffer(E)
+        for name in (ROOT,) + kids:
+            net.medium.link(name, E)
+        root.listen(20)
         count = ACK_BATCH + 2
         for i in range(count):
-            line.net.at(1000 + 200 * i, line.relay.submit, 20, 1, ROOT, b"m%d" % i)
-        line.net.run(15000)
-        self.assertEqual(sorted(line.root.received()), sorted(b"m%d" % i for i in range(count)))
-        sent = line.data_frames(R)
+            net.at(1000 + 200 * i, boards[i % 3].submit, 20, 1, ROOT, b"m%d" % i)
+        net.run(15000)
+        self.assertEqual(sorted(root.received()), sorted(b"m%d" % i for i in range(count)))
+        sent = []  # (time, (link source, counter low 16 bits)) of the children's frames
+        acks = []  # (time, entries) of the root's acknowledgement frames
+        for t, f in eve.frames:
+            h, msgs = _open(f)
+            if h.source == ROOT:
+                acks.extend((t, decode_acks(m.payload)) for m in msgs if m.port == ports.ACK)
+            elif any(m.port == 20 for m in msgs):
+                sent.append((t, (h.source, h.counter & 0xFFFF)))
         self.assertEqual(len(sent), count)  # one frame per message
-        acks = line.ack_frames(ROOT)
-        self.assertEqual([len(e) for _, _, e in acks], [ACK_BATCH, 2])
-        counters = [h.counter & 0xFFFF for _, h, _ in sent]
-        self.assertEqual([c for _, c in acks[0][2]], counters[:ACK_BATCH])
-        self.assertEqual([c for _, c in acks[1][2]], counters[ACK_BATCH:])
-        self.assertEqual(acks[0][1].dest, R)
+        self.assertEqual([len(e) for _, e in acks], [ACK_BATCH, 2])
+        self.assertEqual(acks[0][1], [e for _, e in sent[:ACK_BATCH]])
+        self.assertEqual(acks[1][1], [e for _, e in sent[ACK_BATCH:]])
         # The full batch leaves at once; the rest after the batching delay.
-        rel = line.root.engine.reliable
+        rel = root.engine.reliable
         self.assertTrue(acks[0][0] - sent[ACK_BATCH - 1][0] < 200)
         self.assertTrue(acks[1][0] - sent[ACK_BATCH][0] >= rel.batch_ms)
-        r = line.relay.engine
-        self.assertEqual(
-            (r.counters.acks_explicit, r.counters.retries, len(r.queue)), (count, 0, 0)
-        )
+        self.assertEqual(root.engine.counters.replies, 0)  # no relaying child
+        for board in boards:
+            c = board.engine.counters
+            self.assertEqual((c.retries, len(board.engine.queue)), (0, 0))
+        explicit = sum(b.engine.counters.acks_explicit for b in boards)
+        self.assertEqual(explicit, count)
 
     def test_entries_of_several_sources_to_every_neighbour(self):
         net = Network(15, _KEY)

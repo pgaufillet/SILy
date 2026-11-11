@@ -184,7 +184,8 @@ class Jitter(unittest.TestCase):
 
 
 class Line:
-    """root — R — N with routing; reports received by the root in ``reports``."""
+    """root — R — N with routing (root — R without leaf); reports received by the
+    root in ``reports``."""
 
     def __init__(
         self,
@@ -195,6 +196,7 @@ class Line:
         node_info=None,
         budget_ms=None,
         window_ms=None,
+        leaf=True,
     ):
         net = Network(seed, _KEY, budget_ms=budget_ms, window_ms=window_ms)
         self.net = net
@@ -202,11 +204,14 @@ class Line:
         self.ext_calls = 0
         self.root = net.add(ROOT, routing=self._make(info, None, None, None))
         self.relay = net.add(R, routing=self._make(info, None, None, None))
-        self.node = net.add(N, routing=self._make(info, extension, tails, node_info))
+        self.node = None
+        if leaf:
+            self.node = net.add(N, routing=self._make(info, extension, tails, node_info))
         net.link_both(ROOT, R)
-        net.link_both(R, N)
+        if leaf:
+            net.link_both(R, N)
         self.eve = net.sniffer(E)
-        for name in (ROOT, R, N):
+        for name in (ROOT, R, N) if leaf else (ROOT, R):
             net.medium.link(name, E)
 
     def _make(self, info, extension, tails, node_info):
@@ -236,7 +241,8 @@ class Line:
 
     def formed(self):
         self.net.run(30000)
-        assert [b.routing.parents.preferred for b in (self.relay, self.node)] == [ROOT, R]
+        assert self.relay.routing.parents.preferred == ROOT
+        assert self.node is None or self.node.routing.parents.preferred == R
 
 
 class Presences(unittest.TestCase):
@@ -366,7 +372,10 @@ class Presences(unittest.TestCase):
         line.formed()
         line.node.engine.queue.overflow = True
         line.node.routing.dodag.counters.rank_errors += 1
-        line.net.run(line.net.now + 2 * PERIOD + 1500)
+        # N's next presence (flagged) and the one after (cleared), each up to
+        # 1.1 period after the previous one, each bundled by R up to 1.1
+        # period later (§7): 3.3 periods at most, whatever their phase.
+        line.net.run(line.net.now + 3 * PERIOD + PERIOD // 2)
         flags = [r.flags for t, r in line.of(PRESENCE, N)]
         self.assertTrue(QUEUE_OVERFLOW | RANK_ERRORS in flags, flags)
         self.assertEqual(flags[-1], 0)
@@ -592,8 +601,10 @@ class PresenceAcknowledgement(unittest.TestCase):
     def test_root_acknowledges_presence_in_its_beacon_frame(self):
         # The root acknowledges each frame of R carrying R's own presence
         # (no class 1 traffic) with a lazy entry: no frame of its own, the
-        # entries ride in the beacon's frame (every half period, §9).
-        line = Line(17)
+        # entries ride in the beacon's frame (every half period, §9). R has
+        # no child: it relays for no node, so the root does not answer it at
+        # once (§8).
+        line = Line(17, leaf=False)
         line.formed()
         start = line.net.now
         line.net.run(start + 6 * PERIOD)
@@ -616,11 +627,40 @@ class PresenceAcknowledgement(unittest.TestCase):
             for m in msgs:
                 if m.port == ACK:
                     acked.update(c for a, c in decode_acks(m.payload) if a == R)
-        # Only R's presence frames (N's presences, forwarded by R, give no
-        # entry of their own), each of them but those of the last half period
-        # (their beacon not yet sent).
+        # Only R's presence frames, each of them but those of the last half
+        # period (their beacon not yet sent).
         self.assertTrue(acked <= set(presences), (acked, presences))
         self.assertTrue(len(recent - acked) <= 1, (recent, acked))
+        self.assertEqual(line.root.engine.counters.replies, 0)
+
+    def test_root_answers_a_relaying_child_at_once(self):
+        # R forwards N's presences (N does not hear the root): the root
+        # answers each of R's presence frames at once, in a frame to R alone,
+        # within the reply window during which N, overhearing its parent's
+        # frame, waits (§8).
+        line = Line(17)
+        line.formed()
+        start = line.net.now
+        line.net.run(start + 6 * PERIOD)
+        presences = {}  # counter (low 16 bits) -> end of the frame
+        for t, h, msgs, _ in line.frames(R):
+            if t > start and h.dest == ROOT:
+                if any(m.port == PRESENCE and m.mode == FIRST_HOP for m in msgs):
+                    presences[h.counter & 0xFFFF] = t
+        self.assertTrue(len(presences) >= 5, presences)
+        answered = {}  # counter -> end of the root's reply
+        for t, h, msgs, _ in line.frames(ROOT):
+            if t <= start or ACK not in [m.port for m in msgs]:
+                continue
+            self.assertEqual((h.dest, [m.port for m in msgs]), (R, [ACK]))
+            for c in [c for m in msgs for a, c in decode_acks(m.payload) if a == R]:
+                answered[c] = t
+        self.assertEqual(set(answered), set(presences))
+        reply_ms = line.relay.engine.reply_ms
+        for c, t in presences.items():
+            self.assertTrue(0 < answered[c] - t < reply_ms, (answered[c] - t, reply_ms))
+        self.assertTrue(line.root.engine.counters.replies >= len(presences))
+        self.assertTrue(line.node.engine.counters.reply_waits >= len(presences))
 
     def test_parent_that_does_not_hear_the_node_is_left(self):
         # N hears R at 100 % but R no longer hears N, without class 1

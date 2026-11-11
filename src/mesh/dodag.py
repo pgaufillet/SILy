@@ -20,8 +20,9 @@ comparable (None).
 
 **`Dodag`**: the routing component of one board, plugged into its
 `mesh.link.LinkEngine` through the extension points (``heard``, ``sent``,
-``tick``, ``timer``: each wrapper calls the engine's previous method) and the
-port 9 handler. It owns the board's `mesh.parents.Parents` and its
+``tick``, ``timer``: each wrapper calls the engine's previous method;
+``preferred``, replaced: the preferred parent, for the reply window, §8)
+and the port 9 handler. It owns the board's `mesh.parents.Parents` and its
 `mesh.trickle.Trickle`, and keeps the header fields ``engine.rank`` and
 ``engine.dodag_version`` up to date.
 
@@ -439,6 +440,7 @@ class Dodag:
         engine.sent = self._sent
         engine.tick = self._tick
         engine.timer = self._timer
+        engine.preferred = self._preferred
         engine.bind_mesh(DODAG_INFO, self._on_info)
 
     def _clock(self):
@@ -541,6 +543,9 @@ class Dodag:
             if not self.root:
                 self._lag(now)
         return n
+
+    def _preferred(self):
+        return self.parents.preferred
 
     def _lag(self, now):
         # Behind a newer version: solicit with backoff until adopted.

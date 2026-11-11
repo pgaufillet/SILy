@@ -10,8 +10,9 @@ from mesh import frame, ports
 from mesh import profile as profiles
 from mesh.counter import FrameCounter
 from mesh.frame import BROADCAST, DOWNWARD, FIRST_HOP, LINK_LOCAL, P2P, ROOT, UPWARD, Message
+from mesh.link import CW_MIN, open_link
 from mesh.link import NO_ROUTE as SUBMIT_NO_ROUTE
-from mesh.link import open_link
+from mesh.neighbours import silence_ms
 from mesh.radio import CHANNEL, RX, SENSE, TX_DONE
 from mesh.reliable import (
     ACK_BATCH,
@@ -209,6 +210,12 @@ def _next_frame(engine, now, until):
 
 def _rx(engine, now, f):
     return list(engine.step(now, (RX, f, -80, 10)))
+
+
+def _after_reply(engine):
+    """Return the longest wait of engine's next access after a frame it sent to the root
+    ended: the reply window, then a backoff of [0, CW_MIN] slots (§8)."""
+    return engine.reply_ms + CW_MIN * engine.slot_ms + 1
 
 
 def _messages(key, f):
@@ -487,9 +494,11 @@ class _RootCase(unittest.TestCase):
         return r, root, now
 
     def _send(self, r, now, i):
-        # R sends one class 1 message to the root in a frame of its own.
+        # R sends one class 1 message to the root in a frame of its own,
+        # after the reply window of its previous one (the sender waits, §8).
         r.submit(20 + i, 1, ROOT, b"m%d" % i)
-        (f,), end = _run(r, now)
+        f, _, end = _next_frame(r, now, now + _after_reply(r))
+        self.assertIsNotNone(f)
         return f, end
 
     def _failures(self, r):
@@ -605,6 +614,124 @@ class LazyRootAcknowledgements(unittest.TestCase):
         self.assertEqual(decode_acks(_messages(_KEY, f)[1][0].payload), [(X, 9)])
 
 
+class ImmediateReply(_RootCase):
+    """§8 reply window: the root answers at once a relaying root child (one that
+    forwarded an upward message for another node within the silence limit) for
+    its presence probe and its retransmissions, with the batch and lazy entries
+    waiting; the rest keeps the batch rules."""
+
+    def _relaying(self, r, root, now):
+        # R forwards a class 0 message of N to the root: a relaying root child.
+        r.send(Message(UPWARD, 0, 20, b"fwd", origin=N), ROOT)
+        f, _, end = _next_frame(r, now, now + _after_reply(r))
+        _rx(root, end, f)
+        return end
+
+    def _probe(self, r, now):
+        # R's own presence to the root (its link's probe, §9).
+        r.send(Message(FIRST_HOP, 0, ports.PRESENCE, b"\x00\x00\x00"), ROOT)
+        f, _, end = _next_frame(r, now, now + _after_reply(r))
+        self.assertIsNotNone(f)
+        return f, end
+
+    def _at_once(self, root, now, f):
+        # The root receives f at now: the frames it sends at once, no timer followed.
+        return _run(root, now, None, _rx(root, now, f))[0]
+
+    def _entries(self, f):
+        # (link destination, ports, acknowledgement entries) of a root frame.
+        h, msgs = _messages(_KEY, f)
+        entries = [e for m in msgs if m.port == ports.ACK for e in decode_acks(m.payload)]
+        return h.dest, [m.port for m in msgs], entries
+
+    def test_probe_of_a_relaying_child_answered_at_once(self):
+        r, root, now = self._relay()
+        now = self._relaying(r, root, now)
+        f, end = self._probe(r, now)
+        (reply,) = self._at_once(root, end, f)
+        c16 = frame.decode_header(f, len(f)).counter & 0xFFFF
+        self.assertEqual(self._entries(reply), (R, [ports.ACK], [(R, c16)]))
+        self.assertEqual(root.counters.replies, 1)
+
+    def test_retransmission_of_a_relaying_child_answered_at_once(self):
+        r, root, now = self._relay()
+        now = self._relaying(r, root, now)
+        f1, end1 = self._send(r, now, 0)
+        self.assertEqual(self._at_once(root, end1, f1), [])  # a first copy: batched
+        (batch,), _ = _run(root, end1, end1 + root.reliable.batch_ms)  # lost at R
+        timeout = r.reliable.timeout_ms(ROOT)
+        f2, _, end2 = _next_frame(r, end1, end1 + timeout + r.reliable.retry_window_ms())
+        self.assertEqual(r.counters.retries, 1)
+        (reply,) = self._at_once(root, end2, f2)
+        c16 = frame.decode_header(f2, len(f2)).counter & 0xFFFF
+        self.assertEqual(self._entries(reply), (R, [ports.ACK], [(R, c16)]))
+        self.assertEqual((root.counters.duplicates, root.counters.replies), (1, 1))
+        _rx(r, end2 + 100, reply)
+        self.assertEqual((len(r.queue), r.counters.acks_explicit), (0, 1))
+
+    def test_reply_takes_the_waiting_entries_up_to_a_batch(self):
+        r, root, now = self._relay()
+        now = self._relaying(r, root, now)
+        rel = root.reliable
+        batch = [(X, i) for i in range(3)]
+        lazy = [(X, 10 + i) for i in range(6)]
+        for source, counter in batch:
+            rel.acknowledge(source, counter, now)
+        for source, counter in lazy:
+            rel.acknowledge(source, counter, now, True)
+        f, end = self._probe(r, now)
+        (reply,), t = _run(root, end, None, _rx(root, end, f))
+        c16 = frame.decode_header(f, len(f)).counter & 0xFFFF
+        dest, ports_sent, entries = self._entries(reply)
+        self.assertEqual((dest, ports_sent), (BROADCAST, [ports.ACK]))  # several sources
+        self.assertEqual(entries, [(R, c16)] + batch + lazy[:4])  # ACK_BATCH entries
+        # The batch left with the reply: nothing at its delay; the lazy
+        # entries left over go with the beacon's frame.
+        frames, t = _run(root, t, now + 2 * rel.batch_ms)
+        self.assertEqual(frames, [])
+        rel.flush_acks()
+        (beacon,), _ = _run(root, t)
+        self.assertEqual(self._entries(beacon)[2], lazy[4:])
+
+    def test_first_copy_and_other_children_batched(self):
+        # A first copy of a relaying child, the probe and the retransmission
+        # of a child that relays for no node: no reply.
+        r, root, now = self._relay()
+        f, end = self._probe(r, now)
+        self.assertEqual(self._at_once(root, end, f), [])  # lazy: for the beacon
+        f1, end1 = self._send(r, end, 0)
+        self.assertEqual(self._at_once(root, end1, f1), [])  # first copy: batched
+        _run(root, end1, end1 + root.reliable.batch_ms)  # the batch, lost at R
+        timeout = r.reliable.timeout_ms(ROOT)
+        f2, _, end2 = _next_frame(r, end1, end1 + timeout + r.reliable.retry_window_ms())
+        self.assertIsNotNone(f2)
+        self.assertEqual(self._at_once(root, end2, f2), [])  # retransmission: batched
+        self.assertEqual((root.counters.duplicates, root.counters.replies), (1, 0))
+
+    def test_relaying_within_the_silence_limit(self):
+        for after, replies in ((-1, 1), (0, 0)):
+            r, root, now = self._relay()
+            relayed = self._relaying(r, root, now)
+            silence = silence_ms(root.neighbours.period_ms)
+            f, _ = self._probe(r, relayed)
+            self.assertEqual(len(self._at_once(root, relayed + silence + after, f)), replies)
+            self.assertEqual(root.counters.replies, replies)
+
+    def test_reply_sent_first_without_backoff(self):
+        root = _engine(ROOT, None, seed=3)
+        root.send(Message(DOWNWARD, 0, 20, bytes(100), dest=N), N)
+        self.assertEqual(list(root.step(0, None)), [(SENSE,)])
+        root.step(0, (CHANNEL, True))  # busy: a backoff of one slot at least
+        self.assertTrue(root.deadline() >= root.slot_ms)
+        root.reliable.acknowledge(R, 7, 1, reply=True)
+        self.assertEqual(list(root.step(1, None)), [(SENSE,)])  # at once
+        ((_, f),) = list(root.step(1, (CHANNEL, False)))
+        self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))  # the reply alone
+        toa = root.toa_ms(len(f))
+        (f,), _ = _run(root, 1 + toa, None, list(root.step(1 + toa, (TX_DONE, toa))))
+        self.assertEqual(self._entries(f)[1], [20])  # then the downward message
+
+
 class LateRootAcknowledgements(_RootCase):
     """§12: towards the root, a late acknowledgement of an earlier transmission
     is accepted; a failure is decided one root timeout after the timeout."""
@@ -702,8 +829,11 @@ class LateRootAcknowledgements(_RootCase):
         fa, end_a = self._send(r, now, 0)
         _rx(root, end_a, fa)
         (ack,), _ = _run(root, end_a, end_a + root.reliable.batch_ms)
-        _, end_b = self._send(r, end_a, 1)
-        _, end_c = self._send(r, end_b + r.reliable.batch_ms, 2)
+        fb, end_b = self._send(r, end_a, 1)
+        # B waits for the reply window after A (§8): C ends, rather than
+        # starts, a batching delay after B, so that it is sent before A
+        # times out (C's frame is as long as B's).
+        _, end_c = self._send(r, end_b + r.reliable.batch_ms - r.toa_ms(len(fb)), 2)
         self.assertTrue(end_c < end_a + timeout and end_c - end_b >= r.reliable.batch_ms)
         # A times out (its retry waits its delay, or is sent).
         _, now = _run(r, end_c, end_a + timeout)
@@ -806,11 +936,13 @@ class RelayRun(unittest.TestCase):
         return n, r, frames
 
     def _forward(self, r, f, count=None):
-        # R's frame forwarding the first count messages of N's frame f.
+        # R's frame forwarding the first count messages of N's frame f, after
+        # the reply window of R's previous frame to the root (§8).
         msgs = _messages(_KEY, f)[1][:count]
         for m in msgs:
             r.send(Message(UPWARD, m.cls, m.port, bytes(m.payload), origin=N, seq=m.seq), ROOT)
-        (fwd,), self.rt = _run(r, self.rt)
+        fwd, _, self.rt = _next_frame(r, self.rt, self.rt + _after_reply(r))
+        self.assertIsNotNone(fwd)
         return fwd
 
     def test_passive_acknowledgement_ends_the_run(self):
@@ -950,7 +1082,10 @@ class Custody(unittest.TestCase):
         )
         actions = _rx(r, now, again)
         self.assertEqual((r.counters.duplicates, r.counters.retaken, _copies(r)), (1, 0, 1))
-        frames, _ = _run(r, now, None, actions)
+        # The forward (after at most a slot) and the acknowledgement, which
+        # may wait for the reply window of the forward to the root (§8).
+        until = now + r.slot_ms + r.toa_ms(r.limit) + _after_reply(r)
+        frames, _ = _run(r, now, until, actions)
         ports_sent = [m.port for g in frames for m in _messages(_KEY, g)[1]]
         self.assertEqual(ports_sent.count(20), 1)  # forwarded once
         self.assertTrue(ports.ACK in ports_sent, ports_sent)  # acknowledged

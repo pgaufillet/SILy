@@ -993,9 +993,23 @@ class Sequence(_Case):
         self.assertTrue(payloads)
         self.assertEqual([p[INFO_SEQUENCE] for p in payloads], [1] * len(payloads))
 
+    def test_preferred_parent_given_to_the_reply_window(self):
+        # The link engine asks routing for the preferred parent: its own
+        # presence to the root opens a reply window, a neighbour's does not
+        # (§8).
+        b = self.attached(3)
+        self.assertEqual(b.engine.preferred(), P)
+        b.rx(self.q.presence(20, 3, 5))
+        self.assertEqual(b.engine.counters.reply_waits, 0)
+        b.rx(self.p.presence(16, 3, 5))
+        self.assertEqual(b.engine.counters.reply_waits, 1)
+
     def test_poison_carries_the_sequence_kept(self):
         b = self.attached(3)
         b.rx(self.p.presence(16, 3, 9))
+        # P's poison comes after the reply window of its presence to the
+        # root, during which P and its children wait (§8).
+        b.advance(b.now + b.engine.reply_ms)
         b.rx(self.p.frame(RANK_INFINITE, 3))  # the parent's poison: detached
         late = DESYNC_SLOTS * b.engine.slot_ms + 100
         start = b.now

@@ -165,7 +165,9 @@ class Neighbour:
     acknowledgement or ageing, saturated at `UNREACH_RUN`), answered (ms,
     last acknowledgement, or creation of the entry); margin_ok (hysteresis
     state); reported (ms, its last own presence received, the neighbour
-    being a child, or None; set by `mesh.reports.Reporter.defer_until`).
+    being a child, or None; set by `mesh.reports.Reporter.defer_until`);
+    relayed (root: ms, its last frame forwarding an upward message for
+    another node, or None; set by the link engine, the reply window, §8).
     """
 
     def __init__(self):
@@ -195,6 +197,7 @@ class Neighbour:
         self.m_sum = 0
         self.margin_ok = True
         self.reported = None
+        self.relayed = None
 
     # --- Inbound delivery ratio ----------------------------------------------
 

@@ -38,6 +38,24 @@ priority-1 datagrams) stay queued and a new procedure starts after one more
 backoff of [1, 32] slots. Messages the allowance refuses otherwise stay
 queued; the engine wakes up when the window next releases airtime.
 
+**Reply window** (§8, §12): a frame to the root that the root answers (a
+class 1/2 message, or a node's own presence: the presence probe, §9) is
+followed by a window of ``reply_ms`` (time on air of an acknowledgement
+frame of `ACK_BATCH` entries + `REPLY_SLOTS` slots) kept clear for the
+root's reply. The sender does not access the medium before the window
+ends; nor does a node that overhears such a frame from its preferred
+parent (``preferred``, routing; counted in ``reply_waits``), which then
+draws a backoff of [0, CW] slots, so that the nodes deferring together do
+not start together. Children of a relay that do not hear the root (hidden
+root) would otherwise send while the root answers, and the root's frames
+would collide at the relay. The root answers at once a relaying root
+child (one that forwarded an upward message for another node within the
+silence limit, ``Neighbour.relayed``) for its presence probe and for its
+retransmissions (a class 1/2 message already in the duplicate cache): the
+reply (`Reliable.acknowledge`) is packed first, in a frame of at most
+`REPLY_FRAME` bytes, and its access skips the backoff; the root's other
+acknowledgements are batched as before.
+
 **Receive path** (§14 reception order): steps 1–3 by `Security.receive`
 (length and version, authentication, replay; failures counted, per sender
 for authentication and replay). Step 4: duplicate address (link source equal
@@ -65,7 +83,8 @@ child's link (§9).
 **Extension points** (minimal defaults, overridden or replaced by the later
 steps): `heard` (neighbour table), `decoded` (every decoded frame, before
 its messages: the root sequence, §9), `overheard` (passive acknowledgements),
-`sent` (class 1 bookkeeping, frame counter of the frame), `root_entry` (a
+`sent` (class 1 bookkeeping, frame counter of the frame), `preferred` (the
+preferred parent, routing: the reply window), `root_entry` (a
 root acknowledgement entry for this node: the reporter's presence sample,
 §9), `tick` and `timer`
 (protocol timers): an override calls the base method (class 1 lives there);
@@ -109,12 +128,12 @@ from mesh.frame import (
     Header,
     Message,
 )
-from mesh.neighbours import NeighbourTable
+from mesh.neighbours import NeighbourTable, silence_ms
 from mesh.platform import randbelow, retained_layout
 from mesh.ports import ACK, APP_HIGH, ERROR, PRESENCE, PRIORITY_LOW, PRIORITY_PERIODIC
 from mesh.ports import priority as port_priority
 from mesh.radio import CHANNEL, RX, RX_ERROR, SENSE_ACTION, TX, TX_DONE
-from mesh.reliable import Reliable, identity
+from mesh.reliable import ACK_BATCH, ACK_ENTRY, Reliable, identity
 from mesh.replay import ReplayTable
 from mesh.replay import retained_size as replay_size
 from mesh.security import AUTHENTICATION, REPLAY, KeyRing, Security
@@ -128,6 +147,11 @@ MAX_ATTEMPTS = 6  # carrier senses of one access procedure
 # the backoff slot, kept so that the slot-based timers do not move (§8).
 PRESENCE_FRAME = 17
 DUTY_HIGH_PERCENT = 80  # duty-cycle use flagged above (§11 presence flag bit 2)
+# Reply window (§8): an acknowledgement frame of ACK_BATCH entries (one
+# message), the bound of the root's immediate reply, and the slots beyond
+# its time on air (the root's turnaround 1, margin 1).
+REPLY_FRAME = frame.OVERHEAD + 2 + ACK_BATCH * ACK_ENTRY
+REPLY_SLOTS = 2
 
 MAX_PAYLOAD = 200  # announced maximum application payload (MP6)
 SENDERS = 32  # entries of the per-address counters
@@ -197,6 +221,7 @@ class Counters:
         self.senses = 0
         self.busy = 0
         self.backoffs = 0
+        self.reply_waits = 0  # reply windows of the preferred parent's frames to the root
         self.give_ups = 0
         self.access_dropped = 0  # reports dropped after MAX_ATTEMPTS busy senses
         self.unexpected = 0  # radio events not matching the transmit state
@@ -211,6 +236,7 @@ class Counters:
         self.ack_entries = 0  # port 3 entries sent
         self.acks_late = 0  # entries sent for a forward not on air within half a timeout
         self.acks_dropped = 0  # port 3 entries refused by the queue
+        self.replies = 0  # root: acknowledgements answered at once (reply window)
         self.ack_withheld = 0  # frames not acknowledged: a class 1/2 message refused
         self.malformed_acks = 0
         self.duplicates = 0  # class 1/2 messages received again: acknowledged, dropped
@@ -265,6 +291,15 @@ class SenderCounters:
         return list(self._order)
 
 
+def _awaits_reply(messages):
+    # A frame to the root that the root answers: a class 1/2 message, or a
+    # node's own presence (the presence probe, §9).
+    for m in messages:
+        if m.cls or (m.mode == FIRST_HOP and m.port == PRESENCE):
+            return True
+    return False
+
+
 def _is_report(msg, priority, local):
     # Given up on a busy channel or refused by the allowance (§6, §8).
     return msg.cls == 0 and priority >= PRIORITY_PERIODIC
@@ -294,6 +329,7 @@ class LinkEngine(Core):
     backoff slot, the time on air of a presence frame by default.
     ``neighbours``: its `mesh.neighbours.NeighbourTable` (presence period of
     the SF by default; routing sets it). ``reliable``: its class 1 state.
+    ``reply_ms``: the reply window (§8).
     Use `open_link` to build one from the platform.
     """
 
@@ -348,6 +384,9 @@ class LinkEngine(Core):
         self._attempts = 0
         self._cw = CW_MIN
         self._sel = None
+        self.reply_ms = self.toa_ms(REPLY_FRAME) + REPLY_SLOTS * self.slot_ms
+        self._reply_end = None  # no medium access before (a reply window, §8)
+        self._reply = False  # root: an immediate reply queued, sent first (`send`)
         self._reliable()
 
     def _reliable(self):
@@ -465,15 +504,20 @@ class LinkEngine(Core):
         self._seq = (seq + 1) & 0xFFFF
         return seq
 
-    def send(self, msg, hop, trickle_reset=False, replace=False, exempt=False):
+    def send(self, msg, hop, trickle_reset=False, replace=False, exempt=False, reply=False):
         """Queue an own message for next hop hop; return the `TxQueue.offer` outcome.
 
         For mesh components (any port, explicit next hop); no check beyond
         the queue's. trickle_reset, replace, exempt: as `TxQueue.offer`.
+        reply: the root's immediate acknowledgement (reply window, §8): the
+        next frame is packed within `REPLY_FRAME` bytes, its access skipping
+        the backoff, until a frame goes on air.
         """
         outcome = self.queue.offer(msg, hop, True, trickle_reset, replace, exempt)
         if accepted(outcome):
             self._dirty = True
+            if reply:
+                self._reply = True
         else:
             self._count_refusal(None)
         return outcome
@@ -512,6 +556,10 @@ class LinkEngine(Core):
     def sent(self, sel, counter, now):
         """A frame goes on air: sel (`txqueue.Selection`, before its commit), counter."""
         self.reliable.sent(sel, counter, now)
+
+    def preferred(self):
+        """Return the preferred parent (routing, §9; the reply window), None by default."""
+        return None
 
     def root_entry(self, counter, now):
         """A root acknowledgement entry for this node: frame counter (low 16 bits).
@@ -646,7 +694,7 @@ class LinkEngine(Core):
         if state == IDLE:
             if self._dirty or (wake is not None and now >= wake):
                 self._access(now)
-        elif state == BACKOFF and now >= wake:
+        elif state == BACKOFF and (now >= wake or self._reply):
             self._access(now)
 
     def _access(self, now):
@@ -657,9 +705,23 @@ class LinkEngine(Core):
         if self.security.counter.exhausted:
             self._exhausted()
             return
+        end = self._reply_end
+        if end is not None and now < end:
+            # A reply window (§8): no access before its end, then a random
+            # backoff, so that the nodes deferring together do not start
+            # together.
+            self._wake = end + self.slot_ms * randbelow(self.random, self._cw + 1) + 1
+            return
         self._drop_refused(now)
         q = self.queue
-        sel = q.pack(now, self.dutycycle, self.limit, self._toa)
+        sel = None
+        if self._reply:
+            # The root's immediate reply first, in a short frame (§12).
+            sel = q.pack(now, self.dutycycle, REPLY_FRAME, self._toa)
+            if sel is None:
+                self._reply = False
+        if sel is None:
+            sel = q.pack(now, self.dutycycle, self.limit, self._toa)
         if sel is None:
             self._attempts = 0
             self._cw = CW_MIN
@@ -734,11 +796,19 @@ class LinkEngine(Core):
         for m in sel.messages:
             c.tx_messages[m.port] += 1
         self.sent(sel, counter, now)
+        self._reply = False
+        if sel.dest == ROOT and _awaits_reply(sel.messages):
+            self._defer(now + sel.toa_ms + self.reply_ms)  # the sender waits for the reply
         self.queue.commit(sel)
         self._attempts = 0
         self._cw = CW_MIN
         self._state = TRANSMITTING
         self.emit((TX, bytes(memoryview(buf)[:n])))
+
+    def _defer(self, end):
+        # No medium access before end (a reply window, §8).
+        if self._reply_end is None or end > self._reply_end:
+            self._reply_end = end
 
     def _tx_done(self, now, duration_ms):
         if self._state != TRANSMITTING:
@@ -809,16 +879,25 @@ class LinkEngine(Core):
         self.decoded(h, messages, entry, now)
         if h.dest != self.address and h.dest != BROADCAST:
             c.rx_overheard += 1
+            if h.dest == ROOT and h.source == self.preferred() and _awaits_reply(messages):
+                # The preferred parent's frame the root answers: its reply
+                # window is kept clear (§8).
+                c.reply_waits += 1
+                self._defer(now + self.reply_ms)
             self.overheard(h, messages, now)
             return
         rel = self.reliable
         ack = False
+        again = False  # a class 1/2 message already in the duplicate cache
         refused = False
         presence = False
+        relayed = False  # an upward message of another node: the source relays
         for m in messages:
             c.rx_messages[m.port] += 1
             if m.mode == FIRST_HOP and m.port == PRESENCE:
                 presence = True
+            elif m.mode == UPWARD:
+                relayed = True
             self.expand(m, h)
             key = identity(m, h.source, h.dest) if m.cls else None
             if key is None:
@@ -833,6 +912,7 @@ class LinkEngine(Core):
             # window (acknowledgements lost on the last hop) stay filtered.
             dup = rel.duplicate(key, now)
             if dup:
+                again = True
                 final = self._final(m)
                 if final or rel.holding(key, h.source):
                     if final:
@@ -849,6 +929,8 @@ class LinkEngine(Core):
                 c.retaken += 1
             if dup or outcome != QUEUED:
                 ack = True
+        if relayed and self.is_root and entry is not None:
+            entry.relayed = now
         if refused:
             # One entry would acknowledge the refused message too: none, and
             # no late one either (the sender retries the whole frame).
@@ -856,11 +938,20 @@ class LinkEngine(Core):
             if ack:
                 c.ack_withheld += 1
         elif ack:
-            rel.acknowledge(h.source, h.counter, now)
+            # A retransmission of a relaying root child: answered at once (§8).
+            rel.acknowledge(h.source, h.counter, now, reply=again and self._relaying(entry, now))
         elif presence and self.is_root and h.dest == ROOT:
             # A root child's own presence: its link's probe (§9), acknowledged
-            # with the next acknowledgement frame or beacon.
-            rel.acknowledge(h.source, h.counter, now, True)
+            # with the next acknowledgement frame or beacon; at once for a
+            # relaying root child (§8).
+            rel.acknowledge(h.source, h.counter, now, True, self._relaying(entry, now))
+
+    def _relaying(self, entry, now):
+        # Root: the neighbour of entry forwarded an upward message for another
+        # node within the silence limit (its children may not hear the root).
+        if not self.is_root or entry is None or entry.relayed is None:
+            return False
+        return now - entry.relayed < silence_ms(self.neighbours.period_ms)
 
     def _final(self, m):
         # This node is the destination of m (`_accept` delivers it here).

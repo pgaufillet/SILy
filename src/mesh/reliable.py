@@ -143,7 +143,13 @@ share the beacon's frame), or when `LAZY_BATCH` (24) of them are waiting;
 the batch keeps its own frame and timing (the root sends as many frames as
 before the probe, each of them heard as a proof of the root's presence),
 messages of 8 entries at most. The root child takes its sample from it
-(`mesh.reports`, ``engine.root_entry``).
+(`mesh.reports`, ``engine.root_entry``). **Immediate reply** (§8 reply
+window): the root answers at once a relaying root child's presence probe
+and its retransmissions (a duplicate), as the link decides
+(``acknowledge(..., reply=True)``): the entry leaves with the batch and
+lazy entries waiting, up to `ACK_BATCH` in all, in an acknowledgement the
+engine sends before its other traffic (`mesh.link`, ``replies``); the
+entries left keep their rule.
 A forwarded message queued normally is acknowledged passively when the relay forwards it; if it
 has not gone on air within half a timeout (queue, duty cycle, busy channel),
 the relay acknowledges it explicitly (`owe`). A frame with a class 1/2
@@ -1033,14 +1039,17 @@ class Reliable:
 
     # --- Receiver --------------------------------------------------------------------
 
-    def acknowledge(self, source, counter, now, lazy=False):
+    def acknowledge(self, source, counter, now, lazy=False, reply=False):
         """Acknowledge the frame (source, counter) explicitly: batched at the root.
 
         Cancels the acknowledgements owed for that frame (the entry covers
         every class 1/2 message of the frame, §12). lazy (root only: a
         presence frame of a root child, §9): the entry starts no batching
         delay; it goes with the next acknowledgement frame or beacon
-        (`flush_acks`).
+        (`flush_acks`). reply (root only: a relaying root child's presence
+        probe or retransmission, §8 reply window): the entry goes at once,
+        with the batch and lazy entries waiting up to `ACK_BATCH`, in the
+        engine's next frame (`LinkEngine.send` reply).
         """
         self.cancel_owed(source, counter)
         c16 = counter & 0xFFFF
@@ -1048,6 +1057,9 @@ class Reliable:
             self._send_acks(((source, c16),))
             return
         entry = (source, c16)
+        if reply:
+            self._reply(entry)
+            return
         if entry in self._batch or entry in self._lazy:
             return
         if lazy:
@@ -1061,6 +1073,19 @@ class Reliable:
         elif self._batch_due is None:
             self._batch_due = now + self.batch_ms
             self._at(self._batch_due)
+
+    def _reply(self, entry):
+        # The entry, then the batch and lazy entries waiting, in one message.
+        entries = [entry]
+        for pool in (self._batch, self._lazy):
+            while pool and len(entries) < ACK_BATCH:
+                e = pool.pop(0)
+                if e != entry:
+                    entries.append(e)
+        if not self._batch:
+            self._batch_due = None
+        self.counters.replies += 1
+        self._send_acks(entries, reply=True)
 
     def flush_acks(self):
         """Root: send the lazy entries now, to every neighbour (the beacon's frame).
@@ -1090,16 +1115,17 @@ class Reliable:
         for i in range(0, len(entries), ACK_BATCH):
             self._send_acks(entries[i : i + ACK_BATCH], broadcast)
 
-    def _send_acks(self, entries, broadcast=False):
+    def _send_acks(self, entries, broadcast=False, reply=False):
         # One link source: sent to it; several (root batch), or with the
         # root beacon, or one message of several: to every neighbour.
+        # reply: the root's immediate reply (`LinkEngine.send`).
         dest = BROADCAST if broadcast else entries[0][0]
         for source, _ in entries:
             if source != dest:
                 dest = BROADCAST
                 break
         msg = Message(LINK_LOCAL, 0, ACK, encode_acks(entries))
-        if accepted(self.engine.send(msg, dest)):
+        if accepted(self.engine.send(msg, dest, reply=reply)):
             self.counters.ack_entries += len(entries)
         else:
             self.counters.acks_dropped += len(entries)

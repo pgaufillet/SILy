@@ -599,6 +599,103 @@ class Deferral(unittest.TestCase):
         self.assertEqual((len(relay.queue), relay.deadline()), (0, None))
 
 
+def _class1():
+    return Message(frame.FIRST_HOP, 1, 20, b"up", seq=1)
+
+
+def _presence():
+    # A node's own presence (first hop).
+    return Message(frame.FIRST_HOP, 0, ports.PRESENCE, b"\x00\x00\x00")
+
+
+def _datagram():
+    return Message(frame.FIRST_HOP, 0, 20, b"up")
+
+
+def _bundled():
+    # A child's presence forwarded by its parent (class 0).
+    return Message(frame.UPWARD, 0, ports.PRESENCE, b"\x10\x00\x00\x00", origin=C)
+
+
+class ReplyWindow(unittest.TestCase):
+    """§8 reply window: after a frame to the root that the root answers (a class
+    1/2 message, or a node's own presence), its sender, and the nodes that
+    overhear it from their preferred parent, wait for the root's reply, then
+    (the latter) draw a backoff."""
+
+    def _frame(self, source, dest, messages):
+        # The first frame of source, to dest, carrying messages.
+        e = _engine(source, seed=5)
+        for m in messages:
+            e.send(m, dest)
+        (f,), _ = _drain(e, 0)
+        return f
+
+    def _child(self):
+        # A node whose preferred parent is B (routing's hook).
+        e = _engine(C, hop=B)
+        e.preferred = lambda: B
+        return e
+
+    def _next_start(self, engine, now, until=10000):
+        # Start of the engine's next frame on an idle channel, its timers
+        # followed up to until; None if none.
+        actions = _actions(engine, now)
+        while True:
+            if actions:
+                if actions[0][0] == TX:
+                    return now
+                actions = _actions(engine, now, (CHANNEL, False))
+                continue
+            d = engine.deadline()
+            if d is None or d > until:
+                return None
+            now = max(now, d)
+            actions = _actions(engine, now)
+
+    def test_child_waits_on_its_parent_frame_to_the_root(self):
+        for messages in ([_class1()], [_presence(), _bundled()]):
+            f = self._frame(B, ROOT, messages)
+            c = self._child()
+            _rx(c, 1000, f)
+            self.assertEqual(c.counters.reply_waits, 1)
+            c.submit(20, 0, ROOT, b"own")
+            start = self._next_start(c, 1000)
+            end = 1000 + c.reply_ms  # then a backoff of [0, CW] slots
+            self.assertTrue(end < start <= end + CW_MIN * c.slot_ms + 1, start - end)
+
+    def test_child_does_not_wait_on_other_frames(self):
+        cases = (
+            (B, ROOT, [_datagram(), _bundled()]),  # nothing the root answers
+            (A, ROOT, [_class1()]),  # not the preferred parent
+            (B, A, [_class1()]),  # not to the root
+        )
+        for source, dest, messages in cases:
+            f = self._frame(source, dest, messages)
+            c = self._child()
+            _rx(c, 1000, f)
+            c.submit(20, 0, ROOT, b"own")
+            self.assertEqual(self._next_start(c, 1000), 1000, (source, dest))
+            self.assertEqual(c.counters.reply_waits, 0)
+
+    def test_sender_waits_for_the_reply(self):
+        for message in (_class1(), _presence()):
+            a = _engine(A, hop=ROOT)
+            a.send(message, ROOT)
+            (f,), end = _drain(a, 0)
+            a.submit(21, 0, ROOT, b"next")
+            start = self._next_start(a, end)
+            self.assertTrue(end + a.reply_ms < start <= end + a.reply_ms + CW_MIN * a.slot_ms + 1)
+
+    def test_sender_does_not_wait_after_other_frames(self):
+        for hop, message in ((ROOT, _datagram()), (B, _class1())):
+            a = _engine(A, hop=hop)
+            a.send(message, hop)
+            (f,), end = _drain(a, 0)
+            a.submit(21, 0, ROOT, b"next")
+            self.assertEqual(self._next_start(a, end), end, hop)
+
+
 class EngineChecks(unittest.TestCase):
     def test_bad_address(self):
         p = FakePlatform(XorShift32(1))
