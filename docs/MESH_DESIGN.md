@@ -443,9 +443,9 @@ gets its share, not its relays' capacity.
   dropped; a local submission is refused. A node flooding the network gets
   its share, not its relays' capacity. Refusals are counted per origin (§13).
   Outside the quota, the node's own control messages, which are no
-  origin's traffic: its acknowledgements (port 3) and DODAG information
-  (port 9), and an error that takes the entry of the message it reports
-  (§12 queues and resources).
+  origin's traffic: its acknowledgements (port 3), its DODAG information
+  (port 9) and its own presence (first hop), and an error that takes the
+  entry of the message it reports (§12 queues and resources).
 - **Strict priority between levels**: under sustained priority-1 load,
   priority-3 messages wait. Periodic reports replace older ones in the queue
   (class 0, replace by newer, §12; a presence held for a bundle excepted,
@@ -538,7 +538,8 @@ gets its share, not its relays' capacity.
   a priority-1 class 0 message) is retried later: a new procedure after one
   more backoff of up to 32 slots. The slot is the time on air of a 17 B frame
   (the SILy presence size before the root sequence), fixed whatever the
-  presence extension and the sequence byte.
+  presence extension and the sequence byte. While the root's immediate
+  reply is pending, one slot instead (reply window, below).
 - **Hidden terminals** remain (nodes that hear the relay but not each other).
   Accepted: class 1/2 recover losses, presence losses are absorbed by the
   silence threshold (`K_MISS`); measured loss rates decide whether more is
@@ -546,6 +547,65 @@ gets its share, not its relays' capacity.
   next hop time out together: a class 1 retry waits a random delay after
   its timeout (§12), so that their retries do not collide again; its range
   doubles while the sender's frames keep timing out.
+- **Reply window**: a frame to the root that the root answers (a class
+  1/2 message, or the sender's own presence: the presence probe, §9) is
+  followed by a window kept clear for the reply: the time on air of an
+  acknowledgement frame of 8 entries + 2 slots (the root's turnaround 1,
+  margin 1), 197 ms at SF7, 361 ms at SF8, 639 ms at SF9 (section D of
+  `mesh_budget.py`). The sender does not access the medium before the
+  window ends; nor does a node that overhears such a frame from its
+  preferred parent (necessarily a root child); it then draws a backoff of
+  [0, CW] slots, so that the nodes deferring together do not start
+  together. Why (D42): the children of a relay that do not hear the root
+  (hidden root) sent while the root answered their relay, and the root's
+  frames collided at the relay; once no class 1 traffic kept its link
+  answered, an idle relay lost its root after 4 failed probes (host
+  simulator, the star with the root hidden, idle: at 30 nodes root frames
+  lost at the relay 21–35 % and a detach about once per hour, at 64 nodes
+  5 to 15 detaches per hour). With the window, same seeds: no detach in 9
+  hours at 30 nodes; at 64 nodes, no detach of the relay in 15 runs (26
+  before). The deferral removes the collisions, not the immediate answer
+  alone (below): the root repeating its acknowledgement in its later
+  frames, or answering the presence at once behind a window kept after
+  the presence only (the class 1 acknowledgements and the beacons left
+  unprotected), only moved the failures between seeds.
+  - **The root's immediate reply**: the root answers at once a relaying
+    root child (one that forwarded an upward message for another node
+    within the silence limit: its children may not hear the root) for its
+    presence probe and its retransmissions (a class 1/2 message already
+    in the duplicate cache: the child missed the acknowledgement). First
+    copies, and the frames of the other root children, are acknowledged
+    as before, batched or lazy (§12); answering every frame of a relaying
+    child at once removed D42 too, at a higher acknowledgement airtime
+    (§16). The reply takes the batch and lazy entries waiting, up to 8
+    entries, and is packed first, in frames of at most 47 B (an
+    acknowledgement frame of 8 entries) until the one carrying it goes on
+    air (a frame already sensing when the reply is queued goes first). A
+    priority-1 message that fits that frame may still go before it (a
+    Trickle advertisement after a reset): the reply then leaves in the
+    next short frame. A backoff in progress when the reply is queued ends
+    at once (a one-shot skip); a busy sense while the reply is pending is
+    followed by one slot, CW kept, the sense counted towards the 6
+    attempts (then the rule above). The root never senses again in the
+    step that found the channel busy: on the board the answer to a sense
+    is posted during the step that asked, and the runner steps it before
+    yielding, so the root would spin for as long as the channel reads
+    busy.
+  - **Delay**: a window delays the next frame of a deferring node, its
+    presence included, by at most the window and a backoff of CW slots (4
+    unless the same access procedure already met a busy channel): 0.41 s
+    at SF7, 0.73 s at SF8, 1.3 s at SF9, 10.2 s at SF12 (section D of
+    `mesh_budget.py`). That is below T/20 at every SF (1.5 s at SF7–8, 3 s
+    at SF9, 30 s at SF12), the variation of the presence frames' on-air
+    delay up to which the root alarm at 4.5 periods tolerates three lost
+    presences (§16, finding 2), and far below the T/4 and T/5 of the
+    silence limit (§9 link estimation). One window fits; windows back to
+    back (the parent sending to the root again before its child gets the
+    channel, under load) add up, and remain to be measured on the bench
+    (§18). The window also delays the other frames of a deferring node: a
+    forward, or an answer to a solicitation (§9 Trickle, answer window).
+    Cost: the sender's next frame waits too, and the root's immediate
+    replies come on top of its batches (§16).
 
 ## 9. Routing and repair
 
@@ -617,8 +677,13 @@ acknowledgement window and the time of its newest failure.
   node's own presence (first hop, no class 1/2 message) with a **lazy**
   entry (§12, §16): no batching delay of its own, it goes with the root's
   next acknowledgement frame or, at the latest, in its next beacon's frame
-  (every half period); the presence is one sample of the link's
-  reachability (below), a success at that entry, a failure 0.55 period
+  (every half period). A **relaying** root child's (one that forwarded an
+  upward message for another node within the silence limit) is answered
+  at once instead, in the reply window its children keep clear (§8): they
+  may not hear the root, and the beacon carrying the entry collided at the
+  relay with their frames, detaching an idle relay (D42). The presence is
+  one sample of the link's reachability (below), a success at that
+  entry, a failure 0.55 period
   (the longest gap between beacons) plus a root timeout after the end of
   its frame, subject to the rule of one failed sample per batching delay;
   it is no sample of the acknowledgement window: the root's link cost,
@@ -630,7 +695,10 @@ acknowledgement window and the time of its newest failure.
   uplink died while it still hears the root had no sample of the link and
   stayed attached over it for ever (TLA+ `DODAG_diamond_reach_cutup_idle`,
   MP10). Cost: no frame of the node; the root's entries ride in its
-  beacons, 4 bytes per root child and presence period (§16).
+  beacons, 4 bytes per root child and presence period, a relaying root
+  child's in a reply frame per period (§16). A relay whose queue is full
+  of forwarded traffic still sends its presence (a reserved entry, §12
+  queues and resources).
 - **Failure ageing**: once the newest failure of a window is a silence limit
   old (2.5 presence periods), the failures leave the window and its
   successes are kept. A link that failed during a cut and is heard again
@@ -1134,9 +1202,12 @@ acknowledgement window and the time of its newest failure.
   scheduling step (the solicitation's own random delay of at most 4 slots
   comes before it goes on air). At the close the node takes the best
   candidate heard after the solicitation that ended its hold, or with none
-  the first candidate heard afterwards. A solicitation during the hold
-  opens no window, one during an open window (another version heard) does
-  not extend it. At boot the first DODAG information is still adopted at
+  the first candidate heard afterwards. A neighbour deferring for a reply
+  window (§8) may answer after the close: the node decides without that
+  answer, or takes it as the first candidate heard afterwards. A
+  solicitation during the hold opens no window, one during an open window
+  (another version heard) does not extend it. At boot the first DODAG
+  information is still adopted at
   once (parameters); the parent waits for the close of the window if one
   is open (a DODAG information heard before the boot solicitation goes out
   is adopted with its parent at once). An isolated node thus stays audible: any neighbour that hears
@@ -1719,14 +1790,22 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   - the final destination: the root batches up to 8 entries per frame (§16),
     any other node acknowledges at once;
   - the root, for a frame of a root child carrying the child's own
-    presence and no class 1/2 message (presence probe, §9): a lazy entry,
-    kept apart from the batch, which starts no batching delay; it goes
+    presence and no class 1/2 message (presence probe, §9; a relaying
+    root child's at once, below): a lazy entry, kept apart from the
+    batch, which starts no batching delay; it goes
     with the next batch or in the next beacon's frame (messages of 8
     entries; at most 24 waiting). The batch keeps its own frame and
     timing: merged into the beacon, it would have removed root frames
     that a root child under hidden terminals hears as the root's presence
     (host simulator, the overloaded 64-node star: more silence-limit
     detaches of the relay);
+  - the root, **at once**, for a relaying root child's presence probe and
+    its retransmissions (a duplicate): **immediate reply** (§8 reply
+    window). The entry leaves with the batch and lazy entries waiting, up
+    to 8 in all, in a frame the root sends before its other traffic,
+    within the window that the child and the child's children keep clear;
+    the entries left keep their rule. The child's first copies are
+    batched;
   - a relay that accepted the message but will not forward it within half a
     timeout (message held during repair, duty-cycle budget, queue);
   - a node that receives a duplicate (the sender missed the acknowledgement).
@@ -1983,7 +2062,7 @@ Recovery times (worst depth 8, a hop costing at most one class 1 timeout):
 
 | Resource | Size (default) | When exceeded |
 |---|---|---|
-| transmit queue | 64 messages; above 32, 16 per origin (§7); plus 2 entries for the node's own DODAG information | origin over its quota refused as below; local submission refused; forwarded class 0 dropped (lowest priority, oldest first); forwarded class 1/2 not accepted (no acknowledgement, the sender retries or switches parent); presence flag *queue overflow* |
+| transmit queue | 64 messages; above 32, 16 per origin (§7); plus 3 entries for the node's own DODAG information and presence | origin over its quota refused as below; local submission refused; forwarded class 0 dropped (lowest priority, oldest first); forwarded class 1/2 not accepted (no acknowledgement, the sender retries or switches parent); presence flag *queue overflow* |
 | neighbour table | 64 entries | stalest entry that is not a parent evicted (§9) |
 | duplicate cache | 128 entries, 2 presence periods; root: 256 entries, 6 periods (window from the last copy received at the destination) | oldest evicted; a late duplicate may then be forwarded or, at its destination, delivered again in class 1 (MP5 exception); the class 2 receiver drops it |
 | class 2 send window | 64 messages per flow, 8 flows per node | submission refused |
@@ -1998,18 +2077,27 @@ a queued class 0 message of the same or lower priority, oldest first; local
 and class 1/2 arrivals are refused, never evict.
 
 Three admissions keep the control plane and MP5 working when the queue is
-full of held messages (a detached or ungrounded relay, §12 holding):
+full of held or forwarded messages (a detached or ungrounded relay, §12
+holding; a relay under load):
 
-- **DODAG information reserve**: the node's own DODAG information
-  (port 9: one advertisement, one solicitation queued at most) takes 2
-  entries beyond the 64 and is never refused for room nor by the quota.
+- **Control reserve**: the node's own DODAG information (port 9: one
+  advertisement, one solicitation queued at most) and its own presence
+  (first hop: one queued at most, replaced by newer) take 3 entries
+  beyond the 64 and are never refused for room nor by the quota.
   Otherwise a detached relay whose queue is full of held messages, or
   holds its own errors beyond its quota, cannot queue its poison nor its
   solicitation: it stays detached until the holding of those messages
   expires, then of their errors (the TLA+ `DODAG` model assumes a queue
   that never refuses). In the overloaded 30-node star the relay stayed
   detached 2 to 4 presence periods this way, and its subtree's holdings
-  expired meanwhile.
+  expired meanwhile. Likewise a relay whose queue is full of forwarded
+  traffic (held class 1 messages after a reattachment) had its presence
+  refused: no probe of the link to its parent (§9 presence probe), no
+  sample of it, nothing for the root to acknowledge (a root child), for
+  as long as the queue stayed full (D43: in the overloaded 64-node star,
+  no presence of the relay for 345 s, over 11 periods, exposing it to a
+  false silent-node alarm). The reserve held 2 entries, DODAG information
+  only, before.
 - **Acknowledgements outside the quota**: the node's own acknowledgements
   (port 3) are not refused by the quota (still by a full queue: their
   number is not bounded). The root holding errors it cannot route yet
@@ -2047,7 +2135,9 @@ WiFi):
   (queue full, origin quota, duty-cycle budget, holding expired, duplicate,
   rank error, loop, version rejected, authentication failure, replay, foreign
   profile); replay-table evictions; class 1 attempts and parent switches;
-  class 2 NACKs, resends, gone; channel busy and backoffs.
+  class 2 NACKs, resends, gone; channel busy and backoffs; reply windows
+  kept for the preferred parent's frames and, at the root, immediate
+  replies (§8).
 - **Route-change log**: the last 32 events with time and cause (attempts
   exhausted, parent silent, better parent, new version, detach, rejoin).
 - **Authentication failures and replays per sender address** (MP22, §14).
@@ -2470,9 +2560,10 @@ hops. Burst capacity keeps the channel around the relay under 50 %.)
 
 The root forwards nothing, so class 1 cannot rely on passive acknowledgement
 on the last hop: the root batches acknowledgements (8 entries per frame) and
-keeps them under 5 % of the channel. Batching delay: 1.8 s at SF7, 6.2 s at
-SF9, 46 s at SF12; at most 180 s/h of the root's budget, reached only under
-saturating traffic (1000 single-punch frames/h at SF7 cost about 51 s/h).
+keeps the batches under 5 % of the channel. Batching delay: 1.8 s at SF7,
+6.2 s at SF9, 46 s at SF12; at most 180 s/h of the root's budget for the
+batches, reached only under saturating traffic (1000 single-punch frames/h
+at SF7 cost about 51 s/h).
 The root beacon, two per presence period, takes 15 to 27 s/h of the root's
 budget besides (27 s/h at SF8).
 Class 1 retransmission timeouts must exceed this delay (§9). Under load the
@@ -2481,15 +2572,30 @@ acknowledgement is still accepted (§12).
 
 The root also acknowledges each presence frame of its children (the
 presence probe of their link, §9), with lazy entries that ride in its
-beacons' frames: 4 bytes per root child and presence period, a 3-byte
-message header per 8 entries. With all 30 Nodes root children, idle
-(`mesh_budget.py` section D): 23 s/h of the root's budget at SF7, 39 s/h
+beacons' frames (a relaying root child's at once, below): 4 bytes per
+root child and presence period, a 3-byte message header per 8 entries.
+With all 30 Nodes root children, idle (`mesh_budget.py` section D):
+23 s/h of the root's budget at SF7, 39 s/h
 at SF8, 26–37 s/h at SF9–12; channel load +0.6 % at SF7, +1.1 % at SF8
 (idle load 15.0 %, the 15 % of the policy), +0.7–1.0 % at SF9–12. With
 a few root children (a relay or two next to the Gateway, the SILy
 layout) about +0.1 %. Separate acknowledgement frames per batching delay
 would have cost 3 to 5 times more (one frame of 13 B overhead and a
 preamble per one or two entries).
+
+**Immediate replies** (reply window, §8) come on top: the root answers at
+once a relaying root child's presence probe, one frame per presence period
+when idle (one entry, the entries waiting riding with it: 6 s/h per
+relaying child at SF7, 12 s/h at SF8, 8–11 s/h at SF9–12, `mesh_budget.py`
+section D), and each of its retransmissions. The 180 s/h are therefore no
+longer a bound by construction but a measured margin: under the §15 load
+the root's acknowledgements took 93–109 s/h with the reply window against
+63–84 s/h without (host simulator, `geometric` and `grid` networks);
+answering every frame of a relaying child at once took 139–157 s/h. A token
+bucket limiting the immediate replies to 5 % of the channel was considered
+and not adopted: it never triggered at 64 nodes, and the root's duty-cycle
+allowance (§6) bounds its airtime anyway. To reconsider if statistical runs
+or the bench approach the ceiling.
 
 ### Findings
 
@@ -2512,7 +2618,9 @@ preamble per one or two entries).
    detecting 3 ≤ 3.6, no false alarm ≥ 3.7). At 4.5 periods an on-air delay
    variation of the presence frames below 0.1 period keeps 3 losses
    tolerated, but any variation may let 4 consecutive losses pass
-   unreported (5 are reported while it stays within 0.9 period).
+   unreported (5 are reported while it stays within 0.9 period). One reply
+   window (§8) delays a presence by at most 0.025 period (0.73 s at SF8);
+   windows back to back under load remain to be measured (§18).
 3. **1000 punches/h needs SF ≤ 9 with one punch per frame, SF ≤ 10 with
    aggregation**; SF11–12 cannot carry it (the channel saturates). Bursts of
    100/min need SF ≤ 8, or SF ≤ 10 with aggregation.
@@ -2568,7 +2676,10 @@ in the DODAG information message (§9), so every node applies them:
   the field, then set `K_MISS` and the periods (§16). Measure also the
   variation of the on-air delay of presence frames: the root alarm at 4.5
   periods tolerates three lost presences only while it stays below about
-  T/20 (§16, finding 2).
+  T/20 (§16, finding 2). One reply window adds at most 0.73 s at SF8
+  (T/20 = 1.5 s, §8); windows back to back under load add up: measure
+  them, and the root's turnaround for its immediate reply (1 slot of the
+  window).
 - Adaptive SF (§5, deferred): reconsider once loss rates and margin
   stability are measured.
 - Check the decision in force (ARCEP 2014-1263 as amended) for 869.4–869.65 MHz.

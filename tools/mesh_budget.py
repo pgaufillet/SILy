@@ -2,9 +2,10 @@
 """Airtime and duty-cycle budget of the SILy mesh (docs/MESH_DESIGN.md).
 
 Plain CPython 3, no dependency: `python3 tools/mesh_budget.py [SUBTREE]`.
-Every figure of MESH_DESIGN "Airtime budget" (§16), and the repair and
-class 2 recovery tables of §9 and §12, come from this script; change the
-parameters below and re-run rather than editing the tables by hand.
+Every figure of MESH_DESIGN "Airtime budget" (§16), the reply window of
+§8, and the repair and class 2 recovery tables of §9 and §12, come from
+this script; change the parameters below and re-run rather than editing
+the tables by hand.
 """
 
 import math
@@ -126,6 +127,14 @@ DETACH_HOLD = 2  # Imin after poisoning before rejoining
 # + answer 2 + step 1.
 WINDOW_SLOTS = 8
 
+# --- Medium access (MESH_DESIGN §8) -----------------------------------------
+CW_MIN = 4  # contention window at the start of an access procedure (slots)
+# Reply window: kept clear after a frame to the root that the root answers (a
+# class 1/2 message, or the sender's own presence): an acknowledgement frame of
+# ACK_PER_FRAME entries + REPLY_SLOTS slots (the root's turnaround 1, margin 1);
+# a child deferring for its parent's frame then backs off [0, CW] slots.
+REPLY_SLOTS = 2
+
 # --- Service classes (MESH_DESIGN §12) ---------------------------------------
 TAIL = 1 + 1 + 2 + 2  # presence tail: count, port, oldest unacknowledged, last sequence
 C2_WINDOW = 64  # class 2 send window per flow (messages)
@@ -139,6 +148,11 @@ def toa(payload, sf, bw=BW, cr=CR, preamble=PREAMBLE):
     bits = 8 * payload - 4 * sf + 28 + (16 if CRC else 0) - (0 if EXPLICIT_HEADER else 20)
     nsym = 8 + max(math.ceil(bits / (4 * (sf - 2 * ldro))) * (cr + 4), 0)
     return (preamble + 4.25 + nsym) * tsym
+
+
+def toa_ms(payload, sf):
+    """Time on air in ms, rounded up as the link engine counts it (mesh.airtime)."""
+    return math.ceil(toa(payload, sf) * 1000)
 
 
 def frame(k, rec):
@@ -294,6 +308,28 @@ def main():
         print(
             f"{sf:<4}{t * 1000:>9.0f}  {w:>11.1f}  {t * WINDOW / w:>16.0f}  {bc:>11.0f}  "
             f"{pr:>21.0f}  {pr / WINDOW:>7.1%}"
+        )
+    print("    Immediate replies (reply window, §8), on top of the batches: one frame per")
+    print("    presence probe of a relaying root child (1 entry, idle: one per presence")
+    print("    period), plus one per retransmission of its class 1/2 frames; the window kept")
+    print(
+        f"    clear after a frame to the root ({ACK_PER_FRAME}-entry acknowledgement frame + "
+        f"{REPLY_SLOTS} slots) and"
+    )
+    print(
+        f"    the longest deferral of a child (window + backoff of CW = {CW_MIN} slots), "
+        "against T/20"
+    )
+    print("SF  reply(ms)  per relaying child, idle(s/h)  window(ms)  deferral(ms)  T/20(s)")
+    for sf in SFS:
+        live = periods[sf]
+        reply = toa_ms(OVERHEAD + LAST_HEADER + ACK_ENTRY, sf)
+        slot = toa_ms(SLOT_FRAME, sf)
+        ack = toa_ms(OVERHEAD + LAST_HEADER + ACK_PER_FRAME * ACK_ENTRY, sf)
+        window = ack + REPLY_SLOTS * slot
+        print(
+            f"{sf:<4}{reply:>9}  {reply / 1000 * WINDOW / live:>29.1f}  {window:>10}  "
+            f"{window + CW_MIN * slot:>12}  {live / 20:>7.1f}"
         )
 
     print(

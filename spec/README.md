@@ -292,7 +292,8 @@ The same points appear in MESH_DESIGN §18.
 
 - **Root alarm and on-air delay**: the root alarm at Tr = 4.5T tolerates
   3 lost presences only up to an on-air delay variation of T/20; to measure
-  on the bench.
+  on the bench, with the reply windows back to back under load
+  (MESH_DESIGN §8: one adds at most 0.73 s at SF8, T/20 = 1.5 s).
 - **Bad links seen only through presence**: from a full window, 13 lost
   presences (13 periods) are needed before the link becomes ineligible on
   its ETX; with class 1 traffic the 3-attempt drop acts within seconds.
@@ -527,10 +528,12 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   or explicitly), held, or none. One copy per node and message: a duplicate
   taken again replaces a copy still waiting (the code keeps both; the
   waiting one only adds a retry). Unbounded queues (the code keeps a
-  reserve of entries for a node's DODAG information, so that a queue full
-  of held messages refuses neither its poison nor its solicitation, and
-  admits an error in the entry of the message it reports whatever the
-  quota: MESH_DESIGN §12 queues and resources). **Errors** are abstracted: "sent" by a
+  reserve of entries for a node's DODAG information and its own presence,
+  so that a queue full of held messages refuses neither its poison nor its
+  solicitation, and a queue full of forwarded traffic not its presence,
+  the probe of its parent's link (`Probe`); and it admits an error in the
+  entry of the message it reports whatever the quota: MESH_DESIGN §12
+  queues and resources). **Errors** are abstracted: "sent" by a
   relay whose holding expires, received when the failing relay and the
   origin are both connected to the root (or at once when the origin itself
   fails); the error's own custody is not modelled. The code also sends an
@@ -1288,6 +1291,12 @@ How each fix is implemented, what it costs, and the limits accepted.
   acknowledgement window: the root's link cost and the ranks stay with
   class 1 traffic, as the model's fixed costs assume. The untimed model
   keeps one probe at a time and leaves the beacon carrying the entry out.
+  The code answers a relaying root child's probe, and its retransmissions,
+  at once, in a reply window the child and its children keep clear
+  (MESH_DESIGN §8): timing only, the models are untimed and unaffected
+  (an acknowledgement is heard or lost, and their properties hold for any
+  pattern of losses within their bounds); the root's turnaround is a
+  bench check (MESH_DESIGN §18).
   Not modelled: a root frame carrying both lazy entries and class 1
   entries, lost, gives a failed sample to the presence and one to the
   class 1 frames when their frames are more than a batching delay apart
