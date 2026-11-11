@@ -10,7 +10,7 @@ from mesh import frame, ports
 from mesh import profile as profiles
 from mesh.counter import FrameCounter
 from mesh.frame import BROADCAST, DOWNWARD, FIRST_HOP, LINK_LOCAL, P2P, ROOT, UPWARD, Message
-from mesh.link import CW_MIN, open_link
+from mesh.link import CW_MAX, CW_MIN, MAX_ATTEMPTS, REPLY_FRAME, open_link
 from mesh.link import NO_ROUTE as SUBMIT_NO_ROUTE
 from mesh.neighbours import silence_ms
 from mesh.radio import CHANNEL, RX, SENSE, TX_DONE
@@ -730,6 +730,71 @@ class ImmediateReply(_RootCase):
         toa = root.toa_ms(len(f))
         (f,), _ = _run(root, 1 + toa, None, list(root.step(1 + toa, (TX_DONE, toa))))
         self.assertEqual(self._entries(f)[1], [20])  # then the downward message
+
+    def test_busy_sense_with_a_reply_pending_waits_one_slot(self):
+        # The skip is once: a busy sense while the reply is pending is followed
+        # by one slot, never by a sense in the step of its answer (on the
+        # board the answer comes within the step that asked: the runner would
+        # spin while the channel reads busy); the window does not grow.
+        root = _engine(ROOT, None, seed=3)
+        root.reliable.acknowledge(R, 7, 0, reply=True)
+        now = 0
+        self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+        for _ in range(MAX_ATTEMPTS - 1):
+            self.assertEqual(list(root.step(now, (CHANNEL, True))), [])
+            self.assertEqual(root.deadline(), now + root.slot_ms)
+            now += root.slot_ms
+            self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+        ((_, f),) = list(root.step(now, (CHANNEL, False)))
+        self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
+        self.assertEqual((root.counters.busy, root.counters.give_ups), (MAX_ATTEMPTS - 1, 0))
+
+    def test_busy_senses_with_a_reply_pending_give_up_as_usual(self):
+        # MAX_ATTEMPTS busy senses: the give-up backoff of [1, CW_MAX] slots,
+        # not a sense at once; then a new procedure, the reply first.
+        waits = set()
+        for seed in range(12):
+            root = _engine(ROOT, None, seed=seed)
+            root.reliable.acknowledge(R, 7, 0, reply=True)
+            now = 0
+            actions = list(root.step(now, None))
+            for _ in range(MAX_ATTEMPTS):
+                self.assertEqual(actions, [(SENSE,)])
+                self.assertEqual(list(root.step(now, (CHANNEL, True))), [])
+                last, now = now, root.deadline()
+                actions = list(root.step(now, None))
+            self.assertEqual(root.counters.give_ups, 1)
+            self.assertEqual((now - last) % root.slot_ms, 0)
+            waits.add((now - last) // root.slot_ms)
+            self.assertEqual(actions, [(SENSE,)])
+            ((_, f),) = list(root.step(now, (CHANNEL, False)))
+            self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
+        self.assertTrue(min(waits) >= 1 and max(waits) <= CW_MAX, sorted(waits))
+        self.assertTrue(max(waits) > 1, sorted(waits))  # drawn, not the reply's slot
+
+    def test_reply_queued_while_sensing_another_frame_keeps_its_rules(self):
+        # The frame sensed before the reply was queued goes first; the reply
+        # stays pending: a busy sense waits one slot, and it leaves alone in
+        # a short frame, though a longer message to the same node waits.
+        root = _engine(ROOT, None, seed=3)
+        root.send(Message(DOWNWARD, 0, 20, bytes(100), dest=N), N)
+        self.assertEqual(list(root.step(0, None)), [(SENSE,)])
+        root.send(Message(DOWNWARD, 0, 21, bytes(100), dest=R), R)
+        root.reliable.acknowledge(R, 7, 0, reply=True)
+        ((_, f),) = list(root.step(0, (CHANNEL, False)))
+        self.assertEqual(self._entries(f)[1], [20])
+        now = root.toa_ms(len(f))
+        self.assertEqual(list(root.step(now, (TX_DONE, now))), [(SENSE,)])
+        self.assertEqual(list(root.step(now, (CHANNEL, True))), [])
+        self.assertEqual(root.deadline(), now + root.slot_ms)
+        now += root.slot_ms
+        self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+        ((_, f),) = list(root.step(now, (CHANNEL, False)))
+        self.assertTrue(len(f) <= REPLY_FRAME, len(f))
+        self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
+        toa = root.toa_ms(len(f))
+        (f,), _ = _run(root, now + toa, None, list(root.step(now + toa, (TX_DONE, toa))))
+        self.assertEqual(self._entries(f)[1], [21])  # then the message to R
 
 
 class LateRootAcknowledgements(_RootCase):

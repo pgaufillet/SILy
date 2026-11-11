@@ -150,9 +150,10 @@ class Admission(unittest.TestCase):
         # A less urgent newcomer never evicts a more urgent message.
         self.assertEqual(q.offer(_up(0x10, port=ports.TOPOLOGY), _PARENT), DROPPED)
         self.assertIsNone(q.victim)
-        # Local submissions and class 1 never evict.
-        own2 = _own(port=ports.PRESENCE, payload=b"p")
-        self.assertEqual(q.offer(own2, _PARENT, local=True), REFUSED)
+        # Local submissions, even more urgent, and class 1 never evict (an
+        # own presence would enter the reserve).
+        own1 = _own(port=_APP_HIGH, payload=b"p")
+        self.assertEqual(q.offer(own1, _PARENT, local=True), REFUSED)
         self.assertEqual(q.offer(_up(0x11, port=_APP_HIGH, cls=1), _PARENT), UNACKED)
         self.assertEqual(q.evictions, 3)
         self.assertEqual(q.refusals, [2, 1, 0])
@@ -205,8 +206,9 @@ class Admission(unittest.TestCase):
 
     def test_own_dodag_information_has_a_reserve(self):
         # A detached relay whose queue is full of held class 1 messages still
-        # queues its solicitation and its advertisement (2 entries beyond the
-        # 64), whatever its own quota; nothing else enters the reserve.
+        # queues its solicitation and its advertisement (entries beyond the
+        # 64), whatever its own quota; nothing else but its own presence
+        # enters the reserve.
         q = TxQueue()
         for origin in range(1, 5):
             for _ in range(16):
@@ -220,15 +222,47 @@ class Admission(unittest.TestCase):
         )
         self.assertEqual(q.offer(advert, BROADCAST, local=True), ACCEPTED)
         self.assertEqual((len(q), q.messages(), q.control), (66, 64, 2))
-        # The reserve holds two: a third is refused, as is any other message.
+        # The reserve holds three, the own presence's included: a third is
+        # then refused, as is any other message.
+        presence = _own(port=ports.PRESENCE, payload=b"\x00\x00\x00")
+        self.assertEqual(q.offer(presence, _PARENT, local=True, replace=True), ACCEPTED)
         third = Message(LINK_LOCAL, 0, ports.DODAG_INFO, b"")
         self.assertEqual(q.offer(third, BROADCAST, local=True), REFUSED)
         self.assertEqual(q.offer(_up(0x50, cls=1), _PARENT), UNACKED)
         # Sent, they free the reserve; the messages keep their 64 entries.
         sent = _send(q, limit=frame.OVERHEAD + 2 + 2)
         self.assertEqual(sent, [solicitation])
-        self.assertEqual((len(q), q.messages(), q.control), (65, 64, 1))
+        self.assertEqual((len(q), q.messages(), q.control), (66, 64, 2))
         self.assertEqual(q.offer(third, BROADCAST, local=True), ACCEPTED)
+
+    def test_own_presence_has_a_reserve(self):
+        # A relay's own presence, the probe of the link to its parent, is
+        # queued in the reserve when its own messages are over their quota
+        # or when the queue is full of forwarded traffic; one entry (a newer
+        # one replaces it). A forwarded presence does not enter the reserve.
+        presence = _own(port=ports.PRESENCE, payload=b"\x00\x00\x00")
+        q = TxQueue()
+        for _ in range(17):
+            q.offer(_up(0xA, cls=1), _PARENT)
+        for _ in range(16):
+            q.offer(_own(cls=1), _PARENT, local=True)
+        self.assertEqual(q.offer(_own(cls=1), _PARENT, local=True), REFUSED)
+        self.assertEqual(q.reason, OVER_QUOTA)
+        self.assertEqual(q.offer(presence, _PARENT, local=True, replace=True), ACCEPTED)
+        self.assertEqual((q.messages(), q.control, q.holding(LOCAL)), (33, 1, 17))
+        q = TxQueue()
+        for origin in range(1, 5):
+            for _ in range(16):
+                q.offer(_up(origin, cls=1), _PARENT)
+        forwarded = _up(0x50, port=ports.PRESENCE, payload=b"\x10\x00\x00\x00")
+        self.assertEqual(q.offer(forwarded, _PARENT, replace=True), DROPPED)
+        self.assertEqual(q.offer(presence, _PARENT, local=True, replace=True), ACCEPTED)
+        self.assertEqual((len(q), q.messages(), q.control), (65, 64, 1))
+        newer = _own(port=ports.PRESENCE, payload=b"\x00\x01\x00")
+        self.assertEqual(q.offer(newer, _PARENT, local=True, replace=True), REPLACED)
+        self.assertEqual((len(q), q.control), (65, 1))
+        self.assertEqual(_send(q, limit=frame.OVERHEAD + 2 + 2 + 3), [newer])
+        self.assertEqual((len(q), q.messages(), q.control), (64, 64, 0))
 
     def test_own_dodag_information_not_counted_by_the_quota(self):
         q = TxQueue()

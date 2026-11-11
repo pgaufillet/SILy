@@ -14,13 +14,18 @@ message shares its capacity equally between origins, whatever their volume.
 
 **Admission** (§7, §12 queues and resources): `offer` returns the outcome
 for the message's class and origin. The queue holds ``size`` messages
-(64 by default) plus `RESERVE` (2) entries kept for the node's own DODAG
-information (port 9: one advertisement, one solicitation, `mesh.dodag`
-queues at most one of each), which neither fill the queue nor are refused
-by the quota: a node whose queue is full of held class 1 messages, or of
-its own errors, still solicits and rejoins (otherwise it stays detached
-until their holding expires, and its subtree's holdings expire
-meanwhile). The node's own acknowledgements (port 3) are not subject to
+(64 by default) plus `RESERVE` (3) entries kept for the node's own control
+messages: its DODAG information (port 9: one advertisement, one
+solicitation, `mesh.dodag` queues at most one of each) and its own
+presence (port 1, mode `FIRST_HOP`: one, the reporter replaces it by
+newer), which neither fill the queue nor are refused by the quota. A node
+whose queue is full of held class 1 messages, or of its own errors, still
+solicits and rejoins (otherwise it stays detached until their holding
+expires, and its subtree's holdings expire meanwhile); a relay whose queue
+is full of forwarded traffic still sends its presence, the probe of the
+link to its parent (§9: otherwise nothing tests that link, and the root
+receives no sample of it, for as long as the queue stays full). The node's
+own acknowledgements (port 3) are not subject to
 the quota either (but to a full queue: their number is not bounded), nor
 is a message offered with ``exempt``: an error taking the entry of the
 message it reports (`mesh.reliable`), which occupies no more room than
@@ -106,11 +111,11 @@ messages per packed frame).
 """
 
 from mesh import frame
-from mesh.ports import ACK, DODAG_INFO, PRIORITY_REPAIR
+from mesh.ports import ACK, DODAG_INFO, PRESENCE, PRIORITY_REPAIR
 from mesh.ports import priority as port_priority
 
 SIZE = 64  # default transmit queue size (§12)
-RESERVE = 2  # entries beyond it for the node's own DODAG information (port 9)
+RESERVE = 3  # entries beyond it for the node's own DODAG information (port 9) and presence
 QUOTA = 16  # messages per origin once the queue is more than half full (§7)
 MAX_SIZE = 254
 
@@ -132,7 +137,7 @@ _NIL = 255
 _END = 0x3FFFFFFF  # sorts after every key
 _WAIT = 0x01
 _LOCAL = 0x02
-_CONTROL = 0x04  # the node's own DODAG information: in the reserve
+_CONTROL = 0x04  # the node's own DODAG information or presence: in the reserve
 _HELD = 0x08  # deferred once (`offer` until): kept beside a newer one (keep)
 KEEP = 2  # with keep: messages of one origin and port kept once due (deferred: all)
 
@@ -179,7 +184,7 @@ class TxQueue:
     """Transmit queue of one board.
 
     size: messages (64 by default); reserve: entries beyond them for the
-    node's own DODAG information (module docstring); ``entries``: size +
+    node's own DODAG information and presence (module docstring); ``entries``: size +
     reserve, at most 254, the slots (0 to entries - 1); quota: messages an
     origin may hold once the queue holds more than size // 2.
     """
@@ -260,7 +265,8 @@ class TxQueue:
 
         local: the node's own message (one origin, `LOCAL`), else forwarded
         (origin: msg.origin, the root for messages without origin); a local
-        port 9 message goes into the reserve, a local port 3 one is not
+        port 9 message, or its own first-hop presence (port 1, mode
+        `FIRST_HOP`), goes into the reserve, a local port 3 one is not
         subject to the quota (module docstring); trickle_reset: port 9
         priority (`mesh.ports.priority`); replace: class 0 replace by newer
         for this port; exempt: admitted beyond the origin's quota (an error
@@ -304,7 +310,10 @@ class TxQueue:
                 elif due and until < due:
                     self._due[i] = until
                 return REPLACED
-        control = local and msg.port == DODAG_INFO
+        port = msg.port
+        control = local and (
+            port == DODAG_INFO or (port == PRESENCE and msg.mode == frame.FIRST_HOP)
+        )
         if control:
             if self.control == self.entries - self.size:
                 return self._refuse(msg, local, FULL)  # more than the reserve

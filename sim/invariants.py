@@ -913,7 +913,7 @@ class Resources(Check):
                 "root_duplicates" if b is self.checker.root else "duplicates": len(
                     e.reliable.duplicates
                 ),
-                "queue": e.queue.messages(),  # the DODAG information reserve apart
+                "queue": e.queue.messages(),  # the reserve (own DODAG information, presence) apart
                 "senders": len(e.senders),
                 # root batch and lazy entries (no accessor)
                 "batch": len(e.reliable._batch) + len(e.reliable._lazy),

@@ -31,7 +31,8 @@ start), commits the selection and transmits; ``TX_DONE`` charges the excess
 of the measured duration. A charge that leaves use above 80 % of the budget
 sets ``duty_high`` (presence flag bit 2, §11; the reporter clears it).
 Busy: random backoff of [1, CW] slots (slot = time on air of a presence
-frame at the SF; CW 4, doubling up to 32), then packs and senses again.
+frame at the SF; CW 4, doubling up to 32; one slot while the root's reply
+is pending, below), then packs and senses again.
 After `MAX_ATTEMPTS` busy senses the engine gives up: the priority-2/3
 reports of the frame are dropped; the other messages (class 1/2,
 priority-1 datagrams) stay queued and a new procedure starts after one more
@@ -52,9 +53,17 @@ would collide at the relay. The root answers at once a relaying root
 child (one that forwarded an upward message for another node within the
 silence limit, ``Neighbour.relayed``) for its presence probe and for its
 retransmissions (a class 1/2 message already in the duplicate cache): the
-reply (`Reliable.acknowledge`) is packed first, in a frame of at most
-`REPLY_FRAME` bytes, and its access skips the backoff; the root's other
-acknowledgements are batched as before.
+reply (`Reliable.acknowledge`) is packed first, in frames of at most
+`REPLY_FRAME` bytes until the one carrying it goes on air (a frame sensed
+before the reply was queued goes first). A backoff in progress when the
+reply is queued ends at once, a one-shot skip; a busy sense while the reply
+is pending is followed by one slot, the contention window kept and the
+sense counted towards `MAX_ATTEMPTS` (then the give-up rule applies), so
+that the root never senses again in the step that found the channel busy:
+on the board the answer to a sense is posted during the step that asked,
+and the runner steps it before yielding (`mesh.runner`), so it would spin
+for as long as the channel reads busy. The root's other acknowledgements
+are batched as before.
 
 **Receive path** (§14 reception order): steps 1–3 by `Security.receive`
 (length and version, authentication, replay; failures counted, per sender
@@ -386,7 +395,7 @@ class LinkEngine(Core):
         self._sel = None
         self.reply_ms = self.toa_ms(REPLY_FRAME) + REPLY_SLOTS * self.slot_ms
         self._reply_end = None  # no medium access before (a reply window, §8)
-        self._reply = False  # root: an immediate reply queued, sent first (`send`)
+        self._reply = None  # root: the immediate reply pending (its Message), sent first (`send`)
         self._reliable()
 
     def _reliable(self):
@@ -509,15 +518,18 @@ class LinkEngine(Core):
 
         For mesh components (any port, explicit next hop); no check beyond
         the queue's. trickle_reset, replace, exempt: as `TxQueue.offer`.
-        reply: the root's immediate acknowledgement (reply window, §8): the
-        next frame is packed within `REPLY_FRAME` bytes, its access skipping
-        the backoff, until a frame goes on air.
+        reply: msg is the root's immediate acknowledgement (reply window,
+        §8): a backoff in progress ends now (once), and frames are packed
+        within `REPLY_FRAME` bytes until the one carrying msg goes on air; a
+        busy sense meanwhile waits one slot (`_channel`).
         """
         outcome = self.queue.offer(msg, hop, True, trickle_reset, replace, exempt)
         if accepted(outcome):
             self._dirty = True
             if reply:
-                self._reply = True
+                self._reply = msg
+                if self._state == BACKOFF:
+                    self._wake = self.now  # skipped once, at the reply's queueing
         else:
             self._count_refusal(None)
         return outcome
@@ -694,7 +706,7 @@ class LinkEngine(Core):
         if state == IDLE:
             if self._dirty or (wake is not None and now >= wake):
                 self._access(now)
-        elif state == BACKOFF and (now >= wake or self._reply):
+        elif state == BACKOFF and now >= wake:
             self._access(now)
 
     def _access(self, now):
@@ -715,11 +727,11 @@ class LinkEngine(Core):
         self._drop_refused(now)
         q = self.queue
         sel = None
-        if self._reply:
+        if self._reply is not None:
             # The root's immediate reply first, in a short frame (§12).
             sel = q.pack(now, self.dutycycle, REPLY_FRAME, self._toa)
             if sel is None:
-                self._reply = False
+                self._reply = None
         if sel is None:
             sel = q.pack(now, self.dutycycle, self.limit, self._toa)
         if sel is None:
@@ -764,14 +776,21 @@ class LinkEngine(Core):
             c.give_ups += 1
             self.give_up(self._sel, now)
             self._attempts = 0
-            window = CW_MAX  # retried later: a new procedure after one more backoff
+            slots = 1 + randbelow(self.random, CW_MAX)  # then a new procedure
             self._cw = CW_MIN
+        elif self._reply is not None:
+            # The root's reply pending (§8): one slot, the window kept. Never
+            # a sense in this step: on the board the runner would step its
+            # answer before yielding.
+            c.backoffs += 1
+            slots = 1
         else:
             c.backoffs += 1
             window = self._cw
             self._cw = window * 2 if window < CW_MAX else CW_MAX
+            slots = 1 + randbelow(self.random, window)
         self._state = BACKOFF
-        self._wake = now + self.slot_ms * (1 + randbelow(self.random, window))
+        self._wake = now + self.slot_ms * slots
 
     def _transmit(self, now):
         sel = self._sel
@@ -796,7 +815,12 @@ class LinkEngine(Core):
         for m in sel.messages:
             c.tx_messages[m.port] += 1
         self.sent(sel, counter, now)
-        self._reply = False
+        reply = self._reply
+        if reply is not None:
+            for m in sel.messages:
+                if m is reply:
+                    self._reply = None  # the reply on air
+                    break
         if sel.dest == ROOT and _awaits_reply(sel.messages):
             self._defer(now + sel.toa_ms + self.reply_ms)  # the sender waits for the reply
         self.queue.commit(sel)
