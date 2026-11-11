@@ -7,7 +7,9 @@ injected into a core (a cycle kept, a node that never selects, a version
 ignored, a message dropped after its acknowledgement, a duty cycle not
 enforced, a table larger than its bound, a node never routed, a rootless
 cycle, a message still queued at the end): the check must fire, naming the
-nodes at fault.
+nodes at fault. The false floats (`Floats`, counted, not a violation): a
+loss of grounding injected without a scenario event is counted, one after
+an event is not.
 """
 
 import unittest
@@ -23,6 +25,7 @@ from sim.invariants import (
     Checker,
     Delivery,
     DutyCycle,
+    Floats,
     Loops,
     Recovery,
     Resources,
@@ -426,6 +429,51 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual([v.nodes for v in found], [(B,)])
         self.assertIn("still queued at the end (ports %d)" % APP, found[0].detail)
         self.assertEqual(check.copies, 1)
+
+
+def unground(net, name):
+    """Make name lose its grounding now, as if G had run out."""
+    board = net.boards[name]
+    p = board.routing.parents
+    p._events |= p._unground(net.now)
+    board.node.wake()
+
+
+class FloatsTest(unittest.TestCase):
+    """False floats: counted without a scenario event within G, with the time ungrounded."""
+
+    def run_line(self, defect=False, event=False):
+        net = build((ROOT, A, B), line(A, B))
+        check = Floats()
+        checker = Checker(net, [check])
+        checker.start()
+        if event:
+            net.at(FORMED - 1000, checker.links_changed)
+        if defect:
+            net.at(FORMED, unground, net, B)
+        net.run(FORMED + 30000)
+        checker.finish()
+        self.assertEqual(checker.violations, [])
+        return check, net
+
+    def test_healthy_line_does_not_float(self):
+        check, net = self.run_line()
+        self.assertEqual((check.count, check.nodes, check.ungrounded_ms), (0, [], 0))
+        self.assertTrue(check.solicits >= 2, check.solicits)  # at boot
+
+    def test_loss_of_grounding_counted(self):
+        # B grounded again by its parent's next newer sequence (its
+        # presence, once per period of 10 s).
+        check, net = self.run_line(defect=True)
+        self.assertTrue(net.boards[B].routing.parents.grounded)
+        self.assertEqual((check.count, check.by_g, check.nodes), (1, 0, [B]))
+        self.assertTrue(1000 <= check.ungrounded_ms <= 21000, check.ungrounded_ms)
+        self.assertEqual(check.longest, check.ungrounded_ms)
+
+    def test_loss_after_a_scenario_event_not_counted(self):
+        check, net = self.run_line(defect=True, event=True)
+        self.assertEqual(net.boards[B].routing.parents.floats, 1)
+        self.assertEqual((check.count, check.ungrounded_ms), (0, 0))
 
 
 class OverloadTest(unittest.TestCase):

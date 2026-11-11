@@ -31,7 +31,10 @@ of a presence frame, §8), silence limit S = 2.5 T (§9). Checks:
 - `Recovery` (overload cases only, not a §2 property): after an overload
   ends, every board routed or detached by a deadline, nothing left queued
   at the end; `overload` splits such a run's violations into failing and
-  accepted (MP10 beyond its bounds within the overload window).
+  accepted (MP10 beyond its bounds within the overload window);
+- `Floats` (not a §2 property, never a violation): the false floats,
+  losses of grounding without a scenario event to cause them (§9
+  grounding), counted with the time the nodes spent ungrounded.
 
 Graph notions: a link is **usable** when it is up both ways, delivers at
 least `USABLE` of the frames both ways without collisions (ETX ≤ 2, well
@@ -98,6 +101,9 @@ class Check:
 
     def new_version(self, now):
         """The root issued a new DODAG version at now."""
+
+    def links_changed(self, now):
+        """The scenario cut, restored or changed links at now."""
 
     def finish(self, now):
         """End of the run (after a last sample)."""
@@ -222,6 +228,8 @@ class Checker:
         for o in self.net.observers:
             o.scenario("links-changed", None)
         self._hops = None
+        for c in self.checks:
+            c.links_changed(self.net.now)
 
     # --- Graph -----------------------------------------------------------------------------
 
@@ -1047,6 +1055,121 @@ class Recovery(Check):
         )
 
 
+# --- Grounding ----------------------------------------------------------------------------
+
+
+class Floats(Check):
+    """False floats: losses of grounding with no scenario event to cause them (§9).
+
+    Counted, never a violation. A loss of grounding of a node
+    (`Parents.floats`: G ran out without advance of its root sequence, its
+    preferred parent floating, or a detach) is **false** when the root is
+    on and no scenario event (a board switched off, links changed, a new
+    DODAG version) happened within the node's G (`Parents.ground_ms`, at
+    its rank when sampled) before it: the root sequence kept flowing, lost
+    frames alone kept it from the node. Lossy links set from the start are
+    no event: their floats are false. Read at each sample (several losses
+    between two samples counted from the counter): ``count``, ``by_g``
+    (those whose G ran out, the node's own loss, as opposed to a parent
+    floating or a detach), ``nodes`` (in order of their first false
+    float), ``ungrounded_ms`` (node-ms from each false float to the
+    node's next grounding, the switch-off or the end, at the sampling
+    resolution), ``longest`` (ms); at the end, the solicitations sent by
+    the nodes (``solicits``), among them those one presence period before
+    G runs out (``ground_solicits``, `mesh.dodag`).
+    """
+
+    name = "grounding"
+    SHOWN = 8  # nodes listed in `stats`
+
+    def bind(self, checker):
+        super().bind(checker)
+        self.count = 0
+        self.by_g = 0
+        self.nodes = []
+        self.ungrounded_ms = 0
+        self.longest = 0
+        self.solicits = 0
+        self.ground_solicits = 0
+        self._event_at = None  # last scenario event
+        self._floats = {}  # name -> `Parents.floats` at the last sample
+        self._since = {}  # name -> start of its false float, until grounded again
+
+    def switched_off(self, board, now):
+        self._event_at = now
+        self._ended(board.name, now)
+        self._solicits(board)
+
+    def new_version(self, now):
+        self._event_at = now
+
+    def links_changed(self, now):
+        self._event_at = now
+
+    def sample(self, now):
+        c = self.checker
+        root_on = c.root.engine is not None
+        event = self._event_at
+        for b in c.nodes():
+            n = b.name
+            p = b.routing.parents
+            if p.grounded and n in self._since:
+                self._ended(n, now)
+            floats = p.floats
+            new = floats - self._floats.get(n, 0)
+            self._floats[n] = floats
+            if new <= 0 or not root_on:
+                continue
+            at = p.ungrounded_at
+            if at is None:
+                at = now  # grounded again since
+            if event is not None and at - event < p.ground_ms():
+                continue
+            self.count += new
+            if n not in self.nodes:
+                self.nodes.append(n)
+            seq = p.sequence_at
+            if at != now and seq is not None and at == seq + p.ground_ms():
+                self.by_g += 1
+            if not p.grounded and n not in self._since:
+                self._since[n] = at
+
+    def _ended(self, name, now):
+        since = self._since.pop(name, None)
+        if since is not None:
+            d = now - since
+            self.ungrounded_ms += d
+            if d > self.longest:
+                self.longest = d
+
+    def _solicits(self, board):
+        k = board.routing.dodag.counters
+        self.solicits += k.solicits
+        self.ground_solicits += k.ground_solicits
+
+    def finish(self, now):
+        for n in list(self._since):
+            self._ended(n, now)
+        for b in self.checker.nodes():
+            self._solicits(b)
+
+    def stats(self):
+        out = "false floats %d (G ran out %d), %.1f node-s ungrounded, longest %.1f s" % (
+            self.count,
+            self.by_g,
+            self.ungrounded_ms / 1000,
+            self.longest / 1000,
+        )
+        if self.nodes:
+            shown = " ".join("%04x" % n for n in self.nodes[: self.SHOWN])
+            more = len(self.nodes) - self.SHOWN
+            out += " (%s%s)" % (shown, " +%d" % more if more > 0 else "")
+        return out + "; solicitations %d, %d before G runs out" % (
+            self.solicits,
+            self.ground_solicits,
+        )
+
+
 ACCEPTED = ("MP10",)  # liveness checks whose misses an overload case accepts in its window
 FAILED = ("failed", "at_root", "partition")  # outcomes of `Delivery`: failed with an error
 
@@ -1081,7 +1204,7 @@ def overload(violations, start_ms, end_ms, outcomes=()):
 
 
 def standard(port, drain_ms):
-    """Return the checks of the large-network suite: MP11, MP10, MP5, MP9, MP13."""
+    """Return the checks of the large-network suite: MP11, MP10, MP5, MP9, MP13, false floats."""
     return [
         Loops(),
         Attachment(),
@@ -1089,6 +1212,7 @@ def standard(port, drain_ms):
         Delivery(port, drain_ms),
         DutyCycle(),
         Resources(),
+        Floats(),
     ]
 
 

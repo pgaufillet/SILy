@@ -14,13 +14,16 @@ link engines and routing at SF8 with the SILy *competition* periods
 (§16–§17: presence 30 s, topology 300 s, root beacon every 15 s, Imin 32
 slots = 3.0 s) and a class 1 load following §15, plays the scenario, and
 checks the invariants of `sim.invariants` (MP11, MP10, MP5, MP9, MP13) all
-along. A run passes when no invariant fails, except on an overload
-topology (`OVERLOAD`, below). ``run -`` prints the full report of one run
+along, and counts the false floats (`sim.invariants.Floats`: losses of
+grounding without a scenario event, reported, never a failure). A run
+passes when no invariant fails, except on an overload topology
+(`OVERLOAD`, below). ``run -`` prints the full report of one run
 (the reproduction of a failing run); ``plan``, ``run DIR`` and ``summary``
 let `make large` run the plan in parallel processes, each writing its
 report into DIR, then print the summary: the reports of the failing runs,
 then one line (runs passed, among them the overload cases, with their
-accepted losses summed).
+accepted losses summed) and the class 1 duplicates and false floats summed
+over all runs.
 
 Plan: every scenario × topology (`SCENARIOS`, `TOPOLOGIES`) at 30 nodes on
 seeds 1 to SEEDS, plus one 64-node run per scenario on the worst-case star
@@ -343,17 +346,27 @@ def summary(reports, seconds=None):
     """Print the failing reports and the summary line; return the failing run names.
 
     The line counts the runs passed, among them the overload cases passed
-    on their criterion, with their accepted capacity losses summed, and the
-    class 1 duplicates delivered in all runs (`sim.invariants.Delivery`).
+    on their criterion, with their accepted capacity losses summed, the
+    class 1 duplicates delivered in all runs (`sim.invariants.Delivery`)
+    and their false floats (`sim.invariants.Floats`), the overload topologies
+    apart (their detaches under overload are expected).
     """
     failed = []
     overload = [0, 0, 0, 0]  # runs, MP10, refused, failed
     duplicates = [0, 0]  # copies delivered again, runs with any
+    # false floats, by G, runs with any, node-s ungrounded: other topologies, overload ones
+    floats = ([0, 0, 0, 0.0], [0, 0, 0, 0.0])
     for lines in reports:
         n = _duplicates(lines)
         duplicates[0] += n
         duplicates[1] += 1 if n else 0
         result = lines[-1]
+        f = floats[result.split()[3] in OVERLOAD]  # RESULT status scenario topology ...
+        n, by_g, ungrounded = _floats(lines)
+        f[0] += n
+        f[1] += by_g
+        f[2] += 1 if n else 0
+        f[3] += ungrounded
         status = result.split(" ", 2)[1]
         if status == "overload":
             overload[0] += 1
@@ -371,6 +384,11 @@ def summary(reports, seconds=None):
         "%d failed)%s" % ((len(reports) - len(failed), len(reports)) + tuple(overload) + (wall,))
     )
     print("large: %d class 1 duplicates delivered, in %d runs" % tuple(duplicates))
+    print(
+        "large: %d false floats (G ran out %d), in %d runs, %.1f node-s ungrounded; "
+        "overload topologies %d (%d), in %d runs, %.1f node-s"
+        % (tuple(floats[0]) + tuple(floats[1]))
+    )
     for name in failed:
         print("  failed: %s" % name)
     return failed
@@ -382,6 +400,19 @@ def _duplicates(lines):
         if " MP5 Delivery: " in line and " duplicates delivered" in line:
             return int(line.split("; ")[-1].split()[0])
     return 0
+
+
+def _floats(lines):
+    # (false floats, of them G ran out, node-s ungrounded) of a report's
+    # grounding line, zeros if none.
+    for line in lines:
+        if " grounding Floats: false floats " in line:
+            words = line.split(": ", 1)[1]
+            for c in "(),":
+                words = words.replace(c, " ")
+            words = words.split()
+            return int(words[2]), int(words[6]), float(words[7])
+    return 0, 0, 0.0
 
 
 def main(argv):
