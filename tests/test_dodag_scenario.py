@@ -11,6 +11,7 @@ import unittest
 
 from mesh.dodag import DodagInfo
 from mesh.frame import RANK_INFINITE, ROOT
+from mesh.link import CW_MIN
 from mesh.neighbours import silence_ms
 from mesh.parents import MIN_HOP, RANK_HYSTERESIS, link_cost
 from mesh.ports import DODAG_INFO, PRESENCE
@@ -201,8 +202,11 @@ class GlobalRepair(unittest.TestCase):
             n += line.lost(frames, node, parent, False, until)
             lost.append(n)
             # One Imin per hop without loss, plus the frame and channel
-            # access of the hop; each loss adds the next backoff gap.
-            bound = (2 ** (n + 1) - 1) * line.imin + 150
+            # access of the hop (a busy sense then a backoff of up to CW_MIN
+            # slots, §8: the advertisement meets a neighbour's frame); each
+            # loss adds the next backoff gap.
+            access = 150 + CW_MIN * line.root.engine.slot_ms
+            bound = (2 ** (n + 1) - 1) * line.imin + access
             self.assertTrue(adopted[hop] - adopted[hop - 1] <= bound, (hop, adopted, lost))
         line.net.medium.trace = None
         self.assertTrue(adopted[1] < adopted[2] < adopted[3] < adopted[4], adopted)
