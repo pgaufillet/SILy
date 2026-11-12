@@ -580,8 +580,9 @@ gets its share, not its relays' capacity.
     child at once removed D42 too, at a higher acknowledgement airtime
     (§16). The reply takes the batch and lazy entries waiting, up to 8
     entries, and is packed first, in frames of at most 47 B (an
-    acknowledgement frame of 8 entries) until the one carrying it goes on
-    air (a frame already sensing when the reply is queued goes first). A
+    acknowledgement frame of 8 entries; the profile's frame limit if
+    lower, §4) until the one carrying it goes on air (a frame already
+    sensing when the reply is queued goes first). A
     priority-1 message that fits that frame may still go before it (a
     Trickle advertisement after a reset): the reply then leaves in the
     next short frame. A backoff in progress when the reply is queued ends

@@ -54,20 +54,20 @@ child (one that forwarded an upward message for another node within the
 silence limit, ``Neighbour.relayed``) for its presence probe and for its
 retransmissions (a class 1/2 message already in the duplicate cache): the
 reply (`Reliable.acknowledge`) is packed first, in frames of at most
-`REPLY_FRAME` bytes until the one carrying it goes on air (a frame sensed
-before the reply was queued goes first). A backoff in progress when the
-reply is queued ends at once, a one-shot skip, and the access procedure
-starts over (attempts and contention window). A busy sense while the reply
-is pending is followed by one slot, neither counted towards `MAX_ATTEMPTS`
-nor widening the window, up to the time on air of a maximum frame of the
-profile and one slot after the reply's first busy sense: the frame heard
-then has ended. Past that, the ordinary procedure applies (window from
-CW 4, `MAX_ATTEMPTS` busy senses, then the give-up), so that a channel
-busy for good still ends in a give-up. The root never senses again in the
-step that found the channel busy: on the board the answer to a sense is
-posted during the step that asked, and the runner steps it before
-yielding (`mesh.runner`), so it would spin for as long as the channel
-reads busy. The root's other acknowledgements are batched as before.
+`REPLY_FRAME` bytes (or the profile's frame limit, if lower) until the one
+carrying it goes on air (a frame sensed before the reply was queued goes
+first). A backoff in progress when the reply is queued ends at once, a
+one-shot skip, and the access procedure starts over (attempts and contention
+window). A busy sense while the reply is pending is followed by one slot,
+neither counted towards `MAX_ATTEMPTS` nor widening the window, up to the
+time on air of a maximum frame of the profile and one slot after the reply's
+first busy sense: the frame heard then has ended. Past that, the ordinary
+procedure applies (window from CW 4, `MAX_ATTEMPTS` busy senses, then the
+give-up), so that a channel busy for good still ends in a give-up. The root
+never senses again in the step that found the channel busy: on the board the
+answer to a sense is posted during the step that asked, and the runner steps
+it before yielding (`mesh.runner`), so it would spin for as long as the
+channel reads busy. The root's other acknowledgements are batched as before.
 
 **Receive path** (§14 reception order): steps 1–3 by `Security.receive`
 (length and version, authentication, replay; failures counted, per sender
@@ -398,6 +398,7 @@ class LinkEngine(Core):
         self._cw = CW_MIN
         self._sel = None
         self.reply_ms = self.toa_ms(REPLY_FRAME) + REPLY_SLOTS * self.slot_ms
+        self._reply_limit = min(REPLY_FRAME, self.limit)  # the reply's frame, within the profile's
         # Root: the one-slot waits of a pending reply end at most a maximum
         # frame and one slot after its first busy sense (§8).
         self._reply_phase_ms = self.toa_ms(self.limit) + self.slot_ms
@@ -743,7 +744,7 @@ class LinkEngine(Core):
         sel = None
         if self._reply is not None:
             # The root's immediate reply first, in a short frame (§12).
-            sel = q.pack(now, self.dutycycle, REPLY_FRAME, self._toa)
+            sel = q.pack(now, self.dutycycle, self._reply_limit, self._toa)
             if sel is None:
                 self._reply = None
         if sel is None:

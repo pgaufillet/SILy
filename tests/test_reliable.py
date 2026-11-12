@@ -847,6 +847,31 @@ class ImmediateReply(_RootCase):
             self.assertEqual(root.counters.give_ups, 0)
             self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
 
+    def test_reply_frame_within_a_capped_profile_limit(self):
+        # A profile capping the transmission time below an acknowledgement
+        # frame of ACK_BATCH entries (35 B at SF9): the reply frame stays
+        # within the profile's limit, its passenger in the next frame.
+        capped = profiles.Profile(
+            2, "capped", 920000000, 125000, 5, 1300, profiles.EIRP, 10000, max_tx_ms=250
+        )
+        p = FakePlatform(XorShift32(1))
+        root = open_link(
+            ROOT, _KEY, p.storage, p.retained, p.random, capped, 9, lambda m: None,
+            budget_ms=60000, window_ms=600000,
+        )  # fmt: skip
+        root.step(0, None)
+        self.assertTrue(root.limit < REPLY_FRAME, root.limit)
+        rel = root.reliable
+        batch = [(X, i) for i in range(3)]
+        for source, counter in batch:
+            rel.acknowledge(source, counter, 0)
+        root.send(Message(LINK_LOCAL, 0, ports.DODAG_INFO, bytes(9)), BROADCAST)
+        rel.acknowledge(R, 7, 0, reply=True)
+        (f, g), _ = _run(root, 0)
+        self.assertTrue(len(f) <= root.limit, (len(f), root.limit))
+        self.assertEqual(self._entries(f), (BROADCAST, [ports.ACK], [(R, 7)] + batch))
+        self.assertEqual(self._entries(g)[1], [ports.DODAG_INFO])
+
     def test_reply_queued_while_sensing_another_frame_keeps_its_rules(self):
         # The frame sensed before the reply was queued goes first; the reply
         # stays pending: a busy sense waits one slot, and it leaves alone in
