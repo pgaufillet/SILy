@@ -69,6 +69,8 @@ make check                     # lint + test
 make simbench NODES=30         # simulator wall clock for 10 simulated minutes
 make large                     # large-network invariants, about 7 min (not in check)
 make large RUN="lossy star 2"  # one run of it, with its full report
+make large RUN="lossy star 2 30 steady"  # the same at another load
+make sweep SWEEP="--seeds 1-300 --topologies star --loads steady"  # failure rates
 make trace TEST=test_dodag_scenario.DetachRejoin  # traces into build/trace
 make trace RUN="forming course 1 14"  # trace of one large run (nominal course)
 make firmware                  # build the SILY_T3S3 firmware
@@ -122,6 +124,32 @@ neighbour table full at 64 entries), `LARGE_JOBS` runs at a time (default 4):
 about 7 minutes on the development host (8 cores). It prints the report of each failing
 run (statistics of each check, violations with time, nodes and detail, the
 command reproducing it), then a summary line, and fails if any run fails.
+The reports also give metrics that never fail a run: the false floats, the
+detaches of relays and of leaves, the passive acknowledgements and those
+overheard after the sender's relay timeout, the duplicates arriving before
+the relay's copy went on air, and the class 1 failures split by the state
+of their origin.
+
+Loads (the fifth word of `RUN`): `s15` (default), the load above;
+`steady`, the same rate without the burst; `idle`, no class 1 traffic.
+Only at `s15` is the hidden-root `star` an overload case, judged on its
+recovery; at the other loads it is judged like any topology.
+
+### Sweeps
+
+A pass on a few seeds says little about a rare failure. `make sweep`
+plays the runs of `tests/large.py sweep-plan` (options in `SWEEP`:
+`--seeds A-B`, default 1-100; `--scenarios`, `--topologies`, `--loads`,
+comma-separated; `--nodes 30,64`), `SWEEP_JOBS` at a time (default 4),
+records each run as one JSON file in `SWEEP_OUT` (default `build/sweep`;
+a run recorded there is skipped, so an interrupted sweep resumes; the
+report of a failing run beside it), then prints per variant, load,
+scenario, topology and size the runs with each indicator (failed, any
+violation, silent loss, duplicate, false float, relay detach, failure with
+the origin connected, recovery failed, each check violated) as k/n with a
+95 % Wilson interval, the per-message totals, and the commands reproducing
+the failing runs. `make sweep-summary` prints that again;
+`tests/large.py aggregate --csv DIR...` gives it as CSV.
 
 ## Traces
 

@@ -4,7 +4,7 @@ MicroPython unix port, with the MICROPYPATH of the host tests (``make
 trace``)::
 
     micropython tools/trace.py OUT test MODULE[.CLASS]
-    micropython tools/trace.py OUT large SCENARIO TOPOLOGY SEED [NODES]
+    micropython tools/trace.py OUT large SCENARIO TOPOLOGY SEED [NODES [LOAD]]
 
 ``test`` runs the unittest.TestCase classes of tests/MODULE.py (only CLASS
 if given), one class at a time, and records every `sim.net.Network` they
@@ -135,9 +135,7 @@ def large(out, args):
     sys.path.insert(0, _TESTS)
     import large as suite
 
-    scenario, kind, seed = args[0], args[1], int(args[2])
-    nodes = int(args[3]) if len(args) > 3 else suite.NODES
-    r = suite.Run(scenario, kind, seed, nodes)
+    r = suite.Run(*suite._args(args))
     _target[0] = (out, r.name.replace(" ", "_"))
     # Run.run, the topology's positions given to the recorder before the
     # first step of the run (when the header is written).

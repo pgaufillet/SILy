@@ -72,24 +72,38 @@ SEED ?= 1
 
 # Large-network suite (`make large`, tests/large.py): every scenario and
 # topology at 30 nodes on LARGE_SEEDS seeds, plus one 64-node run per
-# scenario, LARGE_JOBS runs at a time; RUN="SCENARIO TOPOLOGY SEED [NODES]"
-# runs one of them alone with its full report (TOPOLOGY: domain, star,
-# star-domain, star2b, geometric, or for single runs grid, course: at most
-# 14 nodes). The star runs are overload cases: result "overload" when they
-# pass on their recovery criterion.
+# scenario, LARGE_JOBS runs at a time; RUN="SCENARIO TOPOLOGY SEED [NODES
+# [LOAD]]" runs one of them alone with its full report (TOPOLOGY: domain,
+# star, star-domain, star2b, geometric, or for single runs grid, course: at
+# most 14 nodes; LOAD: s15, the default, steady or idle). The star runs at
+# s15 are overload cases: result "overload" when they pass on their
+# recovery criterion.
 LARGE_SEEDS ?= 3
 LARGE_JOBS ?= 4
 RUN ?=
 LARGE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/large.py
 
+# Sweeps of the large-network suite (`make sweep`): the runs of `large.py
+# sweep-plan $(SWEEP)` (e.g. SWEEP="--seeds 1-300 --topologies star
+# --loads steady"), SWEEP_JOBS at a time, each recorded into SWEEP_OUT
+# (a run already recorded there is skipped: an interrupted sweep resumes),
+# then their failure rates with 95 % Wilson intervals; SWEEP_VARIANT and
+# SWEEP_REV label the records.
+SWEEP ?=
+SWEEP_JOBS ?= 4
+SWEEP_OUT ?= build/sweep
+SWEEP_VARIANT ?= current
+SWEEP_REV ?= $(shell git describe --always --dirty 2>/dev/null)
+
 # Trace recording (`make trace`, tools/trace.py, sim/trace.py): TEST=MODULE[.CLASS]
 # records every network a test class of tests/ builds, RUN="SCENARIO TOPOLOGY
-# SEED [NODES]" one run of the large-network suite; JSON Lines files into OUT.
+# SEED [NODES [LOAD]]" one run of the large-network suite; JSON Lines files into OUT.
 TEST ?=
 OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
-.PHONY: help check test seeds simbench large trace lint firmware flash deploy \
+.PHONY: help check test seeds simbench large sweep sweep-summary trace lint firmware \
+	flash deploy \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -97,6 +111,8 @@ help:
 	@echo "make seeds [SEEDS=24]     scenario suites on SEEDS seeds (not part of check)"
 	@echo "make simbench             simulator benchmark: wall clock, digest (NODES, MINUTES, SEED)"
 	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
+	@echo "make sweep SWEEP=\"<sweep-plan options>\" [SWEEP_JOBS=4 SWEEP_OUT=build/sweep]  failure rates"
+	@echo "make sweep-summary [SWEEP_OUT=build/sweep]  the failure rates of the records there"
 	@echo "make trace TEST=M[.C]|RUN=\"...\" record traces of a test class or a large run [OUT=build/trace]"
 	@echo "make lint                 ruff (check, format), codespell, no logbook references"
 	@echo "make check                lint + test"
@@ -132,13 +148,22 @@ else
 	$(LARGE) run - $(RUN)
 endif
 
+sweep:
+	@mkdir -p $(SWEEP_OUT) && $(LARGE) sweep-plan $(SWEEP) >$(SWEEP_OUT)/plan.lst || exit 2; \
+	SWEEP_VARIANT=$(SWEEP_VARIANT) SWEEP_REV=$(SWEEP_REV) \
+		xargs -P $(SWEEP_JOBS) -L 1 $(LARGE) record $(SWEEP_OUT) <$(SWEEP_OUT)/plan.lst; \
+	status=$$?; $(LARGE) aggregate $(SWEEP_OUT) || exit; exit $$status
+
+sweep-summary:
+	$(LARGE) aggregate $(SWEEP_OUT)
+
 trace:
 ifneq ($(strip $(TEST)),)
 	$(TRACE) test $(TEST)
 else ifneq ($(strip $(RUN)),)
 	$(TRACE) large $(RUN)
 else
-	@echo 'make trace TEST=MODULE[.CLASS] or RUN="SCENARIO TOPOLOGY SEED [NODES]"'; exit 2
+	@echo 'make trace TEST=MODULE[.CLASS] or RUN="SCENARIO TOPOLOGY SEED [NODES [LOAD]]"'; exit 2
 endif
 
 lint:
