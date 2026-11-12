@@ -222,8 +222,9 @@ class Admission(unittest.TestCase):
         )
         self.assertEqual(q.offer(advert, BROADCAST, local=True), ACCEPTED)
         self.assertEqual((len(q), q.messages(), q.control), (66, 64, 2))
-        # The reserve holds three, the own presence's included: a third is
-        # then refused, as is any other message.
+        # The reserve holds three, the own presence's included: a third
+        # DODAG message (a fourth reserve entry) is then refused, as is any
+        # other message.
         presence = _own(port=ports.PRESENCE, payload=b"\x00\x00\x00")
         self.assertEqual(q.offer(presence, _PARENT, local=True, replace=True), ACCEPTED)
         third = Message(LINK_LOCAL, 0, ports.DODAG_INFO, b"")

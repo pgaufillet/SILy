@@ -22,14 +22,16 @@ newer), which neither fill the queue nor are refused by the quota. A node
 whose queue is full of held class 1 messages, or of its own errors, still
 solicits and rejoins (otherwise it stays detached until their holding
 expires, and its subtree's holdings expire meanwhile); a relay whose queue
-is full of forwarded traffic still sends its presence, the probe of the
+is full of forwarded traffic still queues its presence, the probe of the
 link to its parent (§9: otherwise nothing tests that link, and the root
-receives no sample of it, for as long as the queue stays full). The node's
-own acknowledgements (port 3) are not subject to
-the quota either (but to a full queue: their number is not bounded), nor
-is a message offered with ``exempt``: an error taking the entry of the
-message it reports (`mesh.reliable`), which occupies no more room than
-that message did. Neither control message is any origin's traffic.
+receives no sample of it, for as long as the queue stays full). The
+reserve guarantees admission, not a turn: under due priority-1 traffic the
+presence leaves as a passenger of a frame to the parent. The node's own
+acknowledgements (port 3) are not subject to the quota either (but to a
+full queue: their number is not bounded), nor is a message offered with
+``exempt``: an error taking the entry of the message it reports
+(`mesh.reliable`), which occupies no more room than that message did.
+Neither control message is any origin's traffic.
 
 - `REPLACED`: class 0 replace by newer (per port, chosen by the caller): the
   newer message takes the place, and the age, of a queued class 0 message of

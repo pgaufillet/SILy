@@ -706,8 +706,9 @@ acknowledgement window and the time of its newest failure.
   MP10). Cost: no frame of the node; the root's entries ride in its
   beacons, 4 bytes per root child and presence period, a relaying root
   child's in a reply frame per period (§16). A relay whose queue is full
-  of forwarded traffic still sends its presence (a reserved entry, §12
-  queues and resources).
+  of forwarded traffic still queues its presence (a reserved entry, §12
+  queues and resources: admission, not a turn; under due priority-1
+  traffic it leaves as a passenger of a frame to the parent).
 - **Failure ageing**: once the newest failure of a window is a silence limit
   old (2.5 presence periods), the failures leave the window and its
   successes are kept. A link that failed during a cut and is heard again

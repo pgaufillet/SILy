@@ -202,10 +202,12 @@ class GlobalRepair(unittest.TestCase):
             n += line.lost(frames, node, parent, False, until)
             lost.append(n)
             # One Imin per hop without loss, plus the frame and channel
-            # access of the hop (a busy sense then a backoff of up to CW_MIN
-            # slots, §8: the advertisement meets a neighbour's frame); each
+            # access of the hop: the advertisement may wait for a reply
+            # window (after its sender's frame to the root, or its preferred
+            # parent's), then a backoff of up to CW_MIN slots (§8); each
             # loss adds the next backoff gap.
-            access = 150 + CW_MIN * line.root.engine.slot_ms
+            engine = line.root.engine
+            access = 150 + engine.reply_ms + CW_MIN * engine.slot_ms
             bound = (2 ** (n + 1) - 1) * line.imin + access
             self.assertTrue(adopted[hop] - adopted[hop - 1] <= bound, (hop, adopted, lost))
         line.net.medium.trace = None

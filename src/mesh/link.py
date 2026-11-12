@@ -415,6 +415,7 @@ class LinkEngine(Core):
     def set_queue(self, queue):
         """Replace the transmit queue (tests: another size); class 1 state restarts."""
         self.queue = queue
+        self._reply = None  # a message of the old queue
         self._reliable()
 
     def toa_ms(self, length):
