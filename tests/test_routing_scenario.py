@@ -321,10 +321,29 @@ class Forming(unittest.TestCase):
         self.assertEqual(m.consistent(NODES), [])
 
 
+class _Fates(RadioObserver):
+    """(end, {receiver: fate}) of each frame of the sources, by source."""
+
+    def __init__(self, sources):
+        self.frames = dict((s, []) for s in sources)
+        self._on_air = {}
+
+    def transmitting(self, source, f, start, end, receivers):
+        if source in self.frames:
+            self._on_air[(source, start)] = [r[0] for r in receivers]
+
+    def ended(self, source, start, end, fates):
+        dsts = self._on_air.pop((source, start), None)
+        if dsts is not None:
+            self.frames[source].append((end, dict(zip(dsts, fates))))
+
+
 class RelayKilled(unittest.TestCase):
-    def _formed(self, seed):
+    def _formed(self, seed, observer=None):
         """Formed graph, the relay of C, the other relay, the relay's children."""
         m = six(seed)
+        if observer is not None:
+            m.net.medium.observers.append(observer)
         m.run(12 * m.imin + 3 * P)
         relay = m.preferred(C)
         self.assertTrue(relay in (A, B))
@@ -334,7 +353,8 @@ class RelayKilled(unittest.TestCase):
 
     def test_children_reattach_within_the_silence_limit_idle(self):
         for seed in (2, 3):
-            m, relay, other, children = self._formed(seed)
+            fates = _Fates((A, B))
+            m, relay, other, children = self._formed(seed, fates)
             kill = m.net.now
             log = m.watch((C, D, E), kill)
             failed = self._failed_samples(m, children, relay)
@@ -365,8 +385,15 @@ class RelayKilled(unittest.TestCase):
                 if late < 0:
                     self.assertTrue([u for u in failed[n] if u <= kill + t], (n, t, late))
                 else:
-                    # Its last frame came at most a jittered period before.
-                    self.assertTrue(5 * P // 2 - 11 * P // 10 <= t, (n, t))
+                    # The relay's last frame came at most a jittered period
+                    # before the kill (§7). The child's last frame received
+                    # is that one, or an earlier one if the relay's frames
+                    # since were lost at the child (collisions, half duplex):
+                    # its silence limit counts from the last frame received.
+                    sent = [(e, f[n]) for e, f in fates.frames[relay] if e <= kill + 1000]
+                    self.assertTrue(kill - sent[-1][0] <= 11 * P // 10, (n, t, sent[-1]))
+                    since = [fate for e, fate in sent if e > last[n]]
+                    self.assertTrue(OK not in since, (n, t, last[n], since))
                 self.assertTrue(t <= 5 * P // 2 + 1000, (n, t))
                 # A presence leaves at once, and the root learns the new parent
                 # (the watch samples every 5 ms: t is up to 5 ms late).
