@@ -148,6 +148,7 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual(found["silent_loss"], (1, 9))
         self.assertEqual(found["duplicate"], (1, 9))
         self.assertEqual(found["relay_detach"], (1, 9))
+        self.assertEqual(found["relay_detach_false"], (1, 9))
         self.assertEqual(found["failed_connected"], (1, 9))
         self.assertEqual(found["MP5"], (1, 9))
         self.assertEqual(found["recovery_failed"], (0, 0))  # no overload run

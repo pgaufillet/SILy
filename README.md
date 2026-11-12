@@ -145,7 +145,8 @@ records each run as one JSON file in `SWEEP_OUT` (default `build/sweep`;
 a run recorded there is skipped, so an interrupted sweep resumes; the
 report of a failing run beside it), then prints per variant, load,
 scenario, topology and size the runs with each indicator (failed, any
-violation, silent loss, duplicate, false float, relay detach, failure with
+violation, silent loss, duplicate, false float, relay detach, the same
+without scenario event while connected, failure with
 the origin connected, recovery failed, each check violated) as k/n with a
 95 % Wilson interval, the per-message totals, and the commands reproducing
 the failing runs. `make sweep-summary` prints that again;

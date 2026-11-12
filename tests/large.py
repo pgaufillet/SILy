@@ -78,11 +78,12 @@ NAME.txt only when the run fails, and prints the result line.
 ``aggregate DIR...`` groups the records by variant, load, scenario,
 topology and nodes and prints, for each per-run indicator (`INDICATORS`:
 failed, any violation, silent loss, duplicate delivered, false float,
-relay detach, failed with its origin connected, recovery failed; then
-each check violated), the runs k of n, the rate and its 95 % Wilson
-interval (`wilson`); for the per-message counts (`TOTALS`) their totals
-and means per run; then the failing runs (``--csv``: one row per group
-and indicator). ``summary`` reads only the NAME.txt reports.
+relay detach, the same connected and without scenario event, failed
+with its origin connected, recovery failed; then each check violated),
+the runs k of n, the rate and its 95 % Wilson interval (`wilson`); for
+the per-message counts (`TOTALS`) their totals and means per run; then
+the failing runs (``--csv``: one row per group and indicator).
+``summary`` reads only the NAME.txt reports.
 
 Traffic (§15, scaled to the run): 1000 punches per hour over the whole
 network (each node submits every 30 × 3.6 s on average at 30 nodes,
@@ -664,6 +665,7 @@ INDICATORS = (
     ("duplicate", lambda r: r["delivery"].get("duplicates", 0) > 0),
     ("false_float", lambda r: r["floats"]["count"] > 0),
     ("relay_detach", lambda r: r["detaches"]["relay"] > 0),
+    ("relay_detach_false", lambda r: r["detaches"]["relay_false"] > 0),  # connected, no event
     ("failed_connected", lambda r: r["failures"]["connected"] > 0),
     (
         "recovery_failed",
@@ -763,7 +765,7 @@ def print_aggregate(groups, csv=False):
                 print("%s,%s,%d,%d,%.5f,%.5f,%.5f" % (key, name, k, n, k / n, lo, hi))
             else:
                 print(
-                    "   %-17s %4d/%-4d %6.2f %%  [%.2f, %.2f] %%"
+                    "   %-18s %4d/%-4d %6.2f %%  [%.2f, %.2f] %%"
                     % (name, k, n, 100 * k / n, 100 * lo, 100 * hi)
                 )
         if csv:
