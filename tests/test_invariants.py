@@ -9,7 +9,12 @@ enforced, a table larger than its bound, a node never routed, a rootless
 cycle, a message still queued at the end): the check must fire, naming the
 nodes at fault. The false floats (`Floats`, counted, not a violation): a
 loss of grounding injected without a scenario event is counted, one after
-an event is not.
+an event is not. The metrics (never a violation): a detach is a relay's
+when a child prefers the node, a leaf's otherwise (`Detaches`); a forward
+held past its sender's relay timeout is a late passive acknowledgement,
+held past the sender's retry a duplicate before the copy went on air
+(`Acknowledgements`); a failure reported to its sender is split by the
+origin's state (`Delivery.failures`).
 """
 
 import unittest
@@ -21,9 +26,11 @@ from mesh.neighbours import NeighbourTable
 from mesh.profile import EU_869
 from mesh.routing import Routing
 from sim.invariants import (
+    Acknowledgements,
     Attachment,
     Checker,
     Delivery,
+    Detaches,
     DutyCycle,
     Floats,
     Loops,
@@ -289,6 +296,136 @@ class DeliveryTest(unittest.TestCase):
         self.assertEqual(k["submitted"], 5)
         self.assertTrue(k["exempt"] >= 4)  # the last one may still be at B: failed there
         self.assertEqual(k["exempt"] + k["failed"], 5)
+
+    def test_failures_split_by_origin_state(self):
+        # Failures reported to B through its engine (as the reliability
+        # layer reports them): B attached and connected, then detached
+        # since the submission, then cut off.
+        net = build((ROOT, A, B), line(A, B))
+        check = Delivery(APP, 20000)
+        checker = Checker(net, [check])
+        checker.start()
+        b = net.boards[B]
+        net.run(FORMED)
+        seqs = [check.submit(b) for _ in range(3)]
+        b.engine.failed(ROOT, APP, seqs[0], 1)
+        self.assertEqual(check.failures, {"connected": 1, "detached": 0, "cut_off": 0})
+        b.routing.parents.detach(net.now)
+        b.engine.failed(ROOT, APP, seqs[1], 1)
+        net.medium.cut(A, B)
+        net.medium.cut(B, A)
+        checker.links_changed()
+        b.engine.failed(ROOT, APP, seqs[2], 1)
+        self.assertEqual(check.failures, {"connected": 1, "detached": 2, "cut_off": 0})
+        seq = check.submit(b)  # submitted detached
+        b.engine.failed(ROOT, APP, seq, 1)
+        self.assertEqual(check.failures["detached"], 3)
+        self.assertEqual(len(b.failures), 4)  # the board's own record, unchanged
+
+
+def detach(net, name):
+    """Make name detach now (poisoning, as on the loss of its last candidate)."""
+    board = net.boards[name]
+    board.routing.parents.detach(net.now)
+    board.node.wake()
+
+
+class DetachesTest(unittest.TestCase):
+    """Detaches: a relay's (a node some child prefers) counted apart from a leaf's."""
+
+    def run_line(self, name, event=False):
+        net = build((ROOT, A, B), line(A, B))
+        check = Detaches()
+        checker = Checker(net, [check])
+        checker.start()
+        if event:
+            net.at(FORMED - 1000, checker.links_changed)
+        net.at(FORMED, detach, net, name)
+        net.run(FORMED + 30000)
+        checker.finish()
+        self.assertEqual(checker.violations, [])
+        return check
+
+    def test_relay_detach(self):
+        # A, B's parent, detaches: a relay, connected, without event.
+        check = self.run_line(A)
+        self.assertEqual(check.records[0], (FORMED, A, 1, True, False))
+        self.assertEqual((check.relay, check.relay_false), (1, 1))
+        self.assertTrue(check.stats().startswith("relay 1 (1 connected without event)"))
+
+    def test_leaf_detach(self):
+        check = self.run_line(B)
+        self.assertEqual(check.records[0], (FORMED, B, 0, True, False))
+        self.assertEqual((check.relay, check.leaf), (0, 1))
+
+    def test_relay_detach_after_an_event(self):
+        check = self.run_line(A, event=True)
+        self.assertEqual(check.records[0], (FORMED, A, 1, True, True))
+        self.assertEqual((check.relay, check.relay_false), (1, 0))
+
+
+def slow_forward(net, name, delay):
+    """Make name hold each class 1 message it forwards for delay ms, unacknowledged."""
+    board = net.boards[name]
+    engine = board.engine
+    forward = engine.forward
+
+    def release(slot, copy):
+        engine.queue.retry(slot, copy)
+        engine.access_at(net.now)
+        board.node.wake()
+
+    def slow(msg, header, now, *rest):
+        outcome = forward(msg, header, now, *rest)
+        if msg.port == APP:
+            slot = engine.queue.slot
+            copy = engine.queue.select(lambda m: m.port == APP, True)[-1][1]
+            engine.queue.hold(slot, copy)
+            engine.reliable._odue[slot] = None  # no explicit acknowledgement either
+            net.at(now + delay, release, slot, copy)
+        return outcome
+
+    engine.forward = slow
+
+
+class AcknowledgementsTest(unittest.TestCase):
+    """Passive acknowledgements after the sender's relay timeout, duplicates of slow forwards."""
+
+    def run_line(self, extra=None):
+        # B submits one message; A holds its forward the relay timeout of
+        # B plus extra ms (None: forwards at once).
+        net = build((ROOT, A, B), line(A, B))
+        net.boards[ROOT].listen(APP)
+        check = Acknowledgements()
+        checker = Checker(net, [check])
+        checker.start()
+        if extra is not None:
+            timeout = net.boards[B].engine.reliable.timeout_ms(A)
+            slow_forward(net, A, timeout + extra)
+        net.at(FORMED, net.boards[B].submit, APP, 1, ROOT, b"punch")
+        net.run(FORMED + 20000)
+        checker.finish()
+        self.assertEqual(checker.violations, [])
+        self.assertEqual(net.boards[ROOT].received(APP), [b"punch"])
+        return check
+
+    def test_forward_on_time(self):
+        check = self.run_line()
+        self.assertEqual((check.passive, check.late), (1, 0))
+        self.assertEqual((check.duplicates, check.spurious), (0, 0))
+
+    def test_forward_after_the_timeout_late(self):
+        # Forwarded within B's retry delay: B overhears it while waiting to retry.
+        check = self.run_line(100)
+        self.assertEqual((check.passive, check.late), (1, 1))
+        self.assertEqual(check.spurious, 0)
+
+    def test_forward_after_the_retry_spurious(self):
+        # B's retry window (32 slots of 52 ms at SF7) over: A receives the
+        # retry while its copy waits, unsent.
+        check = self.run_line(3000)
+        self.assertEqual((check.duplicates, check.spurious), (1, 1))
+        self.assertEqual(check.late, 0)
 
 
 class DutyCycleTest(unittest.TestCase):

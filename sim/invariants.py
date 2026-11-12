@@ -34,7 +34,12 @@ of a presence frame, §8), silence limit S = 2.5 T (§9). Checks:
   accepted (MP10 beyond its bounds within the overload window);
 - `Floats` (not a §2 property, never a violation): the false floats,
   losses of grounding without a scenario event to cause them (§9
-  grounding), counted with the time the nodes spent ungrounded.
+  grounding), counted with the time the nodes spent ungrounded;
+- `Detaches` and `Acknowledgements` (metrics, never a violation): the
+  detaches of relays and of leaves; the passive acknowledgements, those
+  that came after the sender's relay timeout, and the duplicates a slow
+  forward causes. `Delivery` also splits the class 1 failures by the
+  state of their origin.
 
 Graph notions: a link is **usable** when it is up both ways, delivers at
 least `USABLE` of the frames both ways without collisions (ETX ≤ 2, well
@@ -49,13 +54,21 @@ chain at once, before the node notices).
 
 from mesh.airtime import snr_limit_x10
 from mesh.dodag import DESYNC_SLOTS, HOLD_IMIN, WINDOW_SLOTS
-from mesh.frame import RANK_INFINITE, ROOT
+from mesh.frame import BROADCAST, RANK_INFINITE, ROOT
 from mesh.link import SENDERS
 from mesh.neighbours import CAPACITY, MARGIN_LOW, silence_ms
 from mesh.parents import SIZE as PARENT_SET
 from mesh.platform import JITTER_PERCENT
 from mesh.ports import ERROR
-from mesh.reliable import ACK_BATCH, DUPLICATES, LAZY_BATCH, ROOT_DUPLICATES, decode_error
+from mesh.reliable import (
+    _PENDING,
+    ACK_BATCH,
+    DUPLICATES,
+    LAZY_BATCH,
+    ROOT_DUPLICATES,
+    decode_error,
+    identity,
+)
 from mesh.txqueue import SIZE as QUEUE_SIZE
 
 USABLE = 0.5  # delivery both ways without collisions for a usable link
@@ -637,6 +650,13 @@ class Delivery(Check):
     cut off)),
     by wrapping each board's ``Reliable.fail`` (the wrapper calls it
     unchanged).
+
+    The failures reported to the senders (``Board._failed``, wrapped the
+    same way) are split by the state of their origin (``failures``):
+    ``detached``, the origin was detached when it submitted the message or
+    detached since; otherwise ``connected``, the origin connected to the
+    root by usable links when the message failed (a failure the graph did
+    not force), or ``cut_off``.
     """
 
     name = "MP5"
@@ -652,12 +672,15 @@ class Delivery(Check):
         self.counts = {}
         self.relayed = {}
         self.outcomes = []  # (submission time, outcome key of ``counts``), at the end
+        self.failures = {"connected": 0, "detached": 0, "cut_off": 0}
+        self._detaches = {}  # (board name, sequence) -> its detaches at submission, None: detached
 
     def bind(self, checker):
         super().bind(checker)
         for b in checker.alive():
             if b is not checker.root:
                 self._watch(b)
+                self._watch_failures(b)
         engine = checker.root.engine
         reliable = engine.reliable
 
@@ -685,6 +708,39 @@ class Delivery(Check):
 
         reliable.fail = watched
 
+    def _watch_failures(self, board):
+        failed = board._failed
+
+        def watched(dest, port, seq, reason):
+            if port == self.port:
+                self._failure(board, seq)
+            return failed(dest, port, seq, reason)
+
+        board._failed = watched
+        board.engine.on_failure(watched)
+
+    def _failure(self, board, seq):
+        # Split one failure reported to board (`failures`).
+        detached = False
+        if (board.name, seq) in self._detaches:
+            at = self._detaches[(board.name, seq)]
+            routing = board.routing
+            detached = at is None or (routing is not None and routing.parents.detaches > at)
+        if detached:
+            key = "detached"
+        elif board.name in self.checker.hops():
+            key = "connected"
+        else:
+            key = "cut_off"
+        self.failures[key] += 1
+
+    def _detached(self, board):
+        # Detaches of board so far, None while it is detached (or without routing).
+        routing = board.routing
+        if routing is None or routing.parents.rank == RANK_INFINITE:
+            return None
+        return routing.parents.detaches
+
     def payload(self, board):
         """Return a unique payload of `size` bytes (origin 2 B, number 4 B, padding)."""
         n = len(self.sent)
@@ -701,6 +757,8 @@ class Delivery(Check):
         payload = self.payload(board)
         result = board.submit(self.port, 1, ROOT, payload)
         self.sent.append((self.checker.net.now, board.name, result, payload))
+        if result is not None and result >= 0:
+            self._detaches[(board.name, result)] = self._detached(board)
         return result
 
     def switched_off(self, board, now):
@@ -787,9 +845,15 @@ class Delivery(Check):
         k = self.counts
         if not k:
             return ""
+        f = self.failures
+        split = ""
+        if f["connected"] or f["detached"] or f["cut_off"]:
+            split = " (origin connected %(connected)d, detached %(detached)d, cut off %(cut_off)d)"
+            split = split % f
         return (
-            "class 1: %(submitted)d submitted, %(delivered)d delivered, %(failed)d failed, "
-            "%(refused)d refused, %(at_root)d failed at a relay (error at the root), "
+            "class 1: %(submitted)d submitted, %(delivered)d delivered, %(failed)d failed" % k
+            + split
+            + ", %(refused)d refused, %(at_root)d failed at a relay (error at the root), "
             "%(exempt)d exempt, %(partition)d failed in a partition, %(lost)d silent; "
             "%(duplicates)d duplicates delivered" % k
         )
@@ -1171,6 +1235,170 @@ class Floats(Check):
         )
 
 
+# --- Metrics -----------------------------------------------------------------------------
+
+
+class Detaches(Check):
+    """Detaches of relays and of leaves (§9 poisoning): counted, never a violation.
+
+    Each node's detach (``Parents._detach``, wrapped: the wrapper calls it
+    unchanged) from an attached state is recorded in ``records``: (time,
+    node, children, connected, event). children: the nodes switched on
+    whose preferred parent the node is at that time (a **relay** has some,
+    a **leaf** none); connected: the node is connected to the root by
+    usable links; event: a scenario event (a board switched off, links
+    changed, a new DODAG version) happened within the node's G before.
+    ``relay``, ``leaf``: the detaches of each kind; ``relay_false``: the
+    relay detaches of a connected node without event (a subtree the graph
+    still held, detached).
+    """
+
+    name = "detaches"
+
+    def bind(self, checker):
+        super().bind(checker)
+        self.records = []
+        self.relay = 0
+        self.leaf = 0
+        self.relay_false = 0
+        self._event_at = None
+        for b in checker.nodes():
+            if b.routing is not None:
+                self._watch(b)
+
+    def _watch(self, board):
+        parents = board.routing.parents
+        detach = parents._detach
+
+        def watched(now):
+            if parents.rank != RANK_INFINITE:
+                self._record(board, parents, now)
+            return detach(now)
+
+        parents._detach = watched
+
+    def _record(self, board, parents, now):
+        c = self.checker
+        name = board.name
+        children = 0
+        for b in c.nodes():
+            if c.preferred(b) == name:
+                children += 1
+        connected = name in c.hops()
+        event = self._event_at is not None and now - self._event_at < parents.ground_ms()
+        self.records.append((now, name, children, connected, event))
+        if children:
+            self.relay += 1
+            if connected and not event:
+                self.relay_false += 1
+        else:
+            self.leaf += 1
+
+    def switched_off(self, board, now):
+        self._event_at = now
+
+    def new_version(self, now):
+        self._event_at = now
+
+    def links_changed(self, now):
+        self._event_at = now
+
+    def stats(self):
+        return "relay %d (%d connected without event), leaf %d" % (
+            self.relay,
+            self.relay_false,
+            self.leaf,
+        )
+
+
+class Acknowledgements(Check):
+    """Passive acknowledgements and the duplicates of slow forwards: counted, never a violation.
+
+    Each node's ``Reliable.overheard`` (wrapped, called unchanged): a class
+    1 message of a pending slot overheard as its next hop forwards it, that
+    next hop not the root, is a passive acknowledgement (``passive``); it
+    is **late** (``late``) when the slot's relay timeout has already fired
+    (the slot waits for its retry delay or its access, or is held): the
+    forward came after the sender gave up waiting, which made it retry.
+    Each node's ``engine.repeated`` (a class 1/2 copy dropped as a
+    duplicate, `mesh.link`; the root apart): ``duplicates``, among them
+    ``spurious``, those arriving while the node's own copy has not gone on
+    air yet (its ``Reliable.sent`` wrapped too): retries made because the
+    node forwarded too slowly, not because an acknowledgement was lost.
+    """
+
+    name = "acks"
+
+    def bind(self, checker):
+        super().bind(checker)
+        self.passive = 0
+        self.late = 0
+        self.duplicates = 0
+        self.spurious = 0
+        for b in checker.nodes():
+            self._watch(b)
+
+    def _watch(self, board):
+        engine = board.engine
+        reliable = engine.reliable
+        overheard = reliable.overheard
+        sent = reliable.sent
+        repeated = engine.repeated
+        own = engine.address
+        on_air = set()  # identities of the class 1/2 messages this node sent
+
+        def watched_overheard(header, messages, now):
+            source = header.source
+            if reliable._keys and source != ROOT:
+                for m in messages:
+                    if not m.cls:
+                        continue
+                    slot = reliable._keys.get(identity(m, source, header.dest))
+                    if slot is not None and reliable._hop[slot] == source:
+                        self.passive += 1
+                        if reliable._state[slot] != _PENDING:
+                            self.late += 1
+            return overheard(header, messages, now)
+
+        def watched_sent(sel, counter, now):
+            for j in range(sel.count):
+                m = sel.messages[j]
+                if m.cls:
+                    key = identity(m, own, sel.dest)
+                    if key is not None:
+                        on_air.add(key)
+            return sent(sel, counter, now)
+
+        def watched_repeated(msg, header, now):
+            self.duplicates += 1
+            key = identity(msg, header.source, header.dest)
+            if key is not None and key not in on_air:
+                for _, m in engine.queue.select(_classed, True):
+                    if identity(m, own, BROADCAST) == key:
+                        self.spurious += 1
+                        break
+            return repeated(msg, header, now)
+
+        reliable.overheard = watched_overheard
+        reliable.sent = watched_sent
+        engine.repeated = watched_repeated
+
+    def stats(self):
+        return (
+            "passive %d, late %d; duplicates at the nodes %d, %d before the copy went on air"
+            % (
+                self.passive,
+                self.late,
+                self.duplicates,
+                self.spurious,
+            )
+        )
+
+
+def _classed(msg):
+    return msg.cls
+
+
 ACCEPTED = ("MP10",)  # liveness checks whose misses an overload case accepts in its window
 FAILED = ("failed", "at_root", "partition")  # outcomes of `Delivery`: failed with an error
 
@@ -1205,7 +1433,10 @@ def overload(violations, start_ms, end_ms, outcomes=()):
 
 
 def standard(port, drain_ms):
-    """Return the checks of the large-network suite: MP11, MP10, MP5, MP9, MP13, false floats."""
+    """Return the checks of the large-network suite: MP11, MP10, MP5, MP9, MP13, metrics.
+
+    The metrics (`Floats`, `Detaches`, `Acknowledgements`) never fail a run.
+    """
     return [
         Loops(),
         Attachment(),
@@ -1214,6 +1445,8 @@ def standard(port, drain_ms):
         DutyCycle(),
         Resources(),
         Floats(),
+        Detaches(),
+        Acknowledgements(),
     ]
 
 
