@@ -539,7 +539,8 @@ gets its share, not its relays' capacity.
   more backoff of up to 32 slots. The slot is the time on air of a 17 B frame
   (the SILy presence size before the root sequence), fixed whatever the
   presence extension and the sequence byte. While the root's immediate
-  reply is pending, one slot instead (reply window, below).
+  reply is pending, one slot instead for the length of a maximum frame,
+  not counted as an attempt (reply window, below).
 - **Hidden terminals** remain (nodes that hear the relay but not each other).
   Accepted: class 1/2 recover losses, presence losses are absorbed by the
   silence threshold (`K_MISS`); measured loss rates decide whether more is
@@ -584,13 +585,20 @@ gets its share, not its relays' capacity.
     priority-1 message that fits that frame may still go before it (a
     Trickle advertisement after a reset): the reply then leaves in the
     next short frame. A backoff in progress when the reply is queued ends
-    at once (a one-shot skip); a busy sense while the reply is pending is
-    followed by one slot, CW kept, the sense counted towards the 6
-    attempts (then the rule above). The root never senses again in the
-    step that found the channel busy: on the board the answer to a sense
-    is posted during the step that asked, and the runner steps it before
-    yielding, so the root would spin for as long as the channel reads
-    busy.
+    at once (a one-shot skip), and the access procedure starts over
+    (attempts, CW). A busy sense while the reply is pending is followed by
+    one slot, neither counted towards the 6 attempts nor doubling CW, up
+    to the time on air of a maximum frame of the profile and one slot
+    after the reply's first busy sense (400 + 52 ms at SF7 with 255 B
+    frames): the frame heard then has ended, and the reply goes within
+    one slot of its end, its passengers kept (6 one-slot senses counted
+    as attempts spanned 5 slots, less than one long frame, so one long
+    reception made the root give up). Past that, the rule above from CW 4
+    and the first attempt: a channel busy for good still ends in a
+    give-up. The root never senses again in the step that found the
+    channel busy: on the board the answer to a sense is posted during the
+    step that asked, and the runner steps it before yielding, so the root
+    would spin for as long as the channel reads busy.
   - **Delay**: a window delays the next frame of a deferring node, its
     presence included, by at most the window and a backoff of CW slots (4
     unless the same access procedure already met a busy channel): 0.41 s

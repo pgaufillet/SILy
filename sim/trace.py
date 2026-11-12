@@ -66,7 +66,8 @@ fields are omitted.
 - ``cs``: carrier sense of ``n``, ``b`` 1 busy / 0 free (answer delivered
   ``sense_ms`` later). ``bo``: after a busy answer, backoff of ``n`` until
   ``u``; ``a`` attempts of the procedure so far (0: given up after
-  `mesh.link.MAX_ATTEMPTS`, a new procedure after the backoff).
+  `mesh.link.MAX_ATTEMPTS`, a new procedure after the backoff); ``r`` 1
+  when it is the one-slot wait of the root's pending reply, not an attempt.
 - ``st``: state of ``n`` after a step, when it changed: ``r`` rank, ``v``
   DODAG version, and with routing ``p`` preferred parent, ``ps`` parent set
   (preferred first), ``at`` attached. ``q``: transmit queue length ``q``,
@@ -577,7 +578,12 @@ class Recorder:
         if event is not None and event[0] == CHANNEL and event[1] and engine._state == BACKOFF:
             # Private fields of the link engine, read only: end of the
             # backoff and attempts of the access procedure (§8).
-            self._emit({"k": "bo", "n": name, "u": engine._wake, "a": engine._attempts})
+            rec = {"k": "bo", "n": name, "u": engine._wake, "a": engine._attempts}
+            until = engine._reply_until
+            reply = engine._reply is not None and until is not None
+            if reply and engine.now + engine.slot_ms <= until:
+                rec["r"] = 1  # the root's pending reply: one slot, not an attempt
+            self._emit(rec)
 
     def submitted(self, board, port, cls, dest, payload, result):
         self._emit(

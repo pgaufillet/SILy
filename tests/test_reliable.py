@@ -749,28 +749,103 @@ class ImmediateReply(_RootCase):
         self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
         self.assertEqual((root.counters.busy, root.counters.give_ups), (MAX_ATTEMPTS - 1, 0))
 
-    def test_busy_senses_with_a_reply_pending_give_up_as_usual(self):
-        # MAX_ATTEMPTS busy senses: the give-up backoff of [1, CW_MAX] slots,
-        # not a sense at once; then a new procedure, the reply first.
-        waits = set()
+    def _through_busy(self, root, now, free):
+        # From a sense asked at now, the channel busy before free: the senses
+        # up to the one that transmits. Returns (its frame, its time, the
+        # wait after each busy sense); never a sense in the step of an answer.
+        waits = []
+        while True:
+            actions = list(root.step(now, (CHANNEL, now < free)))
+            if actions:
+                ((_, f),) = actions
+                return f, now, waits
+            last, now = now, root.deadline()
+            waits.append(now - last)
+            self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+
+    def test_long_reception_with_a_reply_pending_keeps_the_frame(self):
+        # One long reception (5 slots + 1 ms, shorter than a maximum frame)
+        # while the reply is pending: one slot after each busy sense, no
+        # give-up; the reply leaves within one slot after the channel frees,
+        # with its passenger (a priority-2 broadcast, dropped by a give-up).
+        for seed in range(1, 6):
+            root = _engine(ROOT, None, seed=seed)
+            rel = root.reliable
+            rel.acknowledge(X, 3, 0)  # a batch entry of another source
+            root.send(Message(LINK_LOCAL, 0, ports.DODAG_INFO, bytes(9)), BROADCAST)
+            rel.acknowledge(R, 7, 0, reply=True)
+            self.assertEqual(list(root.step(0, None)), [(SENSE,)])
+            free = 5 * root.slot_ms + 1
+            f, t, waits = self._through_busy(root, 0, free)
+            self.assertEqual(waits, [root.slot_ms] * 6)
+            self.assertTrue(free <= t < free + root.slot_ms, (t, free))
+            self.assertEqual((root.counters.give_ups, root.counters.access_dropped), (0, 0))
+            dest, ports_sent, entries = self._entries(f)
+            self.assertEqual(dest, BROADCAST)
+            self.assertEqual(sorted(ports_sent), sorted([ports.ACK, ports.DODAG_INFO]))
+            self.assertEqual(entries, [(R, 7), (X, 3)])
+            self.assertEqual(len(root.queue), 0)
+
+    def test_busy_channel_with_a_reply_pending_gives_up_after_a_bound(self):
+        # A channel busy for good: one slot after each busy sense up to the
+        # time on air of a maximum frame from the first one, then the
+        # ordinary procedure (window from CW_MIN, MAX_ATTEMPTS busy senses),
+        # the give-up and its backoff of [1, CW_MAX] slots; then a new
+        # procedure, the reply first.
+        drawn = set()
         for seed in range(12):
             root = _engine(ROOT, None, seed=seed)
+            slot, longest = root.slot_ms, root.toa_ms(root.limit)
             root.reliable.acknowledge(R, 7, 0, reply=True)
             now = 0
-            actions = list(root.step(now, None))
-            for _ in range(MAX_ATTEMPTS):
-                self.assertEqual(actions, [(SENSE,)])
+            self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+            senses = []  # (time, wait after it) of the busy senses up to the give-up
+            while root.counters.give_ups == 0:
                 self.assertEqual(list(root.step(now, (CHANNEL, True))), [])
                 last, now = now, root.deadline()
-                actions = list(root.step(now, None))
-            self.assertEqual(root.counters.give_ups, 1)
-            self.assertEqual((now - last) % root.slot_ms, 0)
-            waits.add((now - last) // root.slot_ms)
-            self.assertEqual(actions, [(SENSE,)])
+                senses.append((last, now - last))
+                self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+            phase = [w for t, w in senses if t <= longest]
+            ordinary = [w for t, w in senses if t > longest]
+            self.assertEqual(phase, [slot] * (longest // slot + 1))
+            self.assertEqual(len(ordinary), MAX_ATTEMPTS)
+            cw, bound = CW_MIN, longest + slot
+            for w in ordinary[:-1]:
+                self.assertTrue(w % slot == 0 and slot <= w <= cw * slot, (w, cw))
+                bound += cw * slot
+                cw = min(2 * cw, CW_MAX)
+            self.assertTrue(senses[-1][0] <= bound, (senses[-1][0], bound))
+            wait = ordinary[-1]  # the give-up's backoff
+            self.assertTrue(wait % slot == 0 and slot <= wait <= CW_MAX * slot, wait)
+            drawn.add(wait // slot)
             ((_, f),) = list(root.step(now, (CHANNEL, False)))
             self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
-        self.assertTrue(min(waits) >= 1 and max(waits) <= CW_MAX, sorted(waits))
-        self.assertTrue(max(waits) > 1, sorted(waits))  # drawn, not the reply's slot
+        self.assertTrue(max(drawn) > 1, sorted(drawn))  # drawn, not the reply's slot
+
+    def test_reply_queued_during_an_older_procedure_gets_its_whole_phase(self):
+        # The busy senses of an older procedure do not count against the
+        # reply: queued after all but one of its attempts, the reply still
+        # waits one slot after each busy sense through a maximum frame, then
+        # leaves within one slot after the channel frees.
+        for seed in range(1, 6):
+            root = _engine(ROOT, None, seed=seed)
+            root.send(Message(DOWNWARD, 0, 20, bytes(100), dest=N), N)
+            now = 0
+            self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+            for i in range(MAX_ATTEMPTS - 1):
+                self.assertEqual(list(root.step(now, (CHANNEL, True))), [])
+                if i < MAX_ATTEMPTS - 2:
+                    now = root.deadline()
+                    self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+            now += 1  # in the backoff: the reply skips it
+            root.reliable.acknowledge(R, 7, now, reply=True)
+            self.assertEqual(list(root.step(now, None)), [(SENSE,)])
+            longest = root.toa_ms(root.limit)
+            f, t, waits = self._through_busy(root, now, now + longest)
+            self.assertEqual(waits, [root.slot_ms] * (longest // root.slot_ms + 1))
+            self.assertTrue(now + longest <= t < now + longest + root.slot_ms)
+            self.assertEqual(root.counters.give_ups, 0)
+            self.assertEqual(self._entries(f), (R, [ports.ACK], [(R, 7)]))
 
     def test_reply_queued_while_sensing_another_frame_keeps_its_rules(self):
         # The frame sensed before the reply was queued goes first; the reply

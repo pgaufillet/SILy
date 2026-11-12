@@ -31,8 +31,8 @@ start), commits the selection and transmits; ``TX_DONE`` charges the excess
 of the measured duration. A charge that leaves use above 80 % of the budget
 sets ``duty_high`` (presence flag bit 2, §11; the reporter clears it).
 Busy: random backoff of [1, CW] slots (slot = time on air of a presence
-frame at the SF; CW 4, doubling up to 32; one slot while the root's reply
-is pending, below), then packs and senses again.
+frame at the SF; CW 4, doubling up to 32; one slot, for a while, when the
+root's reply is pending, below), then packs and senses again.
 After `MAX_ATTEMPTS` busy senses the engine gives up: the priority-2/3
 reports of the frame are dropped; the other messages (class 1/2,
 priority-1 datagrams) stay queued and a new procedure starts after one more
@@ -56,14 +56,18 @@ retransmissions (a class 1/2 message already in the duplicate cache): the
 reply (`Reliable.acknowledge`) is packed first, in frames of at most
 `REPLY_FRAME` bytes until the one carrying it goes on air (a frame sensed
 before the reply was queued goes first). A backoff in progress when the
-reply is queued ends at once, a one-shot skip; a busy sense while the reply
-is pending is followed by one slot, the contention window kept and the
-sense counted towards `MAX_ATTEMPTS` (then the give-up rule applies), so
-that the root never senses again in the step that found the channel busy:
-on the board the answer to a sense is posted during the step that asked,
-and the runner steps it before yielding (`mesh.runner`), so it would spin
-for as long as the channel reads busy. The root's other acknowledgements
-are batched as before.
+reply is queued ends at once, a one-shot skip, and the access procedure
+starts over (attempts and contention window). A busy sense while the reply
+is pending is followed by one slot, neither counted towards `MAX_ATTEMPTS`
+nor widening the window, up to the time on air of a maximum frame of the
+profile and one slot after the reply's first busy sense: the frame heard
+then has ended. Past that, the ordinary procedure applies (window from
+CW 4, `MAX_ATTEMPTS` busy senses, then the give-up), so that a channel
+busy for good still ends in a give-up. The root never senses again in the
+step that found the channel busy: on the board the answer to a sense is
+posted during the step that asked, and the runner steps it before
+yielding (`mesh.runner`), so it would spin for as long as the channel
+reads busy. The root's other acknowledgements are batched as before.
 
 **Receive path** (§14 reception order): steps 1–3 by `Security.receive`
 (length and version, authentication, replay; failures counted, per sender
@@ -394,8 +398,12 @@ class LinkEngine(Core):
         self._cw = CW_MIN
         self._sel = None
         self.reply_ms = self.toa_ms(REPLY_FRAME) + REPLY_SLOTS * self.slot_ms
+        # Root: the one-slot waits of a pending reply end at most a maximum
+        # frame and one slot after its first busy sense (§8).
+        self._reply_phase_ms = self.toa_ms(self.limit) + self.slot_ms
         self._reply_end = None  # no medium access before (a reply window, §8)
         self._reply = None  # root: the immediate reply pending (its Message), sent first (`send`)
+        self._reply_until = None  # end of its one-slot waits, from its first busy sense
         self._reliable()
 
     def _reliable(self):
@@ -519,15 +527,21 @@ class LinkEngine(Core):
         For mesh components (any port, explicit next hop); no check beyond
         the queue's. trickle_reset, replace, exempt: as `TxQueue.offer`.
         reply: msg is the root's immediate acknowledgement (reply window,
-        §8): a backoff in progress ends now (once), and frames are packed
-        within `REPLY_FRAME` bytes until the one carrying msg goes on air; a
-        busy sense meanwhile waits one slot (`_channel`).
+        §8): a backoff in progress ends now (once), the access procedure
+        starts over (attempts, window), and frames are packed within
+        `REPLY_FRAME` bytes until the one carrying msg goes on air; a busy
+        sense meanwhile waits one slot, not counted as an attempt, up to a
+        maximum frame and one slot after the first busy sense, then the
+        ordinary procedure applies (`_channel`).
         """
         outcome = self.queue.offer(msg, hop, True, trickle_reset, replace, exempt)
         if accepted(outcome):
             self._dirty = True
             if reply:
                 self._reply = msg
+                self._reply_until = None
+                self._attempts = 0
+                self._cw = CW_MIN
                 if self._state == BACKOFF:
                     self._wake = self.now  # skipped once, at the reply's queueing
         else:
@@ -745,7 +759,6 @@ class LinkEngine(Core):
                 self._wake = t
             return
         self._sel = sel
-        self._attempts += 1
         self.counters.senses += 1
         self._state = SENSING
         self.emit(SENSE_ACTION)
@@ -772,24 +785,31 @@ class LinkEngine(Core):
             return
         c = self.counters
         c.busy += 1
+        self._state = BACKOFF
+        if self._reply is not None:
+            # The root's reply pending (§8): one slot, neither an attempt nor
+            # a wider window, while a frame heard at the first busy sense may
+            # still be on air. Never a sense in this step: on the board the
+            # runner would step its answer before yielding.
+            until = self._reply_until
+            if until is None:
+                until = self._reply_until = now + self._reply_phase_ms
+            if now + self.slot_ms <= until:
+                c.backoffs += 1
+                self._wake = now + self.slot_ms
+                return
+        self._attempts += 1
         if self._attempts >= MAX_ATTEMPTS:
             c.give_ups += 1
             self.give_up(self._sel, now)
             self._attempts = 0
             slots = 1 + randbelow(self.random, CW_MAX)  # then a new procedure
             self._cw = CW_MIN
-        elif self._reply is not None:
-            # The root's reply pending (§8): one slot, the window kept. Never
-            # a sense in this step: on the board the runner would step its
-            # answer before yielding.
-            c.backoffs += 1
-            slots = 1
         else:
             c.backoffs += 1
             window = self._cw
             self._cw = window * 2 if window < CW_MAX else CW_MAX
             slots = 1 + randbelow(self.random, window)
-        self._state = BACKOFF
         self._wake = now + self.slot_ms * slots
 
     def _transmit(self, now):

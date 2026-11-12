@@ -1829,7 +1829,8 @@ function jText(p) {
       return `↳ #${fc16(F.fc)} of ${N(F.n)} ends: ${fateSummary(F, r)}`;
     }
     case 'cs': return `${N(r.n)} senses the channel: ${r.b ? 'busy' : 'free'}`;
-    case 'bo': return r.a === 0 ? `${N(r.n)} gives up the access after 6 busy senses; new procedure after a backoff until ${fmtT(r.u)}`
+    case 'bo': return r.r ? `${N(r.n)} waits one slot for its pending reply, until ${fmtT(r.u)}`
+      : r.a === 0 ? `${N(r.n)} gives up the access after 6 busy senses; new procedure after a backoff until ${fmtT(r.u)}`
       : `${N(r.n)} backs off ${fmtDur(r.u - r.t)}, until ${fmtT(r.u)} (busy sense ${r.a} of 6)`;
     case 'st': return stText(r);
     case 'q': return `${N(r.n)} transmit queue: ${plural(r.q, 'message')}`;
@@ -2079,7 +2080,7 @@ function recDetails(p, auto) {
       break;
     case 'cs': h += kvRows([['node', N(r.n)], ['channel', r.b ? 'busy' : 'free', 'cs'], ['answer at', fmtT(r.t + (D.hdr.sense_ms || 0)) + ` (sense_ms ${D.hdr.sense_ms ?? '?'})`]]); break;
     case 'bo': h += kvRows([['node', N(r.n)], ['until', `${fmtT(r.u)} (${fmtDur(r.u - r.t)}, ${((r.u - r.t) / timeouts(D).slot).toFixed(1)} slots)`, 'bo'],
-      ['busy senses', r.a === 0 ? '0: given up after 6; a new procedure starts after this backoff' : `${r.a} of at most 6`]]); break;
+      ['busy senses', r.r ? 'not counted: the one-slot wait of the root\'s pending reply' : r.a === 0 ? '0: given up after 6; a new procedure starts after this backoff' : `${r.a} of at most 6`]]); break;
     case 'st': {
       const pr = r._prev || {};
       h += kvRows([['node', N(r.n)], ['rank', `${esc(rk(pr.r))} → ${esc(rk(r.r))}`, 'rank'], ['DODAG version', `${pr.v ?? '?'} → ${r.v}`, 'version'],
