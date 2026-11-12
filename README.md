@@ -151,6 +151,13 @@ the origin connected, recovery failed, each check violated) as k/n with a
 the failing runs. `make sweep-summary` prints that again;
 `tests/large.py aggregate --csv DIR...` gives it as CSV.
 
+The scenario suites sweep the same way: `tests/seeds.py COUNT --first K
+--class NAME --json` runs shifts K to K + COUNT - 1 of the named test
+classes and prints one JSON line per shift and class, so that ranges of
+shifts run as parallel jobs; `tests/seeds.py aggregate PATH...` prints
+the failing shifts per class with their Wilson interval. `make seeds`
+is unchanged.
+
 ## Traces
 
 `make trace` records what simulated networks play (`sim/trace.py`), for
