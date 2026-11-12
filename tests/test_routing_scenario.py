@@ -440,8 +440,13 @@ class RelayKilled(unittest.TestCase):
         m.net.at(kill + 100, submit)
         # The last message (submitted 4.1 s after the kill) may take the
         # whole bound through the dead relay, then one attempt through the
-        # other relay and that relay's forward to the root.
-        m.run(max(kill + 3 * P, kill + 4100 + bound + 2 * hop))
+        # other relay and that relay's forward to the root. A message may
+        # also lose one more attempt (towards the dead relay, its hop for
+        # its remaining attempts, or to a collision) and wait out its retry
+        # delay, drawn in the range the timeouts before the reroute doubled
+        # (§12): at most the full range, retry_ms << RETRY_DOUBLINGS.
+        retry = hop + (rel.retry_ms << RETRY_DOUBLINGS)
+        m.run(max(kill + 3 * P, kill + 4100 + bound + 2 * hop + retry))
         t, parent = switched(log, C, relay)
         self.assertEqual(parent, other)
         took = t - 100
@@ -1073,12 +1078,18 @@ class RejoinBest(unittest.TestCase):
     switch threshold: taking the first candidate heard would keep C on E
     for good. C waits for the close of its answer window (Imin + 8 slots
     after the solicitation) and takes D, the best candidate heard in it
-    (§9). Only a frame carrying a root sequence makes a candidate: when
-    D's answer is lost to a collision at C (D and E answer at the same
-    time), C has no candidate at the close and takes the first one heard
-    after it. When C's solicitation is lost at D (to a frame of F, hidden
-    from C), D does not answer: C takes E, alone in its window, and keeps
-    it."""
+    (§9). A candidate is a neighbour heard after the solicitation (any
+    frame) whose root sequence, known to C, is newer than C's (at the same
+    sequence D and E, ranked above C's lowest rank, are none): when D's
+    answer is lost to a collision at C (D and E answer at the same time),
+    C has E alone in its window, or no candidate at the close and takes
+    the first one heard after it. When C's solicitation is lost at D (to a
+    frame of F, hidden from C), D does not answer: C takes E, alone in its
+    window, and keeps it. When D has lost frames of F, D and E may still
+    have C's sequence at the solicitation: C rejoins once a newer one has
+    reached them, at the close of the window then open (C solicits once
+    per period while detached) through the best candidate heard in it, or
+    through the first one heard outside a window."""
 
     def test_rejoin_through_the_best_candidate_of_the_window(self):
         f = 0x00F1
@@ -1108,7 +1119,9 @@ class RejoinBest(unittest.TestCase):
         solicited = []  # times of C's solicitations at rank 255
         heard = []  # (time, source) of the frames C hears after the first one
         healed = []  # times of C's frames at rank 255 (the links to D and E up)
-        candidates = []  # (time, source) of the frames carrying a root sequence C hears since
+        candidates = []  # (time, source) of the frames C hears after its solicitation
+        # from a neighbour with a newer root sequence than C's (§9)
+        stale = []  # (time, source) of those from a neighbour without one
         lossy = []  # receptions lost at C at its solicitation and window close
         stats = medium.stats(C)
         base_sent, base_heard = c.engine.sent, c.engine.heard
@@ -1136,16 +1149,24 @@ class RejoinBest(unittest.TestCase):
             return base_heard(header, rssi, snr, now)
 
         def decoded(header, messages, entry, now):
-            if healed and header.rank != RANK_INFINITE:
-                if any(_carries_sequence(x) for x in messages):
-                    candidates.append((now, header.source))
-            return base_decoded(header, messages, entry, now)
+            mine = p.sequence
+            out = base_decoded(header, messages, entry, now)
+            if solicited and now > solicited[0] and header.rank != RANK_INFINITE:
+                n = p.table.get(header.source)
+                if n is not None and n.sequence is not None and not n.floating:
+                    if mine is None or sequence_newer(n.sequence, mine):
+                        candidates.append((now, header.source))
+                    else:
+                        stale.append((now, header.source))
+            return out
 
         c.engine.sent = sent
         c.engine.heard = on_heard
         c.engine.decoded = decoded
         asked = _SequenceFrames(C, D, _solicits)  # C's solicitations at D
+        answers = _SequenceFrames(D, C)  # D's frames carrying its sequence, at C
         medium.observers.append(asked)
+        medium.observers.append(answers)
         kill = m.net.now
         log = m.watch((C,), kill)
         m.b(A).power_loss(off_ms=OFF)
@@ -1153,38 +1174,56 @@ class RejoinBest(unittest.TestCase):
         m.run(kill + 5 * P // 2 + 5 * m.imin)
         self.assertEqual(c.routing.dodag.counters.poisons, 1)
         self.assertTrue(solicited, log)
-        close = solicited[0] + c.routing.dodag.imin_ms + 8 * c.engine.slot_ms
+        width = c.routing.dodag.imin_ms + 8 * c.engine.slot_ms
+        if p.preferred is None:
+            # No newer sequence at D and E yet (D lost frames of F): it
+            # reaches D within D's silence limit (2.5 periods, or D detaches
+            # too), then C with D's next frame (1.1 periods), within a window
+            # (its width) or not.
+            m.run(solicited[0] + 4 * P)
+        close = solicited[0] + width
         rejoin = [(t + kill, x) for t, n, x, r in log if t + kill > solicited[0]]
         self.assertTrue(rejoin, log)
-        window = [s for t, s in candidates if t < close]
+        self.assertTrue(candidates, (stale, log))
+        # The window open when C heard its first candidate, if any.
+        opened = [t for t in solicited if t < candidates[0][0] < t + width]
         # C's solicitation lost at D (to a frame of F, hidden from C): D
         # does not answer it.
         fate = [x for t0, t1, x in asked.frames if t0 == solicited[0]]
         unasked = fate in ([COLLISION], [HALF_DUPLEX])
-        if D in window:
-            # Both heard in the window.
-            sources = [s for t, s in heard if t < close]
-            self.assertTrue(E in sources and D in sources, heard)
-            # C rejoined at the close, through D, and keeps it.
-            self.assertEqual(rejoin[0][1], D, log)
-            self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
-            parent = D
-        elif window:
-            # D unasked: E alone in the window, taken at the close and kept
-            # (D, better by less than the switch threshold, comes after).
-            self.assertTrue(unasked, (fate, candidates))
-            self.assertEqual(set(window), set((E,)), candidates)
-            self.assertEqual(rejoin[0][1], E, log)
-            self.assertTrue(close <= rejoin[0][0] <= close + 10, (close, rejoin[0]))
-            parent = E
-        else:
-            # D's answer lost at C, or D unasked and E's answer lost: no
-            # selection before the close, then the first candidate heard
-            # (the best of none, §9), kept.
+        if candidates[0][0] >= close:
+            # No candidate in the first window: D's answer lost at C, or D
+            # unasked and E's answer lost, or no newer sequence at D and E.
             self.assertEqual(len(lossy), 2, lossy)
-            self.assertTrue(lossy[1] > lossy[0] or unasked, (lossy, fate, heard))
-            self.assertTrue(rejoin[0][0] >= close, (close, rejoin[0]))
-            t1, parent = [x for x in candidates if x[0] >= close][0]
+            lost = lossy[1] > lossy[0] or unasked
+            self.assertTrue(lost or [x for x in stale if x[0] < close], (lossy, fate, stale))
+        if opened:
+            start = opened[-1]
+            end = start + width
+            window = [s for t, s in candidates if t < end]
+            if D in window:
+                if start == solicited[0]:
+                    # Both heard in the window.
+                    sources = [s for t, s in heard if t < end]
+                    self.assertTrue(E in sources and D in sources, heard)
+                # C rejoined at the close, through D, and keeps it.
+                parent = D
+            else:
+                # D unasked or its answers lost at C: E alone in the
+                # window, taken at the close and kept (D, better by less
+                # than the switch threshold, comes after).
+                fate = [x for t0, t1, x in asked.frames if t0 == start]
+                lost = [x for t0, t1, x in answers.frames if start < t0 < end]
+                missed = fate in ([COLLISION], [HALF_DUPLEX]) or (lost and OK not in lost)
+                self.assertTrue(missed, (fate, lost, candidates))
+                self.assertEqual(set(window), set((E,)), candidates)
+                parent = E
+            self.assertEqual(rejoin[0][1], parent, log)
+            self.assertTrue(end <= rejoin[0][0] <= end + 10, (end, rejoin[0]))
+        else:
+            # No window open: no selection before the first candidate heard
+            # (the best of none, §9), then that one, kept.
+            t1, parent = candidates[0]
             self.assertEqual(rejoin[0][1], parent, (candidates, rejoin))
             self.assertTrue(t1 <= rejoin[0][0] <= t1 + 10, (t1, rejoin[0]))
         self.assertEqual([x for t, x in rejoin if x != parent], [], log)
