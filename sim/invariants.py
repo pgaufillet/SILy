@@ -613,8 +613,9 @@ class Delivery(Check):
     arrive anyway (a relay rebooting after acknowledging; here it never
     comes back); and those failed by a relay cut off from the root while
     their origin is cut off too (no usable path to the root from either
-    when the relay fails it: the error cannot travel, D13 in the TLA+
-    `DODAG_line_partition_MP5Live`), counted ``partition``.
+    when the relay fails it: the error cannot travel, the partition
+    counterexample of the TLA+ `DODAG_line_partition_MP5Live`), counted
+    ``partition``.
 
     Until downward routing exists (§10), the root cannot forward to the
     origin an error about a message failed by a relay (port 4): the root

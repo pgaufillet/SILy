@@ -470,9 +470,10 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   it ineligible; neither successes (a failure leaves the 16-sample window
   only 16 samples later) nor ageing (a silence limit after the newest
   failure, not reached under sustained load) remove them: slightly
-  pessimistic, enough for a witness of D28's mechanism. `"reach"`
-  (remedy A of D28, RPL neighbour unreachability detection style, the
-  node's class 1 transmissions to the root as probes): the link to the
+  pessimistic, enough for a witness of the mechanism by which collisions
+  under hidden terminals detach a node. `"reach"` (remedy A to that
+  mechanism, RPL neighbour unreachability detection style, the node's
+  class 1 transmissions to the root as probes): the link to the
   root is unreachable (ineligible) once the node's last U failed samples
   were consecutive and no acknowledgement of the root came for one silence
   limit; any acknowledgement of the root (late included) makes it
@@ -757,7 +758,7 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   or not, is kept while it is the last candidate. `"keepboth"` (remedy A
   extended to relays, the code): both. `"drop"`: the code
   before.
-- **Root link unreachability** (`Elig = "reach"`, remedy A of D28, the
+- **Root link unreachability** (`Elig = "reach"`, remedy A, the
   code): the link to the root leaves the candidates only after a
   run of consecutive failed samples with no acknowledgement of the root
   (and, in the code, a silence limit without one), instead of ETX > 4
@@ -855,7 +856,7 @@ Eligibility of the link to the root, on the code since the root kept
 
 | Item | Result | Configurations |
 |---|---|---|
-| Root link ineligible after collisions, the code before remedy A (`Elig = "etx"`, D28) | no death, no dead link, line, ≤ 4 losses, ≤ 1 consecutive per link: 1's frames to the root lost there and the root's acknowledgements lost at 1, alternately; after 4 failed samples (`INELIG`) 1's link to the root is ineligible (36 683 states, 58 s), and 1 detaches although the root is heard, not dropped and within the bound, its subtree following (`KeepParent`, 44 619 states, 74 s) | `DODAG_line_etx_rootloss`, `DODAG_line_etx_detach` |
+| Root link ineligible after collisions, the code before remedy A (`Elig = "etx"`, collisions under hidden terminals) | no death, no dead link, line, ≤ 4 losses, ≤ 1 consecutive per link: 1's frames to the root lost there and the root's acknowledgements lost at 1, alternately; after 4 failed samples (`INELIG`) 1's link to the root is ineligible (36 683 states, 58 s), and 1 detaches although the root is heard, not dropped and within the bound, its subtree following (`KeepParent`, 44 619 states, 74 s) | `DODAG_line_etx_rootloss`, `DODAG_line_etx_detach` |
 | Root link unreachable, remedy A (`"reach"`) | the same budget (line, ≤ 4 losses, ≤ 1 consecutive): the link never unreachable, the root never dropped, KeepParent, no silent loss (52 708 states, 2 min); ≤ 3 losses in any pattern: no silent loss, the root never dropped, its link never unreachable (line, relay 1 dies: 18 674 states, 10 s; diamond, relay 1 dies, a message of 4: 20 481 states, 51 s); ≤ 3 losses, ≤ 1 consecutive: no loop, no rejoin loop, KeepParent (line, relay 1 dies: 84 131 states, 41 s); MP5Live, LoopsEnd, RanksSettle, MP10Live (line, no death, ≤ 3 losses: 1 992 states, 13 s) | `DODAG_line_reach_rootloss`, `DODAG_*_reach_MP5`, `DODAG_line_reach_nocycle`, `DODAG_line_reach_live` |
 | Remedy A, dead link | the dead link is still left: link 0 – 1 dead both ways, line, ≤ 2 losses: LoopsEnd, RanksSettle, CutOffLive, no silent loss (262 475 states, 7 min); diamond, a message of 4, ≤ 1 loss: also MP5Live and MP10Live, 1 rejoining through 3 (20 517 states, 4 min). Link 1 → 0 dead, 1 still hearing the root's beacons but no acknowledgement: the run of failed samples makes the link unreachable; diamond, ≤ 1 loss: MP5Live, LoopsEnd, RanksSettle, no silent loss (4 269 states, 42 s). Root dropped and link unreachable only over the dead link (`RootKept`, `RootReachable`) | `DODAG_*_reach_cutlive`, `DODAG_diamond_reach_cutuplive` |
 | Limit, not of A (the same with `"none"`) | link 1 → 0 dead and no class 1 traffic through 1: no probe, 1 stays attached over it and MP10Live fails (202 states, 4 s: the cut, then 1 attached over it for ever, its message never submitted); removed by the presence probe (below) | `DODAG_diamond_reach_cutup_idle` |
@@ -1219,7 +1220,7 @@ How each fix is implemented, what it costs, and the limits accepted.
 
 ## Open points
 
-- **Remedy A of D28 in the code** (`Elig = "reach"`): implemented
+- **Remedy A in the code** (`Elig = "reach"`): implemented
   (`neighbours.py` `Neighbour.reachable`, `eligible`, `link_etx`,
   `NeighbourTable.answered`; `reliable.py` `on_ack`; `parents.py`
   `candidate_cost`): the link to the root unreachable after U = 4

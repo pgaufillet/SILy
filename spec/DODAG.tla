@@ -186,7 +186,7 @@
 (*   newest failure, which a node failing under sustained load does not   *)
 (*   reach. Pessimistic for the node (it may read its link ineligible a   *)
 (*   little earlier than the code): enough for a witness of the mechanism, *)
-(*   which the simulator shows (D28: ETX 5.3 at a hidden root child).      *)
+(*   which the simulator shows (ETX 5.3 at a hidden root child).           *)
 (* - "reach" (remedy A, RPL neighbour unreachability detection style, the  *)
 (*   node's class 1 transmissions to the root as its probes): the link to  *)
 (*   the root no longer uses ETX <= 4; it is unreachable (ineligible) once *)

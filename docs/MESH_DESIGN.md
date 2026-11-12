@@ -557,7 +557,7 @@ gets its share, not its relays' capacity.
   window ends; nor does a node that overhears such a frame from its
   preferred parent (necessarily a root child); it then draws a backoff of
   [0, CW] slots, so that the nodes deferring together do not start
-  together. Why (D42): the children of a relay that do not hear the root
+  together. Why: the children of a relay that do not hear the root
   (hidden root) sent while the root answered their relay, and the root's
   frames collided at the relay; once no class 1 traffic kept its link
   answered, an idle relay lost its root after 4 failed probes (host
@@ -577,29 +577,29 @@ gets its share, not its relays' capacity.
     in the duplicate cache: the child missed the acknowledgement). First
     copies, and the frames of the other root children, are acknowledged
     as before, batched or lazy (§12); answering every frame of a relaying
-    child at once removed D42 too, at a higher acknowledgement airtime
-    (§16). The reply takes the batch and lazy entries waiting, up to 8
-    entries, and is packed first, in frames of at most 47 B (an
-    acknowledgement frame of 8 entries; the profile's frame limit if
-    lower, §4) until the one carrying it goes on air (a frame already
-    sensing when the reply is queued goes first). A
-    priority-1 message that fits that frame may still go before it (a
-    Trickle advertisement after a reset): the reply then leaves in the
-    next short frame. A backoff in progress when the reply is queued ends
-    at once (a one-shot skip), and the access procedure starts over
-    (attempts, CW). A busy sense while the reply is pending is followed by
-    one slot, neither counted towards the 6 attempts nor doubling CW, up
-    to the time on air of a maximum frame of the profile and one slot
-    after the reply's first busy sense (400 + 52 ms at SF7 with 255 B
-    frames): the frame heard then has ended, and the reply goes within
-    one slot of its end, its passengers kept (6 one-slot senses counted
-    as attempts spanned 5 slots, less than one long frame, so one long
-    reception made the root give up). Past that, the rule above from CW 4
-    and the first attempt: a channel busy for good still ends in a
-    give-up. The root never senses again in the step that found the
-    channel busy: on the board the answer to a sense is posted during the
-    step that asked, and the runner steps it before yielding, so the root
-    would spin for as long as the channel reads busy.
+    child at once removed the idle relay's detaches too, at a higher
+    acknowledgement airtime (§16). The reply takes the batch and lazy
+    entries waiting, up to 8 entries, and is packed first, in frames of at
+    most 47 B (an acknowledgement frame of 8 entries; the profile's frame
+    limit if lower, §4) until the one carrying it goes on air (a frame
+    already sensing when the reply is queued goes first). A priority-1
+    message that fits that frame may still go before it (a Trickle
+    advertisement after a reset): the reply then leaves in the next short
+    frame. A backoff in progress when the reply is queued ends at once (a
+    one-shot skip), and the access procedure starts over (attempts, CW). A
+    busy sense while the reply is pending is followed by one slot, neither
+    counted towards the 6 attempts nor doubling CW, up to the time on air
+    of a maximum frame of the profile and one slot after the reply's first
+    busy sense (400 + 52 ms at SF7 with 255 B frames): the frame heard
+    then has ended, and the reply goes within one slot of its end, its
+    passengers kept (6 one-slot senses counted as attempts spanned 5
+    slots, less than one long frame, so one long reception made the root
+    give up). Past that, the rule above from CW 4 and the first attempt: a
+    channel busy for good still ends in a give-up. The root never senses
+    again in the step that found the channel busy: on the board the answer
+    to a sense is posted during the step that asked, and the runner steps
+    it before yielding, so the root would spin for as long as the channel
+    reads busy.
   - **Delay**: a window delays the next frame of a deferring node, its
     presence included, by at most the window and a backoff of CW slots (4
     unless the same access procedure already met a busy channel): 0.41 s
@@ -690,7 +690,7 @@ acknowledgement window and the time of its newest failure.
   upward message for another node within the silence limit) is answered
   at once instead, in the reply window its children keep clear (§8): they
   may not hear the root, and the beacon carrying the entry collided at the
-  relay with their frames, detaching an idle relay (D42). The presence is
+  relay with their frames, detaching an idle relay. The presence is
   one sample of the link's reachability (below), a success at that
   entry, a failure 0.55 period
   (the longest gap between beacons) plus a root timeout after the end of
@@ -775,11 +775,11 @@ acknowledgement window and the time of its newest failure.
     included; the other candidates do not depend on the preferred parent,
     so they are found first, with the ordinary rule), are not tested
     against ETX ≤ 4: reachability alone. Under hidden terminals the root's
-    batches collide at a root child (D28): its ETX to the root climbs
+    batches collide at a root child: its ETX to the root climbs
     above 4 while the root still answers now and then, and ETX alone
     would remove the root, the root child's only candidate under L,
     detaching its subtree. The same holds for a relay that is a hop-2
-    node's only candidate (the 30-node star, D28: the Nodes behind the
+    node's only candidate (the 30-node star: the Nodes behind the
     one relay drop it after collisions at it and detach). A dead uplink
     to such a parent, still heard, is left about one silence limit after
     its last acknowledgement (§9 repair times), at any ETX. The ETX used
@@ -1314,7 +1314,7 @@ frame of the exchange lost on any hop, see below.)
   SF9), but a root child does not detach, its subtree following, after
   frames lost to collisions at the root, nor after its ETX to the root
   climbs above 4 while the root's batches collide at it but the root still
-  answers within the silence limit (hidden terminals, D28), the root being
+  answers within the silence limit (hidden terminals), the root being
   its only candidate under L (TLA+ `DODAG`, Exhaust = "keeproot", Elig =
   "reach"). Before reachability (ETX ≤ 4), 13 failed samples from a full
   window: 331 s at SF8.
@@ -1329,7 +1329,7 @@ frame of the exchange lost on any hop, see below.)
   next presence (1.1 period): 3.6 presence periods, then the detach and
   rejoin (no other candidate). Before (a drop after 3 attempts, as
   "switch with traffic, parent relay"), the node detached after mere
-  collisions at the relay (hidden terminals: the 30-node star, D28)
+  collisions at the relay (hidden terminals: the 30-node star)
   (TLA+ `DODAG`, Exhaust = "keepboth", Elig = "reachall"). A node with
   presence reports only probes the relay once per period: 4 failed
   presences, the last one decided 1.1 period and a relay timeout after its
@@ -1904,7 +1904,7 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   `DODAG_*_keeproot_*`, `DODAG_*_reachall_*`, no silent loss and the root
   never dropped with up to 3 losses in any pattern, left over a dead
   link), and so would the parent link's ETX above 4 after the parent's
-  acknowledgements collide at the node (D28, `DODAG_line_etx_detach`,
+  acknowledgements collide at the node (`DODAG_line_etx_detach`,
   `DODAG_line_keepbothetx_detach`; reachability: `DODAG_*_reach_*`,
   `DODAG_*_reachall_*`). Cost: a failed link to such a parent is left
   later, about one silence limit after its last acknowledgement (§9
@@ -2104,7 +2104,7 @@ holding; a relay under load):
   traffic (held class 1 messages after a reattachment) had its presence
   refused: no probe of the link to its parent (§9 presence probe), no
   sample of it, nothing for the root to acknowledge (a root child), for
-  as long as the queue stayed full (D43: in the overloaded 64-node star,
+  as long as the queue stayed full (in the overloaded 64-node star,
   no presence of the relay for 345 s, over 11 periods, exposing it to a
   false silent-node alarm). The reserve held 2 entries, DODAG information
   only, before.
@@ -2709,7 +2709,7 @@ in the DODAG information message (§9), so every node applies them:
   left only after a silence limit without its acknowledgement, so a root
   child keeps a root whose batches mostly collide at it (in the simulator's
   star with the root hidden, none reached the root child for longer than
-  that during the burst: the root was left all the same, D28). Revisit if
+  that during the burst: the root was left all the same). Revisit if
   repairs choose bad links.
 - Fairness parameters (quota 16 per origin above half a queue, §7): checked
   in a host scenario with a flooding node; to check on the bench.
