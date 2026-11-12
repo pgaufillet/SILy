@@ -46,8 +46,11 @@ pass on a criterion of their own, `sim.invariants.Recovery` and
 checks (MP11, MP9, MP13), and the recovery once the overload has ended
 (the burst minute, or the scenario's event if later): by a deadline of
 3.6 presence periods (a parent link left, §9) plus the repair bound of
-MP10 at the network's depth (11.6 periods at 2 hops), every board routed
-or, cut off, detached, and nothing still queued at the end; accepted and
+MP10 at the network's depth (11.6 periods at 2 hops), every board not
+routed since that end routed or, cut off, detached (a board routed again
+since and without a route at the deadline is in an ordinary repair,
+judged by MP10, after the deadline too: counted, not a failure), and
+nothing still queued at the end; accepted and
 counted, from the burst to that deadline: MP10 beyond its bounds
 (attachment, version wave), messages refused or failed with an error. Its
 result reads ``overload`` instead of ``ok``.
@@ -72,8 +75,9 @@ its record (a sweep resumes), writes NAME.json (`result`: violations by
 check, the strict verdict (no violation at all, overload runs too),
 delivery counts, failures split by their origin's state, false floats,
 relay and leaf detaches, passive and late acknowledgements, duplicates
-before the copy went on air, recovery details, wall time, and the
-``SWEEP_VARIANT`` and ``SWEEP_REV`` of the environment), the report
+before the copy went on air, recovery details (among them the boards
+without a route at its deadline, failing or in repair), wall time, and
+the ``SWEEP_VARIANT`` and ``SWEEP_REV`` of the environment), the report
 NAME.txt only when the run fails, and prints the result line.
 ``aggregate DIR...`` groups the records by variant, load, scenario,
 topology and nodes and prints, for each per-run indicator (`INDICATORS`:
@@ -579,6 +583,8 @@ def result(r):
             "depth": c.depth,
             "routed": c.routed,
             "detached": c.detached,
+            "unrouted": c.unrouted,
+            "repairing": c.repairing,
             "queued": c.copies,
             "violations": sum(1 for v in r.violations if v.check == c.name),
         }

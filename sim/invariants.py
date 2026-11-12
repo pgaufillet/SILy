@@ -29,7 +29,8 @@ of a presence frame, §8), silence limit S = 2.5 T (§9). Checks:
   any window, measured from the medium's transmissions;
 - `Resources` (MP13): tables and queues within their configured bounds;
 - `Recovery` (overload cases only, not a §2 property): after an overload
-  ends, every board routed or detached by a deadline, nothing left queued
+  ends, every board not routed since routed or detached by a deadline
+  (a route lost after the end is a repair, MP10's), nothing left queued
   at the end; `overload` splits such a run's violations into failing and
   accepted (MP10 beyond its bounds within the overload window);
 - `Floats` (not a §2 property, never a violation): the false floats,
@@ -1014,12 +1015,20 @@ class Recovery(Check):
     count seen (detach, hold, rejoin hop by hop: the subtree detached when
     its parent leaves follows). At SF8 (T 30 s) and 2 hops: 108 + 239 s,
     11.6 T. At the first sample from the deadline, every board switched on
-    must be:
+    and not routed at any sample after after_ms (its outage began before
+    the overload ended, or with the event that ended it) must be:
 
     - connected to the root (usable links): routed (`Checker.chain`), the
       relays included;
     - cut off: detached (no preferred parent, rank 255): no rootless
       structure.
+
+    A board routed again after after_ms and without a route at the
+    deadline is in an ordinary repair, which `Attachment` judges (MP10,
+    its bound applies after the deadline too): not a failure here.
+    ``unrouted`` counts the boards neither routed nor, cut off, detached
+    at the deadline, ``repairing`` those of them routed again after
+    after_ms: information, the count of a single-instant rule.
 
     At the end of the run (``drain`` after the last submission, the suite's
     5 periods: holding of 2 periods, then the error's, MP15), no class 1 or
@@ -1037,7 +1046,10 @@ class Recovery(Check):
         self.checked = None  # time of the route check
         self.routed = 0
         self.detached = 0
+        self.unrouted = 0
+        self.repairing = 0
         self.copies = 0
+        self.since_end = set()  # names routed at a sample after after_ms
 
     def detect_ms(self):
         """D: a parent link left after its last acknowledgement (§9: 3.6 T)."""
@@ -1052,6 +1064,10 @@ class Recovery(Check):
         depth = max(hops.values()) if hops else 0
         if depth > self.depth:
             self.depth = depth
+        if now > self.after_ms:
+            for b in c.nodes():
+                if b.name not in self.since_end and c.chain(b) is not None:
+                    self.since_end.add(b.name)
         if self.deadline is None and now >= self.after_ms:
             self.deadline = self.after_ms + self.detect_ms() + repair_ms(c, self.depth)
         if self.deadline is not None and now >= self.deadline:
@@ -1071,6 +1087,10 @@ class Recovery(Check):
             if not connected and p is None and rank == RANK_INFINITE:
                 self.detached += 1
                 continue
+            self.unrouted += 1
+            if b.name in self.since_end:
+                self.repairing += 1  # an outage begun after the overload: MP10's
+                continue
             if p is None and rank == RANK_INFINITE:
                 what = "connected, no route"
             else:
@@ -1080,7 +1100,8 @@ class Recovery(Check):
             self.violate(
                 now,
                 (b.name,),
-                "not recovered at %.1f s, %.1f s after the overload ended at %.1f s: %s"
+                "not recovered at %.1f s, %.1f s after the overload ended at %.1f s, "
+                "not routed since: %s"
                 % (now / 1000, (now - self.after_ms) / 1000, self.after_ms / 1000, what),
             )
 
@@ -1105,7 +1126,8 @@ class Recovery(Check):
             return "overload end %.1f s not reached" % (self.after_ms / 1000)
         return (
             "overload ended %.1f s, deadline %.1f s (left %.1f s + repair %.1f s at %d hops), "
-            "checked %.1f s: %d routed, %d cut off and detached; %d messages queued at the end"
+            "checked %.1f s: %d routed, %d cut off and detached, %d neither (%d routed "
+            "since the end: repairs, MP10's); %d messages queued at the end"
             % (
                 self.after_ms / 1000,
                 self.deadline / 1000,
@@ -1115,6 +1137,8 @@ class Recovery(Check):
                 self.checked / 1000,
                 self.routed,
                 self.detached,
+                self.unrouted,
+                self.repairing,
                 self.copies,
             )
         )

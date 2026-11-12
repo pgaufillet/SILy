@@ -497,24 +497,36 @@ class ResourcesTest(unittest.TestCase):
         self.assertIn("neighbours 5 > bound 4", found[0].detail)
 
 
-class RecoveryTest(unittest.TestCase):
-    """Overload: a board neither routed nor detached at the deadline is reported, so is a
-    message still queued at the end."""
+def strand(net, name):
+    """Make name detach now and never select a parent again (no candidate)."""
+    board = net.boards[name]
+    p = board.routing.parents
+    p.candidate_cost = lambda *args, **kwargs: None
+    p._events |= p.detach(net.now)
+    board.node.wake()
 
-    def run_line(self, names, defect=None, kill=None):
-        # The overload ends at FORMED; the run ends 15 s after the deadline.
+
+class RecoveryTest(unittest.TestCase):
+    """Overload: a board neither routed nor detached at the deadline, and not routed since
+    the overload ended, is reported, so is a message still queued at the end."""
+
+    def run_line(self, names, defect=None, kill=None, after=FORMED, stranded=None):
+        # The overload ends at after; the run ends 15 s after the deadline.
+        # stranded: the last board detaches for good at that time (ms).
         net = build((ROOT,) + names, line(*names))
         net.boards[ROOT].listen(APP)
-        check = Recovery(FORMED)
+        check = Recovery(after)
         checker = Checker(net, [check])
         if defect == "never":
             net.boards[names[-1]].routing.parents.candidate_cost = lambda n, now: None
         checker.start()
         if kill is not None:
-            net.at(FORMED, checker.switch_off, kill)
+            net.at(after, checker.switch_off, kill)
+        if stranded is not None:
+            net.at(stranded, strand, net, names[-1])
         if defect == "cycle":
-            net.at(FORMED + 1, keep_cycle, net, names[-2], names[-1])
-        deadline = FORMED + check.detect_ms() + repair_ms(checker, len(names))
+            net.at(after + 1, keep_cycle, net, names[-2], names[-1])
+        deadline = after + check.detect_ms() + repair_ms(checker, len(names))
         end = deadline + 15000
         last = net.boards[names[-1]]
         if defect == "queued":
@@ -522,7 +534,7 @@ class RecoveryTest(unittest.TestCase):
             for a, b in ((names[-2], names[-1]), (names[-1], names[-2])):
                 net.at(end - 6000, net.medium.cut, a, b)
             net.at(end - 6000, checker.links_changed)
-        if kill is None and defect in (None, "queued"):
+        if kill is None and stranded is None and defect in (None, "queued"):
             net.at(end - 5000, last.submit, APP, 1, ROOT, b"punch")
         net.run(end)
         checker.finish()
@@ -548,6 +560,23 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("connected, no route", found[0].detail)
         self.assertTrue(found[0].time >= deadline)
         self.assertEqual(check.routed, 1)
+
+    def test_outage_begun_in_the_overload_reported(self):
+        # B, routed, loses its route 20 s before the overload ends, for good.
+        found, check, net, deadline = self.run_line((A, B), after=FORMED + 20000, stranded=FORMED)
+        self.assertEqual([v.nodes for v in found], [(B,)])
+        self.assertIn("not routed since: connected, no route", found[0].detail)
+        self.assertTrue(found[0].time >= deadline)
+        self.assertEqual((check.routed, check.unrouted, check.repairing), (1, 1, 0))
+
+    def test_outage_begun_after_the_overload_not_reported(self):
+        # B, routed after the overload ended, loses its route 10 s later, for
+        # good: an ordinary repair (MP10's), counted, not a failure.
+        found, check, net, deadline = self.run_line((A, B), stranded=FORMED + 10000)
+        self.assertEqual(found, [])
+        self.assertTrue(deadline <= check.checked < deadline + 2000)
+        self.assertIsNone(net.boards[B].routing.parents.preferred)
+        self.assertEqual((check.routed, check.unrouted, check.repairing), (1, 1, 1))
 
     def test_cut_off_detached(self):
         # A dies: B and C, cut off, detach.
