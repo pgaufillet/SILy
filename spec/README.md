@@ -119,6 +119,9 @@ vCPUs) with `SPEC_JOBS=8`:
 5. Delete the instance (not only stop it: a stopped instance is still
    billed for its volume and its IP address).
 
+The simulator sweeps run on the same kind of instance (`make
+sweep-remote`, `tools/sweep_remote.sh`, README *Sweeps*).
+
 Each `cfg/<Module>_<case>.cfg` checks `<Module>.tla`. Its first line says
 what it checks; its second line is the expectation read by `run.sh`:
 `\* expect: holds` or `\* expect: violated <Name>`. Witnesses (`*_witness`)

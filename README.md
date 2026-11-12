@@ -158,6 +158,25 @@ shifts run as parallel jobs; `tests/seeds.py aggregate PATH...` prints
 the failing shifts per class with their Wilson interval. `make seeds`
 is unchanged.
 
+On a rented machine (`tools/sweep_remote.sh`; Ubuntu 24.04 or Debian 13
+with rsync, since the local MicroPython binary is copied there and needs
+glibc 2.38 and libffi 8; its header tells how to build the port there
+otherwise), e.g. 32 vCPUs:
+`make sweep-remote SWEEP_HOST=user@host SWEEP="--seeds 1-300"` copies
+`src sim tests tools` of this tree (label `current`) and of each tree of
+`SWEEP_TREES="LABEL=DIR ..."` (variants, e.g. other worktrees), checks
+that the remote interpreter gives the local `make simbench` digest and the
+same report of one run, then starts every run of the plan for every label
+under `nohup`, `SWEEP_REMOTE_JOBS` (32) at a time, each limited to an
+hour, recording into `~/sily-sweep/out/LABEL` (`SWEEP_DIR`; starting again
+resumes). `make sweep-remote-fetch SWEEP_HOST=user@host` tells the
+progress, then, once the sweep has ended, copies the records into
+`build/sweep-remote` and prints the failure rates per variant.
+`SWEEP_KIND=seeds` sweeps the scenario suites instead (`SWEEP`: the
+classes, `--class NAME`; `SWEEP_SHIFTS=0-999`, `SWEEP_CHUNK` shifts per
+job). Delete the instance afterwards, as for the TLC models
+(`spec/README.md`).
+
 ## Traces
 
 `make trace` records what simulated networks play (`sim/trace.py`), for

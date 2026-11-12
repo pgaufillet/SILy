@@ -88,12 +88,28 @@ LARGE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tes
 # --loads steady"), SWEEP_JOBS at a time, each recorded into SWEEP_OUT
 # (a run already recorded there is skipped: an interrupted sweep resumes),
 # then their failure rates with 95 % Wilson intervals; SWEEP_VARIANT and
-# SWEEP_REV label the records.
+# SWEEP_REV label the records. On a rented machine (tools/sweep_remote.sh):
+# SWEEP_HOST=user@host, SWEEP_DIR the remote directory, SWEEP_REMOTE_JOBS
+# runs at a time there, SWEEP_TREES further source trees as LABEL=DIR,
+# SWEEP_KIND large or seeds (then SWEEP: seeds.py classes and modules,
+# SWEEP_SHIFTS the shifts FIRST-LAST, SWEEP_CHUNK shifts per job), the
+# records fetched into SWEEP_FETCH.
 SWEEP ?=
 SWEEP_JOBS ?= 4
 SWEEP_OUT ?= build/sweep
 SWEEP_VARIANT ?= current
-SWEEP_REV ?= $(shell git describe --always --dirty 2>/dev/null)
+SWEEP_REV ?= $(shell git describe --always --dirty --exclude='*' 2>/dev/null)
+SWEEP_HOST ?=
+SWEEP_DIR ?= sily-sweep
+SWEEP_REMOTE_JOBS ?= 32
+SWEEP_TREES ?=
+SWEEP_KIND ?= large
+SWEEP_SHIFTS ?= 0-99
+SWEEP_CHUNK ?= 10
+SWEEP_FETCH ?= build/sweep-remote
+SWEEP_REMOTE = env MICROPYTHON=$(MICROPYTHON) MPY_LIB=$(MPY_LIB) REMOTE_DIR=$(SWEEP_DIR) \
+	FETCH=$(SWEEP_FETCH) JOBS=$(SWEEP_REMOTE_JOBS) KIND=$(SWEEP_KIND) SWEEP="$(SWEEP)" \
+	SHIFTS=$(SWEEP_SHIFTS) CHUNK=$(SWEEP_CHUNK) sh tools/sweep_remote.sh
 
 # Trace recording (`make trace`, tools/trace.py, sim/trace.py): TEST=MODULE[.CLASS]
 # records every network a test class of tests/ builds, RUN="SCENARIO TOPOLOGY
@@ -102,8 +118,8 @@ TEST ?=
 OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
-.PHONY: help check test seeds simbench large sweep sweep-summary trace lint firmware \
-	flash deploy \
+.PHONY: help check test seeds simbench large sweep sweep-summary sweep-remote \
+	sweep-remote-fetch trace lint firmware flash deploy \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -113,6 +129,8 @@ help:
 	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
 	@echo "make sweep SWEEP=\"<sweep-plan options>\" [SWEEP_JOBS=4 SWEEP_OUT=build/sweep]  failure rates"
 	@echo "make sweep-summary [SWEEP_OUT=build/sweep]  the failure rates of the records there"
+	@echo "make sweep-remote SWEEP_HOST=user@host SWEEP=\"...\" [SWEEP_TREES=\"LABEL=DIR ...\"]  start there"
+	@echo "make sweep-remote-fetch SWEEP_HOST=user@host  its progress; when done, the failure rates"
 	@echo "make trace TEST=M[.C]|RUN=\"...\" record traces of a test class or a large run [OUT=build/trace]"
 	@echo "make lint                 ruff (check, format), codespell, no logbook references"
 	@echo "make check                lint + test"
@@ -156,6 +174,14 @@ sweep:
 
 sweep-summary:
 	$(LARGE) aggregate $(SWEEP_OUT)
+
+sweep-remote:
+	@test -n "$(SWEEP_HOST)" || { echo "make sweep-remote SWEEP_HOST=user@host"; exit 2; }
+	$(SWEEP_REMOTE) start $(SWEEP_HOST) $(SWEEP_TREES)
+
+sweep-remote-fetch:
+	@test -n "$(SWEEP_HOST)" || { echo "make sweep-remote-fetch SWEEP_HOST=user@host"; exit 2; }
+	$(SWEEP_REMOTE) fetch $(SWEEP_HOST)
 
 trace:
 ifneq ($(strip $(TEST)),)
