@@ -47,6 +47,9 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 - `tools/trace.py` — traces of the networks of a test class or of one
   large-network run (`make trace`); `tools/traceview.html` — their offline
   viewer (one HTML file, opened in a browser).
+- `tools/campaign.py` — verdicts of a sweep or campaign from its records
+  and seeds lines: hard rules (`bounds`), and the seed-paired comparison
+  with a baseline or record identity (`compare`, `compare --exact`).
 - `tools/mesh_budget.py` — airtime budget and repair times of the mesh
   design (CPython 3), the source of the figures of `docs/MESH_DESIGN.md`.
 - `firmware/SILY_T3S3/` — firmware variant: the upstream MicroPython
@@ -151,7 +154,7 @@ without scenario event while connected, failure with
 the origin connected, recovery failed, the root alone with messages
 queued at the end of an overload run, a class 1 upward attempt to a hop
 other than the next hop, each check violated) as k/n with a 95 % Wilson
-interval, the per-message totals, and the commands reproducing the
+interval, the totals of the per-run counts, and the commands reproducing the
 failing runs. `make sweep-summary` prints that again;
 `tests/large.py aggregate --csv DIR...` gives it as CSV.
 

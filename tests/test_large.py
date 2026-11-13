@@ -2,7 +2,7 @@
 
 The 95 % Wilson interval on known values; the sweep plan's seed ranges,
 filters and order; the aggregation of synthetic records into per-run
-indicators and per-message totals, those of a field a record lacks (an
+indicators and per-run counts, those of a field a record lacks (an
 older record) not counted; a run's record names the boards still holding
 messages at the end and counts the attempts to a stale hop; a record
 already written is skipped (a sweep resumes); the load names round trip
@@ -121,7 +121,7 @@ class PlanTest(unittest.TestCase):
 
 
 class AggregateTest(unittest.TestCase):
-    """aggregate: groups, per-run indicators k of n, per-message totals, failing runs."""
+    """aggregate: groups, per-run indicators k of n, per-run counts, failing runs."""
 
     def test_groups_and_indicators(self):
         records = [make_record(seed=s) for s in range(1, 8)]
@@ -163,6 +163,12 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual(totals["spurious_retries"], (8 + 3, 9))
         self.assertEqual(totals["failed_class1"], (3, 9))
         self.assertEqual(totals["relay_detaches"], (2, 9))
+        self.assertEqual(totals["leaf_detaches"], (5, 9))
+        self.assertEqual(totals["failed_detached"], (2, 9))
+        self.assertEqual(totals["lost"], (2, 9))
+        self.assertEqual(totals["delivered"], (8 * 100, 9))  # absent from seed 8: 0
+        self.assertEqual(totals["dup_acks"], (8 * 1 + 4, 9))
+        self.assertEqual(totals["mp10_accepted"], (0, 9))  # no overload run
         self.assertEqual(g["failing"], ["forming star 8 30 steady"])
         self.assertEqual(g["revs"], ["abc1234"])
 

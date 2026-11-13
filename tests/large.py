@@ -88,10 +88,13 @@ relay detach, the same connected and without scenario event, failed
 with its origin connected, recovery failed, the root alone with messages
 queued at the end, an attempt to a hop other than the next hop; then
 each check violated), the runs k of n, the rate and its 95 % Wilson
-interval (`wilson`); for the per-message counts (`TOTALS`) their totals
-and means per run; then the failing runs (``--csv``: one row per group
-and indicator). A record written before a field existed counts as not
-applicable for the indicators and totals of that field.
+interval (`wilson`); for the per-run counts (`TOTALS`: acknowledgements,
+class 1 outcomes and failures by origin, false floats, detaches,
+attempts to a stale hop) their totals and means per run; then the
+failing runs (``--csv``: one row per group and indicator). A record
+written before a field existed counts as not applicable for the
+indicators and totals of that field. `tools/campaign.py` compares
+campaigns on the same indicators and counts.
 ``summary`` reads only the NAME.txt reports.
 
 Traffic (§15, scaled to the run): 1000 punches per hour over the whole
@@ -707,15 +710,28 @@ INDICATORS = (
     ("stale_hop", lambda r: _positive(_field(r, "acks", "stale_hop"))),
 )
 
-# Per-message totals: name, count(record) (None: not in the record, the run not counted).
+# Per-run counts: name, count(record) (None: not in the record, the run not counted).
 TOTALS = (
     ("late_acks", lambda r: r["acks"]["late"]),
     ("passive_acks", lambda r: r["acks"]["passive"]),
     ("spurious_retries", lambda r: r["acks"]["spurious"]),
     ("failed_class1", lambda r: r["delivery"].get("failed", 0)),
     ("failed_class1_connected", lambda r: r["failures"]["connected"]),
+    ("failed_detached", lambda r: r["failures"]["detached"]),
+    ("failed_cut_off", lambda r: r["failures"]["cut_off"]),
     ("false_floats", lambda r: r["floats"]["count"]),
+    ("floats_by_g", lambda r: r["floats"]["by_g"]),
+    ("ungrounded_s", lambda r: r["floats"]["ungrounded_s"]),
     ("relay_detaches", lambda r: r["detaches"]["relay"]),
+    ("leaf_detaches", lambda r: r["detaches"]["leaf"]),
+    ("delivered", lambda r: r["delivery"].get("delivered", 0)),
+    ("submitted", lambda r: r["delivery"].get("submitted", 0)),
+    ("at_root", lambda r: r["delivery"].get("at_root", 0)),
+    ("refused", lambda r: r["delivery"].get("refused", 0)),
+    ("lost", lambda r: r["delivery"].get("lost", 0)),
+    ("late_delivery", lambda r: r["delivery"].get("late", 0)),
+    ("dup_acks", lambda r: r["acks"]["duplicates"]),
+    ("mp10_accepted", lambda r: (r["accepted"] or {}).get("mp10", 0)),
     ("stale_hop_attempts", lambda r: _field(r, "acks", "stale_hop")),
     ("stale_hop_messages", lambda r: _field(r, "acks", "stale_hop_messages")),
 )
