@@ -12,9 +12,10 @@ loss of grounding injected without a scenario event is counted, one after
 an event is not. The metrics (never a violation): a detach is a relay's
 when a child prefers the node, a leaf's otherwise (`Detaches`); a forward
 held past its sender's relay timeout is a late passive acknowledgement,
-held past the sender's retry a duplicate before the copy went on air
-(`Acknowledgements`); a failure reported to its sender is split by the
-origin's state (`Delivery.failures`).
+held past the sender's retry a duplicate before the copy went on air, an
+attempt of a message queued before a parent switch an attempt to a hop
+other than the next hop (`Acknowledgements`); a failure reported to its
+sender is split by the origin's state (`Delivery.failures`).
 """
 
 import unittest
@@ -427,6 +428,41 @@ class AcknowledgementsTest(unittest.TestCase):
         self.assertEqual((check.duplicates, check.spurious), (1, 1))
         self.assertEqual(check.late, 0)
 
+    def test_retry_to_the_next_hop_not_stale(self):
+        # B retries towards A, still its preferred parent: no stale hop.
+        check = self.run_line(3000)
+        self.assertEqual(check.duplicates, 1)  # the retry reached A
+        self.assertEqual((check.stale_hop, len(check.stale_messages)), (0, 0))
+
+    def test_queued_message_after_a_parent_switch_stale(self):
+        # B, below A and C, queues a message towards its preferred parent and
+        # switches to the other one before the frame goes on air: the
+        # message keeps its hop, an attempt to a hop other than the next hop.
+        net = build((ROOT, A, C, B), [(ROOT, A), (ROOT, C), (A, B), (C, B)])
+        net.boards[ROOT].listen(APP)
+        check = Acknowledgements()
+        checker = Checker(net, [check])
+        checker.start()
+        board = net.boards[B]
+        parents = board.routing.parents
+        seen = []
+
+        def switch():
+            seen.append(parents.preferred)
+            seen.append(board.submit(APP, 1, ROOT, b"punch"))
+            parents._select = lambda now: 0  # no selection of its own from now on
+            parents._set_members([C if seen[0] == A else A])
+
+        net.at(FORMED, switch)
+        net.run(FORMED + 20000)
+        checker.finish()
+        self.assertEqual(checker.violations, [])
+        self.assertIn(seen[0], (A, C))
+        self.assertNotEqual(parents.preferred, seen[0])
+        self.assertEqual(net.boards[ROOT].received(APP), [b"punch"])
+        self.assertEqual(check.stale_hop, 1)  # its one attempt, to the former parent
+        self.assertEqual(check.stale_messages, set([(B, ROOT, APP, seen[1])]))
+
 
 class DutyCycleTest(unittest.TestCase):
     """MP9: a board transmitting beyond its budget in a window is reported."""
@@ -546,6 +582,7 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(check.deadline, deadline)
         self.assertTrue(deadline <= check.checked < deadline + 2000)
         self.assertEqual((check.routed, check.detached, check.copies), (2, 0, 0))
+        self.assertEqual(check.nodes, [])
         self.assertEqual([r[3] for r in net.boards[ROOT].inbox if r[2] == APP], [b"punch"])
 
     def test_deadline_from_the_design_periods(self):
@@ -594,7 +631,7 @@ class RecoveryTest(unittest.TestCase):
         found, check, net, deadline = self.run_line((A, B), "queued")
         self.assertEqual([v.nodes for v in found], [(B,)])
         self.assertIn("still queued at the end (ports %d)" % APP, found[0].detail)
-        self.assertEqual(check.copies, 1)
+        self.assertEqual((check.copies, check.nodes), (1, [B]))
 
 
 def unground(net, name):

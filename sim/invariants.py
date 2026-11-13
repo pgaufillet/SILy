@@ -55,7 +55,7 @@ chain at once, before the node notices).
 
 from mesh.airtime import snr_limit_x10
 from mesh.dodag import DESYNC_SLOTS, HOLD_IMIN, WINDOW_SLOTS
-from mesh.frame import BROADCAST, RANK_INFINITE, ROOT
+from mesh.frame import BROADCAST, FIRST_HOP, RANK_INFINITE, ROOT, UPWARD
 from mesh.link import SENDERS
 from mesh.neighbours import CAPACITY, MARGIN_LOW, silence_ms
 from mesh.parents import SIZE as PARENT_SET
@@ -1033,7 +1033,8 @@ class Recovery(Check):
     At the end of the run (``drain`` after the last submission, the suite's
     5 periods: holding of 2 periods, then the error's, MP15), no class 1 or
     2 message left in any queue (waiting or held included): nothing still
-    circulating. ``deadline`` is known from the first sample at or after
+    circulating; ``copies`` counts those left, ``nodes`` names the boards
+    holding them. ``deadline`` is known from the first sample at or after
     after_ms; a run ending before it is judged at its end.
     """
 
@@ -1049,6 +1050,7 @@ class Recovery(Check):
         self.unrouted = 0
         self.repairing = 0
         self.copies = 0
+        self.nodes = []  # names of the boards with messages queued at the end
         self.since_end = set()  # names routed at a sample after after_ms
 
     def detect_ms(self):
@@ -1113,6 +1115,7 @@ class Recovery(Check):
             held = b.engine.queue.select(lambda m: m.cls, True)
             if held:
                 self.copies += len(held)
+                self.nodes.append(b.name)
                 ports = sorted(set(m.port for _, m in held))
                 self.violate(
                     now,
@@ -1349,6 +1352,12 @@ class Acknowledgements(Check):
     ``spurious``, those arriving while the node's own copy has not gone on
     air yet (its ``Reliable.sent`` wrapped too): retries made because the
     node forwarded too slowly, not because an acknowledgement was lost.
+    In that wrapper too: the attempts of a class 1 upward message to a
+    link destination other than the node's next hop for it when the frame
+    goes on air (``engine.next_hop``, None included: a queued message
+    keeps its hop for its remaining attempts after a parent switch),
+    ``stale_hop``, and the distinct messages concerned, network-wide
+    (``stale_messages``, their identities).
     """
 
     name = "acks"
@@ -1359,6 +1368,8 @@ class Acknowledgements(Check):
         self.late = 0
         self.duplicates = 0
         self.spurious = 0
+        self.stale_hop = 0
+        self.stale_messages = set()
         for b in checker.nodes():
             self._watch(b)
 
@@ -1385,12 +1396,18 @@ class Acknowledgements(Check):
             return overheard(header, messages, now)
 
         def watched_sent(sel, counter, now):
+            dest = sel.dest
             for j in range(sel.count):
                 m = sel.messages[j]
                 if m.cls:
-                    key = identity(m, own, sel.dest)
+                    key = identity(m, own, dest)
                     if key is not None:
                         on_air.add(key)
+                    if m.cls == 1 and (m.mode == UPWARD or m.mode == FIRST_HOP):
+                        route = engine.next_hop
+                        if dest != (route(m) if route is not None else None):
+                            self.stale_hop += 1
+                            self.stale_messages.add(key)
             return sent(sel, counter, now)
 
         def watched_repeated(msg, header, now):
@@ -1409,12 +1426,15 @@ class Acknowledgements(Check):
 
     def stats(self):
         return (
-            "passive %d, late %d; duplicates at the nodes %d, %d before the copy went on air"
+            "passive %d, late %d; duplicates at the nodes %d, %d before the copy went on air; "
+            "upward attempts to a hop other than the next hop %d (%d messages)"
             % (
                 self.passive,
                 self.late,
                 self.duplicates,
                 self.spurious,
+                self.stale_hop,
+                len(self.stale_messages),
             )
         )
 

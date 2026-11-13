@@ -61,8 +61,22 @@ DEPLOY_ITEMS = $(notdir $(wildcard src/*))
 
 LINT_PATHS = src sim tests tools docs firmware Makefile README.md
 
-# Runs of the scenario suites for `make seeds` (seed shifts 0 to SEEDS - 1).
-SEEDS ?= 24
+# Scenario suites on several seeds (`make seeds`, tests/seeds.py): seed
+# shifts SEEDS_FIRST to SEEDS_FIRST + SEEDS - 1 in chunks of SEEDS_CHUNK
+# shifts, SEEDS_JOBS chunks at a time, their JSON lines into SEEDS_OUT, then
+# the failure rates per test class and each failing (shift, class, test)
+# with the command reproducing it alone; fails on a failing, missing or
+# crashed shift. SEEDS_CLASS: only these test classes (CLASS or
+# MODULE.CLASS). SEEDS_JOBS=1: the shifts in turn, with the unittest output.
+SEEDS ?= 500
+SEEDS_FIRST ?= 0
+SEEDS_JOBS ?= 8
+SEEDS_CHUNK ?= 5
+SEEDS_CLASS ?=
+SEEDS_OUT ?= build/seeds
+SEEDS_PY = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/seeds.py
+SEEDS_OPTIONS = $(foreach c,$(SEEDS_CLASS),--class $(c))
+SEEDS_JOB = $(SEEDS_PY) "$$2" --first "$$1" --json $(SEEDS_OPTIONS)
 
 # Simulator benchmark (`make simbench`): grid of NODES boards for MINUTES
 # simulated minutes from SEED.
@@ -124,7 +138,7 @@ TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) too
 
 help:
 	@echo "make test                 host tests on the MicroPython unix port"
-	@echo "make seeds [SEEDS=24]     scenario suites on SEEDS seeds (not part of check)"
+	@echo "make seeds [SEEDS=500 SEEDS_JOBS=8]  scenario suites on SEEDS seed shifts (not in check)"
 	@echo "make simbench             simulator benchmark: wall clock, digest (NODES, MINUTES, SEED)"
 	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
 	@echo "make sweep SWEEP=\"<sweep-plan options>\" [SWEEP_JOBS=4 SWEEP_OUT=build/sweep]  failure rates"
@@ -152,7 +166,15 @@ test:
 	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/run.py tests
 
 seeds:
-	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tests/seeds.py $(SEEDS)
+ifeq ($(strip $(SEEDS_JOBS)),1)
+	$(SEEDS_PY) $(SEEDS) --first $(SEEDS_FIRST) $(SEEDS_OPTIONS)
+else
+	@mkdir -p $(SEEDS_OUT) && rm -f $(SEEDS_OUT)/seeds_*.jsonl && start=$$(date +%s) && \
+	$(SEEDS_PY) plan $(SEEDS) $(SEEDS_CHUNK) --first $(SEEDS_FIRST) | xargs -P $(SEEDS_JOBS) -L 1 \
+		sh -c '$(SEEDS_JOB) >$(SEEDS_OUT)/seeds_$$1.jsonl' seeds; \
+	$(SEEDS_PY) aggregate --expect $(SEEDS_FIRST)-$$(($(SEEDS_FIRST) + $(SEEDS) - 1)) \
+		$(SEEDS_OUT); status=$$?; echo "seeds: $$(($$(date +%s) - start)) s"; exit $$status
+endif
 
 simbench:
 	MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/simbench.py $(NODES) $(MINUTES) $(SEED)

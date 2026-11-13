@@ -2,15 +2,21 @@
 
 The 95 % Wilson interval on known values; the sweep plan's seed ranges,
 filters and order; the aggregation of synthetic records into per-run
-indicators and per-message totals; a record already written is skipped
-(a sweep resumes); the load names round trip through a run's name, and
-only the ``s15`` load makes the star an overload case.
+indicators and per-message totals, those of a field a record lacks (an
+older record) not counted; a run's record names the boards still holding
+messages at the end and counts the attempts to a stale hop; a record
+already written is skipped (a sweep resumes); the load names round trip
+through a run's name, and only the ``s15`` load makes the star an
+overload case.
 """
 
 import os
 import unittest
 
 import large
+
+from mesh.frame import ROOT
+from sim import invariants
 
 TMP = "build/test_large.tmp"  # relative to the repository root, where the tests run
 
@@ -170,9 +176,75 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual(found["recovery_failed"], (1, 2))
         self.assertEqual(found["failed"], (1, 2))
 
+    def test_fields_absent_not_counted(self):
+        # Records written before the root-queue and stale-hop fields: not applicable.
+        old = make_record(load="s15", status="FAIL", recovery={"violations": 1})
+        acks = {"passive": 1, "late": 0, "duplicates": 0, "spurious": 0}
+        root = make_record(
+            load="s15",
+            seed=2,
+            status="FAIL",
+            recovery={"violations": 1, "nodes": ["0000"]},
+            acks=dict(acks, stale_hop=5, stale_hop_messages=2),
+        )
+        relay = make_record(
+            load="s15",
+            seed=3,
+            status="FAIL",
+            recovery={"violations": 2, "nodes": ["0000", "0003"]},
+            acks=dict(acks, stale_hop=0, stale_hop_messages=0),
+        )
+        g = large.aggregate([old, root, relay])[0]
+        found = dict((n, (k, m)) for n, k, m in g["indicators"])
+        self.assertEqual(found["root_queue_only"], (1, 2))
+        self.assertEqual(found["stale_hop"], (1, 2))
+        totals = dict((name, (t, n)) for name, t, n in g["totals"])
+        self.assertEqual(totals["stale_hop_attempts"], (5, 2))
+        self.assertEqual(totals["stale_hop_messages"], (2, 2))
+        self.assertEqual(totals["late_acks"], (2, 3))
+
 
 class Stop(Exception):
     pass
+
+
+class Stub:
+    def __init__(self, **fields):
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+
+class ResultTest(unittest.TestCase):
+    """result: the boards still holding messages at the end, the attempts to a stale hop."""
+
+    def test_recovery_nodes_and_stale_hop(self):
+        r = large.Run("lossy", "star", 4, 30, "s15")
+        r.recovery = invariants.Recovery(r.after_ms)
+        r.recovery.nodes = [0x0102, ROOT]  # in the order of the boards
+        r.recovery.copies = 3
+        floats = invariants.Floats()
+        floats.count, floats.by_g, floats.ungrounded_ms = 0, 0, 0
+        detaches = invariants.Detaches()
+        detaches.relay, detaches.relay_false, detaches.leaf = 0, 0, 0
+        acks = invariants.Acknowledgements()
+        acks.passive, acks.late, acks.duplicates, acks.spurious = 1, 0, 0, 0
+        acks.stale_hop = 4
+        acks.stale_messages = set([(1, ROOT, 20, 5), (2, ROOT, 20, 7)])
+        r.checker = Stub(checks=[floats, detaches, acks, r.recovery])
+        r.delivery = Stub(counts={"submitted": 2}, failures={"connected": 0})
+        r.violations = r.failing = r.accepted = []
+        r.refused = r.failed = 0
+        r.wall_ms = 1000
+        record = large.result(r)
+        self.assertEqual(record["recovery"]["nodes"], ["0000", "0102"])
+        self.assertEqual(record["recovery"]["queued"], 3)
+        self.assertEqual(
+            (record["acks"]["stale_hop"], record["acks"]["stale_hop_messages"]), (4, 2)
+        )
+        r.recovery.nodes = [ROOT]
+        self.assertEqual(large._root_queue_only(large.result(r)), True)
+        r.recovery.nodes = []
+        self.assertEqual(large._root_queue_only(large.result(r)), False)
 
 
 class RecordTest(unittest.TestCase):

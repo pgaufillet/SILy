@@ -108,13 +108,10 @@ plan() {
     label=$1
     if [ "$KIND" = seeds ]; then
         first=${SHIFTS%-*} last=${SHIFTS#*-}
-        k=$first
-        while [ "$k" -le "$last" ]; do
-            n=$CHUNK
-            [ $((k + n - 1)) -le "$last" ] || n=$((last - k + 1))
-            echo "$label $k $n${SWEEP:+ $SWEEP}"  # no trailing blank (xargs -L)
-            k=$((k + n))
-        done
+        mp . tests/seeds.py plan $((last - first + 1)) "$CHUNK" --first "$first" |
+            while read -r k n; do
+                echo "$label $k $n${SWEEP:+ $SWEEP}"  # no trailing blank (xargs -L)
+            done
     else
         sed "s/^/$label /" "$tmp/plan.lst"
     fi

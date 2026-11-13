@@ -75,18 +75,23 @@ its record (a sweep resumes), writes NAME.json (`result`: violations by
 check, the strict verdict (no violation at all, overload runs too),
 delivery counts, failures split by their origin's state, false floats,
 relay and leaf detaches, passive and late acknowledgements, duplicates
-before the copy went on air, recovery details (among them the boards
-without a route at its deadline, failing or in repair), wall time, and
-the ``SWEEP_VARIANT`` and ``SWEEP_REV`` of the environment), the report
-NAME.txt only when the run fails, and prints the result line.
+before the copy went on air, class 1 upward attempts to a hop other than
+the next hop and their messages, recovery details (among them the boards
+without a route at its deadline, failing or in repair, and those with
+messages still queued at the end), wall time, and the ``SWEEP_VARIANT``
+and ``SWEEP_REV`` of the environment), the report NAME.txt only when the
+run fails, and prints the result line.
 ``aggregate DIR...`` groups the records by variant, load, scenario,
 topology and nodes and prints, for each per-run indicator (`INDICATORS`:
 failed, any violation, silent loss, duplicate delivered, false float,
 relay detach, the same connected and without scenario event, failed
-with its origin connected, recovery failed; then each check violated),
-the runs k of n, the rate and its 95 % Wilson interval (`wilson`); for
-the per-message counts (`TOTALS`) their totals and means per run; then
-the failing runs (``--csv``: one row per group and indicator).
+with its origin connected, recovery failed, the root alone with messages
+queued at the end, an attempt to a hop other than the next hop; then
+each check violated), the runs k of n, the rate and its 95 % Wilson
+interval (`wilson`); for the per-message counts (`TOTALS`) their totals
+and means per run; then the failing runs (``--csv``: one row per group
+and indicator). A record written before a field existed counts as not
+applicable for the indicators and totals of that field.
 ``summary`` reads only the NAME.txt reports.
 
 Traffic (§15, scaled to the run): 1000 punches per hour over the whole
@@ -118,6 +123,7 @@ import sys
 import time
 
 from mesh.dodag import default_info
+from mesh.frame import ROOT
 from mesh.profile import EU_869
 from mesh.routing import Routing
 from sim import invariants, topologies
@@ -586,6 +592,7 @@ def result(r):
             "unrouted": c.unrouted,
             "repairing": c.repairing,
             "queued": c.copies,
+            "nodes": ["%04x" % n for n in sorted(c.nodes)],
             "violations": sum(1 for v in r.violations if v.check == c.name),
         }
     accepted = None
@@ -620,6 +627,8 @@ def result(r):
             "late": acks.late,
             "duplicates": acks.duplicates,
             "spurious": acks.spurious,
+            "stale_hop": acks.stale_hop,
+            "stale_hop_messages": len(acks.stale_messages),
         },
         "recovery": recovery,
         "accepted": accepted,
@@ -663,6 +672,23 @@ def wilson(k, n, z=Z95):
     return low, high
 
 
+def _field(record, part, name):
+    # record[part][name], None when absent (a record written before the field existed).
+    d = record.get(part)
+    return None if d is None else d.get(name)
+
+
+def _positive(n):
+    return None if n is None else n > 0
+
+
+def _root_queue_only(record):
+    # Only the root holding messages at the end of an overload run (None: not one,
+    # or a record without the field).
+    nodes = _field(record, "recovery", "nodes")
+    return None if nodes is None else nodes == ["%04x" % ROOT]
+
+
 # Per-run indicators: name, test(record) -> True, False, or None (not applicable).
 INDICATORS = (
     ("failed", lambda r: r["status"] == "FAIL"),
@@ -677,9 +703,11 @@ INDICATORS = (
         "recovery_failed",
         lambda r: None if r["recovery"] is None else r["recovery"]["violations"] > 0,
     ),
+    ("root_queue_only", _root_queue_only),  # recovery failed on the root's queue alone
+    ("stale_hop", lambda r: _positive(_field(r, "acks", "stale_hop"))),
 )
 
-# Per-message totals: name, count(record).
+# Per-message totals: name, count(record) (None: not in the record, the run not counted).
 TOTALS = (
     ("late_acks", lambda r: r["acks"]["late"]),
     ("passive_acks", lambda r: r["acks"]["passive"]),
@@ -688,6 +716,8 @@ TOTALS = (
     ("failed_class1_connected", lambda r: r["failures"]["connected"]),
     ("false_floats", lambda r: r["floats"]["count"]),
     ("relay_detaches", lambda r: r["detaches"]["relay"]),
+    ("stale_hop_attempts", lambda r: _field(r, "acks", "stale_hop")),
+    ("stale_hop_messages", lambda r: _field(r, "acks", "stale_hop_messages")),
 )
 
 
@@ -732,7 +762,10 @@ def aggregate(records):
         for check in sorted(checks):
             k = sum(1 for r in runs if r["violations"].get(check))
             indicators.append((check, k, len(runs)))
-        totals = [(name, sum(count(r) for r in runs), len(runs)) for name, count in TOTALS]
+        totals = []
+        for name, count in TOTALS:
+            counts = [n for n in (count(r) for r in runs) if n is not None]
+            totals.append((name, sum(counts), len(counts)))
         failing = []
         for r in runs:
             if r["status"] == "FAIL":
@@ -776,11 +809,12 @@ def print_aggregate(groups, csv=False):
                 )
         if csv:
             for name, total, n in g["totals"]:
-                print("%s,%s,%d,%d,%.5f,," % (key, name, total, n, total / n))
+                if n:
+                    print("%s,%s,%d,%d,%.5f,," % (key, name, total, n, total / n))
             continue
         print(
             "   totals: "
-            + ", ".join("%s %d (%.2f/run)" % (name, t, t / n) for name, t, n in g["totals"])
+            + ", ".join("%s %d (%.2f/run)" % (name, t, t / n) for name, t, n in g["totals"] if n)
         )
         for name in g["failing"]:
             print("   failed: %s" % _command(name))

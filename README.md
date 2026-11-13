@@ -67,6 +67,7 @@ make test                      # host tests on the MicroPython unix port
 make lint                      # ruff check, ruff format --check, codespell
 make check                     # lint + test
 make simbench NODES=30         # simulator wall clock for 10 simulated minutes
+make seeds                     # scenario suites on 500 seed shifts, about 10 min (not in check)
 make large                     # large-network invariants, about 7 min (not in check)
 make large RUN="lossy star 2"  # one run of it, with its full report
 make large RUN="lossy star 2 30 steady"  # the same at another load
@@ -147,17 +148,29 @@ report of a failing run beside it), then prints per variant, load,
 scenario, topology and size the runs with each indicator (failed, any
 violation, silent loss, duplicate, false float, relay detach, the same
 without scenario event while connected, failure with
-the origin connected, recovery failed, each check violated) as k/n with a
-95 % Wilson interval, the per-message totals, and the commands reproducing
-the failing runs. `make sweep-summary` prints that again;
+the origin connected, recovery failed, the root alone with messages
+queued at the end of an overload run, a class 1 upward attempt to a hop
+other than the next hop, each check violated) as k/n with a 95 % Wilson
+interval, the per-message totals, and the commands reproducing the
+failing runs. `make sweep-summary` prints that again;
 `tests/large.py aggregate --csv DIR...` gives it as CSV.
 
-The scenario suites sweep the same way: `tests/seeds.py COUNT --first K
---class NAME --json` runs shifts K to K + COUNT - 1 of the named test
-classes and prints one JSON line per shift and class, so that ranges of
-shifts run as parallel jobs; `tests/seeds.py aggregate PATH...` prints
-the failing shifts per class with their Wilson interval. `make seeds`
-is unchanged.
+The scenario suites run on many seeds too: `make seeds` (`tests/seeds.py`)
+plays the test classes of the DODAG, routing and class 1 scenario modules
+on seed shifts 0 to `SEEDS` - 1 (default 500; shift k adds 1000 k to the
+seed of every network, shift 0 is `make test`'s), in chunks of
+`SEEDS_CHUNK` shifts, `SEEDS_JOBS` chunks at a time (default 8: about 10
+minutes on the development host), each chunk writing one JSON line per
+shift and class (verdict, failures, run time) into `build/seeds`
+(`SEEDS_OUT`). It then prints the failing shifts per class with their
+95 % Wilson interval and each failing (shift, class, test, last message)
+with the command reproducing it alone (`make seeds SEEDS=1 SEEDS_FIRST=k
+SEEDS_CLASS=MODULE.CLASS SEEDS_JOBS=1`: the shifts in turn, with the
+unittest output), and fails with status 1 when a shift failed, 2 when a
+shift is missing or a chunk crashed. Its parts serve other job runners:
+`tests/seeds.py COUNT --first K --class NAME --json` (a chunk),
+`tests/seeds.py plan COUNT CHUNK --first K` (the chunks) and
+`tests/seeds.py aggregate --expect FIRST-LAST PATH...` (the verdict).
 
 On a rented machine (`tools/sweep_remote.sh`; Ubuntu 24.04 or Debian 13
 with rsync, since the local MicroPython binary is copied there and needs
