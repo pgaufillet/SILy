@@ -17,11 +17,26 @@ board transmits, airtime accounted vs measured), errors (authentication
 failures with a wrong key, CRC errors from cut frames), filter (neighbour
 filter), routing (A root, B a node of its DODAG: B attaches at rank 8 and
 its presence, topology and node information reach A; not in the default
-set). The boards are left at the REPL, idle.
+set), reply and reply_routing (not in the default set: the root's immediate
+reply, below). The boards are left at the REPL, idle.
+
+Reply turnaround (``--only reply``, one SF per run with ``--sf``; option
+``--count``, default by SF in `REPLY_PLAN`): A is the root (address 0), B a
+node (address 2), both with the bench's turnaround timing (``timed``). B
+sends probes (``probe``: a relayed upward message and its own presence, which
+the root answers at once, MESH_DESIGN §8) at random gaps; the root forces a
+collection in every ``--gc-every``-th turnaround. Samples (``turn``) are
+paired by B's frame counter: the root's measure (RxDone IRQ to SetTx), B's
+estimate (TxDone to the reply's RxDone minus its time on air) and what was
+left of B's reply window. Natural and forced-collection samples are kept
+apart, against the backoff slot (the design's turnaround) and two slots (the
+reply window's slack). ``reply_routing``: the same with both boards running
+the mesh routing (the root prints each presence received).
 """
 
 import argparse
 import json
+import math
 import sys
 import time
 
@@ -580,6 +595,56 @@ def test_filter(a, b, res, sf):
     print(json.dumps(out, indent=1))
 
 
+def test_reply(a, b, res, sf, count=None, gc_every=10, routing=False, presence_s=10):
+    name = "reply_routing" if routing else "reply"
+    print("== %s: the root's immediate reply turnaround, SF%d" % (name, sf))
+    plan, gap_min, gap_max = REPLY_PLAN[sf]
+    count = count or plan
+    a_opts = {"timed": True, "gc_every": gc_every}
+    b_opts = {"timed": True}
+    if routing:
+        a_opts.update(routing=True, presence_s=presence_s)
+        b_opts["routing"] = True
+    ra = a.start_bench(0, sf=sf, **a_opts)
+    rb = b.start_bench(2, sf=sf, **b_opts)
+    out = {"ready_a": ra, "ready_b": rb, "count": count, "gap_ms": [gap_min, gap_max]}
+    out["gc_every"] = gc_every
+    print("duty_used_ms A %s B %s" % (ra["duty_used_ms"], rb["duty_used_ms"]))
+    if routing:
+        out["presence_s"] = presence_s
+        for _ in range(4 * presence_s):
+            route = json.loads(b.command("route", "ROUTE").split(None, 1)[1])
+            if route["attached"]:
+                break
+            a.pump(1.0)
+        out["route_b"] = route
+    a.pump(0.5)
+    a.command("zero", "ZERO")
+    b.command("zero", "ZERO")
+    t0 = time.time()
+    sb = len(b.lines)
+    b.send("probe 0 %d %d %d" % (count, gap_min, gap_max))
+    _pump_until((a, b), b, "DONE probe", count * gap_max / 1000 + 60, sb)
+    for _ in range(40):  # the last reply, its window
+        a.pump(0.05)
+        b.pump(0.05)
+    out["duration_s"] = round(time.time() - t0, 1)
+    turn_a = json.loads(a.command("turn", "TURN", 20).split(None, 1)[1])
+    turn_b = json.loads(b.command("turn", "TURN", 20).split(None, 1)[1])
+    out["turn_a"] = turn_a
+    out["turn_b"] = turn_b
+    out["stats_a"] = a.stats()
+    out["stats_b"] = b.stats()
+    out["cpu_a"] = cpu_summary(out["stats_a"])
+    out["cpu_b"] = cpu_summary(out["stats_b"])
+    if routing:
+        out["route_a"] = json.loads(a.command("route", "ROUTE").split(None, 1)[1])
+    _stop(a, b)
+    out["stats"] = reply_stats(turn_a, turn_b, sf)
+    res[name] = out
+    print(json.dumps({"stats": out["stats"], "cpu_a": out["cpu_a"]}, indent=1))
+
+
 def test_routing(a, b, res, sf, presence_s=10):
     print("== routing: A root (address 0), B a node (address 2) of its DODAG")
     ra = a.start_bench(0, sf=sf, routing=True, presence_s=presence_s)
@@ -610,6 +675,133 @@ def test_routing(a, b, res, sf, presence_s=10):
     print(json.dumps({k: out[k] for k in ("attach_s", "presence", "presences")}, indent=1))
 
 
+# Reply turnaround, per SF: samples, gap between probes (ms, uniform range).
+REPLY_PLAN = {7: (400, 400, 700), 8: (150, 600, 900), 9: (150, 1000, 1400)}
+REPLY_FRAME = 47  # bytes of an acknowledgement of 8 entries (mesh.link.REPLY_FRAME)
+SLOT_FRAME = 17  # bytes of the backoff slot's frame (mesh.link.PRESENCE_FRAME)
+_FORCED_GC = 1  # turnaround sample flags (sily.bench)
+_HEAP_SHRANK = 2
+_RESERVED = 4
+_OTHER_TX = 8
+
+
+def quantiles(values):
+    """n, min, median, p95, p99, max of values (nearest rank), or {"n": 0}."""
+    v = sorted(values)
+    n = len(v)
+    if not n:
+        return {"n": 0}
+
+    def rank(q):
+        return v[max(0, math.ceil(q * n / 100) - 1)]
+
+    return {
+        "n": n,
+        "min": v[0],
+        "median": rank(50),
+        "p95": rank(95),
+        "p99": rank(99),
+        "max": v[-1],
+    }
+
+
+def _ms(values):
+    return [round(x / 1000, 2) for x in values]
+
+
+def _pump_until(boards, board, prefix, timeout, since):
+    # Read every board (a blocked console stalls its board) until board prints prefix.
+    end = time.time() + timeout
+    while True:
+        for i in range(since, len(board.lines)):
+            if board.lines[i][1].startswith(prefix):
+                return board.lines[i][1]
+        if time.time() > end:
+            raise TimeoutError("%s: no %s line" % (board.name, prefix))
+        for other in boards:
+            other.pump(0.02)
+
+
+def reply_stats(root, node, sf):
+    """Statistics of the reply turnaround from the TURN dicts of the root and the node."""
+    slot = math.ceil(toa_ms(SLOT_FRAME, sf))
+    window = math.ceil(toa_ms(REPLY_FRAME, sf)) + 2 * slot
+    r = {
+        c: (t, s, f)
+        for c, t, s, f in zip(root["counter"], root["turn_us"], root["service_us"], root["flags"])
+    }
+    b = {c: (e, m) for c, e, m in zip(node["counter"], node["estimate_us"], node["margin_ms"])}
+    paired = [c for c in root["counter"] if c in b]
+    forced = {c for c, (_, _, f) in r.items() if f & _FORCED_GC}
+    out = {"slot_ms": slot, "window_ms": window, "slack_ms": 2 * slot}
+    for name, keep in (("natural", False), ("forced_gc", True)):
+        cs = [c for c in r if (c in forced) == keep]
+        bs = [c for c in b if c in r and (c in forced) == keep]
+        out[name] = {
+            "root_ms": quantiles(_ms(r[c][0] for c in cs)),
+            "node_estimate_ms": quantiles(_ms(b[c][0] for c in bs)),
+            "node_margin_ms": quantiles(b[c][1] for c in bs),
+            "root_minus_node_ms": quantiles(_ms(r[c][0] - b[c][0] for c in bs)),
+            "service_ms": quantiles(_ms(r[c][1] for c in cs)),
+        }
+    # Per sample, the larger of the two measures (the root's is low when its IRQ is late).
+    worst = [max(r[c][0], b[c][0]) if c in b else r[c][0] for c in r]
+    worst += [b[c][0] for c in b if c not in r]
+    margins = [m for _, m in b.values()]
+    out["all"] = {
+        "worst_ms": quantiles(_ms(worst)),
+        "above_1_slot": sum(1 for w in worst if w > slot * 1000),
+        "above_2_slots": sum(1 for w in worst if w > 2 * slot * 1000),
+        "root_above_1_slot": sum(1 for t, _, _ in r.values() if t > slot * 1000),
+        "node_above_1_slot": sum(1 for e, _ in b.values() if e > slot * 1000),
+        "node_margin_min_ms": min(margins) if margins else None,
+        "heap_shrank": sum(1 for _, _, f in r.values() if f & _HEAP_SHRANK),
+        "heap_shrank_natural": sum(
+            1 for _, _, f in r.values() if f & _HEAP_SHRANK and not f & _FORCED_GC
+        ),
+        "reserved": sum(1 for _, _, f in r.values() if f & _RESERVED),
+        "other_tx_first": sum(1 for _, _, f in r.values() if f & _OTHER_TX),
+    }
+    top = sorted(r, key=lambda c: -max(r[c][0], b[c][0] if c in b else 0))[:10]
+    out["slowest"] = [
+        {
+            "counter": c,
+            "root_ms": round(r[c][0] / 1000, 2),
+            "node_ms": round(b[c][0] / 1000, 2) if c in b else None,
+            "margin_ms": b[c][1] if c in b else None,
+            "service_ms": round(r[c][1] / 1000, 2),
+            "flags": r[c][2],
+        }
+        for c in top
+    ]
+    max_ms = out["all"]["worst_ms"].get("max")
+    if max_ms is None:
+        verdict = "no sample"
+    elif max_ms > 2 * slot or (margins and min(margins) < 0):
+        verdict = "defect: above 2 slots or a negative window margin"
+    elif max_ms > slot:
+        verdict = "margin consumed: between 1 and 2 slots"
+    else:
+        verdict = "pass: within 1 slot"
+    out["verdict"] = verdict
+    out["checks"] = {
+        "probes": node["probes"],
+        "root_replies": root["replies"],
+        "root_samples": root["n"],
+        "node_samples": node["n"],
+        "paired": len(paired),
+        "node_windows": node["frames"],
+        "lost_replies": node["frames"] - node["n"],
+        "root_frames": root["frames"],
+        "root_unanswered": root["unanswered"],
+        "flood_rx": root["flood_rx"],
+        "overflow": root["overflow"] + node["overflow"],
+        "replies_equal_samples": root["replies"] == root["n"] == node["n"],
+        "samples_equal_probes": root["n"] == node["probes"],
+    }
+    return out
+
+
 TESTS = ("platform", "kdf", "aead", "link", "sense", "errors", "filter")
 
 
@@ -619,7 +811,11 @@ def main():
     parser.add_argument("--b", required=True, help="serial port of board B (address 2)")
     parser.add_argument("--sf", type=int, default=7)
     parser.add_argument("--out", default="bench-results.json")
-    parser.add_argument("--only", default=",".join(TESTS), help="also: routing")
+    parser.add_argument(
+        "--only", default=",".join(TESTS), help="also: routing, reply, reply_routing"
+    )
+    parser.add_argument("--count", type=int, help="reply: probes (default: REPLY_PLAN)")
+    parser.add_argument("--gc-every", type=int, default=10, help="reply: forced collections")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     only = args.only.split(",")
@@ -643,6 +839,10 @@ def main():
             test_filter(a, b, res, args.sf)
         if "routing" in only:
             test_routing(a, b, res, args.sf)
+        if "reply" in only:
+            test_reply(a, b, res, args.sf, args.count, args.gc_every)
+        if "reply_routing" in only:
+            test_reply(a, b, res, args.sf, args.count, args.gc_every, routing=True)
     finally:
         for board in (a, b):
             board.interrupt()
