@@ -56,8 +56,10 @@ SPEC_REMOTE = env TLA_JAR=$(TLA_JAR) REMOTE_DIR=$(SPEC_DIR) FETCH=$(SPEC_FETCH) 
 	JOBS=$(SPEC_JOBS) WORKERS=$(WORKERS) HEAP=$(HEAP) MAXSECS=$(MAXSECS) \
 	QUICK_SECS=$(QUICK_SECS) sh spec/remote.sh
 
-# Top-level entries of src/ copied to the board's filesystem root.
-DEPLOY_ITEMS = $(notdir $(wildcard src/*))
+# Top-level entries of src/ copied to the board's filesystem root, from a
+# staged copy without the host's __pycache__ directories.
+DEPLOY_DIR = build/deploy
+DEPLOY_ITEMS = $(filter-out __pycache__,$(notdir $(wildcard src/*)))
 
 LINT_PATHS = src sim tests tools docs firmware Makefile README.md
 
@@ -249,7 +251,9 @@ flash:
 	$(MAKE) -C $(T3S3) flash BOARD=$(BOARD) BOARD_DIR=$(BOARD_DIR) PORT=$(PORT)
 
 deploy:
-	cd src && $(MPREMOTE) connect $(PORT) resume fs cp -r $(DEPLOY_ITEMS) : + reset
+	rm -rf $(DEPLOY_DIR) && mkdir -p $(DEPLOY_DIR) && cp -r src/. $(DEPLOY_DIR)/ && \
+		find $(DEPLOY_DIR) -name __pycache__ -prune -exec rm -rf {} +
+	cd $(DEPLOY_DIR) && $(MPREMOTE) connect $(PORT) resume fs cp -r $(DEPLOY_ITEMS) : + reset
 
 spec:
 	$(SPEC) all
