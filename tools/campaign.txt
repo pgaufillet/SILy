@@ -1,0 +1,19 @@
+# The standard campaign: the jobs `tools/campaign.py plan` expands, one
+# group per line (`make campaign-plan` prints their cost and wall time):
+#
+#   large OPTIONS        the runs of `tests/large.py sweep-plan OPTIONS`
+#   seeds --shifts A-B --chunk N [MODULE...] [--class NAME]...
+#                        scenario-suite shifts A to B, N per job
+#   spec [NAMES...]      the TLC models (none: the full tier)
+
+# s15 load, 30 nodes: every topology and scenario
+large --seeds 1-300 --nodes 30
+# s15 load, the 64-node star (an overload case)
+large --seeds 1-300 --nodes 64 --topologies star
+# steady load and idle network on the star
+large --seeds 1-300 --nodes 30 --topologies star --loads steady,idle
+large --seeds 1-100 --nodes 64 --topologies star --loads steady,idle
+# scenario suites: every class of the default modules
+seeds --shifts 0-1999 --chunk 10
+# TLC: the full tier
+spec

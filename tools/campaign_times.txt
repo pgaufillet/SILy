@@ -1,0 +1,61 @@
+# Cost of the jobs of a campaign per run, in vCPU-seconds: read by
+# `tools/campaign.py plan`, merged by `tools/campaign.py times` (which
+# rewrites this file, this header included). One line per cell:
+#
+#   large LOAD SCENARIO TOPOLOGY NODES VCPU_S RUNS SHARE REVS  a large-network run
+#   seeds VCPU_S SHIFTS SHARE REVS   a seeds shift, every class of the default modules
+#   spec VCPU_S RUNS SHARE SOURCE    the full TLC tier (`make spec`)
+#
+# VCPU_S is not a measured processor time: it is the mean wall time of the
+# jobs measured (a record's wall_s; for a seeds shift, the ms of its lines
+# summed over its classes) times SHARE, the vCPUs per concurrent job of the
+# campaign that measured them (`times --share`: 0.8 for 40 jobs on 32
+# vCPUs; 32 on the spec line, the tier alone on 32 vCPUs). N runs on V
+# vCPUs kept busy then take N VCPU_S / V. It assumes every vCPU busy while
+# they were measured: jobs that ran with vCPUs idle (a sweep's tail) or
+# beside a higher-priority job are counted slower or faster than they
+# are. RUNS, SHIFTS: the runs or shifts measured; REVS: their revisions
+# (SOURCE: of the spec line, set by hand from a full run, all the vCPUs
+# counted for its whole wall time: an upper bound).
+large idle forming star 30 5.47 300 0.8 9115bc4
+large idle forming star 64 44.58 100 0.8 9115bc4
+large idle global-repair star 30 5.63 300 0.8 9115bc4
+large idle global-repair star 64 45.24 100 0.8 9115bc4
+large idle lossy star 30 6.00 300 0.8 9115bc4
+large idle lossy star 64 49.60 100 0.8 9115bc4
+large idle relay-death star 30 4.35 300 0.8 9115bc4
+large idle relay-death star 64 37.44 100 0.8 9115bc4
+large s15 forming domain 30 7.30 300 0.8 9115bc4
+large s15 forming geometric 30 4.34 300 0.8 9115bc4
+large s15 forming star 30 11.98 300 0.8 9115bc4
+large s15 forming star 64 92.37 100 0.8 9115bc4
+large s15 forming star-domain 30 9.64 300 0.8 9115bc4
+large s15 forming star2b 30 6.54 300 0.8 9115bc4
+large s15 global-repair domain 30 7.44 300 0.8 9115bc4
+large s15 global-repair geometric 30 4.49 300 0.8 9115bc4
+large s15 global-repair star 30 12.78 300 0.8 9115bc4
+large s15 global-repair star 64 94.46 100 0.8 9115bc4
+large s15 global-repair star-domain 30 10.18 300 0.8 9115bc4
+large s15 global-repair star2b 30 7.05 300 0.8 9115bc4
+large s15 lossy domain 30 8.33 300 0.8 9115bc4
+large s15 lossy geometric 30 4.56 300 0.8 9115bc4
+large s15 lossy star 30 13.66 300 0.8 9115bc4
+large s15 lossy star 64 104.64 100 0.8 9115bc4
+large s15 lossy star-domain 30 10.73 300 0.8 9115bc4
+large s15 lossy star2b 30 7.32 300 0.8 9115bc4
+large s15 relay-death domain 30 6.80 300 0.8 9115bc4
+large s15 relay-death geometric 30 4.13 300 0.8 9115bc4
+large s15 relay-death star 30 8.94 300 0.8 9115bc4
+large s15 relay-death star 64 77.62 100 0.8 9115bc4
+large s15 relay-death star-domain 30 7.51 300 0.8 9115bc4
+large s15 relay-death star2b 30 5.42 300 0.8 9115bc4
+large steady forming star 30 7.89 300 0.8 9115bc4
+large steady forming star 64 51.26 100 0.8 9115bc4
+large steady global-repair star 30 8.18 300 0.8 9115bc4
+large steady global-repair star 64 52.37 100 0.8 9115bc4
+large steady lossy star 30 8.93 300 0.8 9115bc4
+large steady lossy star 64 57.05 100 0.8 9115bc4
+large steady relay-death star 30 5.93 300 0.8 9115bc4
+large steady relay-death star 64 44.61 100 0.8 9115bc4
+seeds 4.44 500 0.8 9115bc4
+spec 103680.00 1 32 194e1f9

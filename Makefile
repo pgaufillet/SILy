@@ -102,28 +102,45 @@ LARGE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tes
 # --loads steady"), SWEEP_JOBS at a time, each recorded into SWEEP_OUT
 # (a run already recorded there is skipped: an interrupted sweep resumes),
 # then their failure rates with 95 % Wilson intervals; SWEEP_VARIANT and
-# SWEEP_REV label the records. On a rented machine (tools/sweep_remote.sh):
-# SWEEP_HOST=user@host, SWEEP_DIR the remote directory, SWEEP_REMOTE_JOBS
-# runs at a time there, SWEEP_TREES further source trees as LABEL=DIR,
-# SWEEP_KIND large or seeds (then SWEEP: seeds.py classes and modules,
-# SWEEP_SHIFTS the shifts FIRST-LAST, SWEEP_CHUNK shifts per job), the
-# records fetched into SWEEP_FETCH.
+# SWEEP_REV label the records.
 SWEEP ?=
 SWEEP_JOBS ?= 4
 SWEEP_OUT ?= build/sweep
 SWEEP_VARIANT ?= current
 SWEEP_REV ?= $(shell git describe --always --dirty --exclude='*' 2>/dev/null)
-SWEEP_HOST ?=
-SWEEP_DIR ?= sily-sweep
-SWEEP_REMOTE_JOBS ?= 32
-SWEEP_TREES ?=
-SWEEP_KIND ?= large
-SWEEP_SHIFTS ?= 0-99
-SWEEP_CHUNK ?= 10
-SWEEP_FETCH ?= build/sweep-remote
-SWEEP_REMOTE = env MICROPYTHON=$(MICROPYTHON) MPY_LIB=$(MPY_LIB) REMOTE_DIR=$(SWEEP_DIR) \
-	FETCH=$(SWEEP_FETCH) JOBS=$(SWEEP_REMOTE_JOBS) KIND=$(SWEEP_KIND) SWEEP="$(SWEEP)" \
-	SHIFTS=$(SWEEP_SHIFTS) CHUNK=$(SWEEP_CHUNK) sh tools/sweep_remote.sh
+
+# Verification campaigns (tools/campaign.py, tools/campaign.sh): `make
+# campaign-plan` prints the jobs of the plan CAMPAIGN_PLAN (one group per
+# line: large-network runs, seeds shifts, the TLC models), their cost per
+# group from the time table CAMPAIGN_TIMES and the wall time on
+# CAMPAIGN_JOBS vCPUs. `make campaign` starts them on a rented machine,
+# CAMPAIGN_HOST=user@host, in CAMPAIGN_DIR there: the TLC models (SPEC_JOBS
+# configurations at a time; WORKERS, HEAP, MAXSECS passed on) beside one
+# pool of the other jobs under nice, CAMPAIGN_JOBS at a time, for this tree
+# (label current) and each tree of CAMPAIGN_TREES ("LABEL=DIR ...").
+# `make campaign-fetch` tells its progress; once it has ended, copies its
+# records into CAMPAIGN_FETCH, merges their run times into CAMPAIGN_TIMES,
+# packs them (records-REV.tar.xz) and judges them: `bounds` of each label,
+# and with BASELINE (the records of an earlier campaign, a directory or a
+# .tar.xz) `compare` of its label BASELINE_LABEL with each label, COMPARE
+# more options (--exact: record identity, for a change meant to keep
+# behaviour).
+CAMPAIGN_PLAN ?= tools/campaign.txt
+CAMPAIGN_JOBS ?= 32
+CAMPAIGN_TIMES ?= tools/campaign_times.txt
+CAMPAIGN_HOST ?=
+CAMPAIGN_DIR ?= sily-campaign
+CAMPAIGN_TREES ?=
+CAMPAIGN_FETCH ?= build/campaign
+BASELINE ?=
+BASELINE_LABEL ?= current
+COMPARE ?=
+CAMPAIGN = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/campaign.py
+CAMPAIGN_REMOTE = env MICROPYTHON=$(MICROPYTHON) MPY_LIB=$(MPY_LIB) TLA_JAR=$(TLA_JAR) \
+	PLAN=$(CAMPAIGN_PLAN) TIMES=$(CAMPAIGN_TIMES) JOBS=$(CAMPAIGN_JOBS) SPEC_JOBS=$(SPEC_JOBS) \
+	WORKERS=$(WORKERS) HEAP=$(HEAP) MAXSECS=$(MAXSECS) REMOTE_DIR=$(CAMPAIGN_DIR) \
+	FETCH=$(CAMPAIGN_FETCH) BASELINE=$(BASELINE) BASELINE_LABEL=$(BASELINE_LABEL) \
+	COMPARE="$(COMPARE)" sh tools/campaign.sh
 
 # Trace recording (`make trace`, tools/trace.py, sim/trace.py): TEST=MODULE[.CLASS]
 # records every network a test class of tests/ builds, RUN="SCENARIO TOPOLOGY
@@ -132,8 +149,8 @@ TEST ?=
 OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
-.PHONY: help check test seeds simbench large sweep sweep-summary sweep-remote \
-	sweep-remote-fetch trace lint firmware flash deploy \
+.PHONY: help check test seeds simbench large sweep sweep-summary campaign-plan \
+	campaign campaign-fetch trace lint firmware flash deploy \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -143,8 +160,10 @@ help:
 	@echo "make large [LARGE_SEEDS=3] large-network invariants (not part of check); RUN=\"...\": one run"
 	@echo "make sweep SWEEP=\"<sweep-plan options>\" [SWEEP_JOBS=4 SWEEP_OUT=build/sweep]  failure rates"
 	@echo "make sweep-summary [SWEEP_OUT=build/sweep]  the failure rates of the records there"
-	@echo "make sweep-remote SWEEP_HOST=user@host SWEEP=\"...\" [SWEEP_TREES=\"LABEL=DIR ...\"]  start there"
-	@echo "make sweep-remote-fetch SWEEP_HOST=user@host  its progress; when done, the failure rates"
+	@echo "make campaign-plan [CAMPAIGN_PLAN=tools/campaign.txt CAMPAIGN_JOBS=32]  jobs, vCPU-h, wall time"
+	@echo "make campaign CAMPAIGN_HOST=user@host [CAMPAIGN_TREES=\"LABEL=DIR ...\"]  start it there"
+	@echo "make campaign-fetch CAMPAIGN_HOST=user@host [BASELINE=DIR|.tar.xz]  progress; when done,"
+	@echo "                          the records, run times, bounds and comparison [COMPARE=--exact]"
 	@echo "make trace TEST=M[.C]|RUN=\"...\" record traces of a test class or a large run [OUT=build/trace]"
 	@echo "make lint                 ruff (check, format), codespell, no logbook references"
 	@echo "make check                lint + test"
@@ -197,13 +216,16 @@ sweep:
 sweep-summary:
 	$(LARGE) aggregate $(SWEEP_OUT)
 
-sweep-remote:
-	@test -n "$(SWEEP_HOST)" || { echo "make sweep-remote SWEEP_HOST=user@host"; exit 2; }
-	$(SWEEP_REMOTE) start $(SWEEP_HOST) $(SWEEP_TREES)
+campaign-plan:
+	$(CAMPAIGN) plan $(CAMPAIGN_PLAN) --jobs $(CAMPAIGN_JOBS) --times $(CAMPAIGN_TIMES)
 
-sweep-remote-fetch:
-	@test -n "$(SWEEP_HOST)" || { echo "make sweep-remote-fetch SWEEP_HOST=user@host"; exit 2; }
-	$(SWEEP_REMOTE) fetch $(SWEEP_HOST)
+campaign:
+	@test -n "$(CAMPAIGN_HOST)" || { echo "make campaign CAMPAIGN_HOST=user@host"; exit 2; }
+	$(CAMPAIGN_REMOTE) start $(CAMPAIGN_HOST) $(CAMPAIGN_TREES)
+
+campaign-fetch:
+	@test -n "$(CAMPAIGN_HOST)" || { echo "make campaign-fetch CAMPAIGN_HOST=user@host"; exit 2; }
+	$(CAMPAIGN_REMOTE) fetch $(CAMPAIGN_HOST)
 
 trace:
 ifneq ($(strip $(TEST)),)

@@ -1,10 +1,71 @@
-"""Verdicts of a sweep or campaign: hard rules, and comparison with a baseline.
+"""Campaigns: their plan, and the verdicts on their records (hard rules, comparison).
 
 Usage (MicroPython unix port, MICROPYPATH of the host tests, heap 32 MB)::
 
-    micropython tools/campaign.py bounds DIR... [--label L]
+    micropython tools/campaign.py plan PLANFILE [--jobs N] [--times FILE] [--list|--expect]
+    micropython tools/campaign.py times DIR... --share F [--label L] [--times FILE]
+    micropython tools/campaign.py bounds DIR... [--label L] [--expect FIRST-LAST]
     micropython tools/campaign.py compare BASE NEW [--label L[:M]] [--q Q] [--all]
     micropython tools/campaign.py compare BASE NEW --exact [--label L[:M]]
+
+``plan``: the jobs of a campaign plan (`tools/campaign.txt`, the standard
+one). A plan file holds one group of jobs per line, ``#`` starting a
+comment: ``large OPTIONS``, the runs of `tests/large.py` ``sweep-plan
+OPTIONS``; ``seeds --shifts A-B --chunk N [MODULE...] [--class NAME]...``,
+the shifts A to B of the scenario suites (`tests/seeds.py`; its selection:
+the modules, default its ``SCENARIOS``, and the classes, default all) in
+chunks of N shifts; ``spec [NAMES...]``, the TLC models (``spec/run.sh
+NAMES``; none: ``all``, the full tier), at most one spec group. The groups
+are merged in their order: a run (scenario, topology, seed, nodes, load),
+or a shift of the same seeds selection, already in an earlier group is
+dropped and counted; the shifts left of a seeds group are cut into chunks
+of its N from the first of each range (the last chunk of a range may be
+shorter). Two seeds groups of different selections may not share a shift
+(their chunks would write the same file). A job's cost comes from the
+time table (``--times``, default `TIMES`; its header gives the format):
+a large run, its cell's vCPU-seconds; a seeds chunk, its shifts times a
+shift's (default selection only); the spec job, the full tier's (``all``
+only). A job without a cost there (a cell absent from the table, another
+seeds selection, named spec configurations) is of unknown cost: listed by
+cell, counted as zero in the totals and the wall time (lower bounds then),
+and ordered first, as ``spec/run.sh`` runs first the configurations never
+timed. The other jobs follow, longest first, ties in plan order. Printed:
+per group its runs or shifts, the duplicates dropped and its vCPU-hours,
+the total, the wall time on N vCPUs (``--jobs``, default `VCPUS`) and the
+seeds shifts for ``bounds --expect``; with ``--list`` instead, only the
+jobs in their order, one per line, for a shell: ``large SCENARIO TOPOLOGY
+SEED NODES LOAD`` (the arguments of `tests/large.py` ``record DIR``),
+``seeds FIRST COUNT [MODULE...] [--class NAME]...`` (those of
+`tests/seeds.py`, with ``--first FIRST``), ``spec NAMES...`` (those of
+``spec/remote.sh start HOST``); with ``--expect``, only the seeds shifts
+as ``FIRST-LAST`` (the value of ``bounds --expect``; nothing without
+seeds group), a problem when they are not one range of one selection.
+Exit status 2 on a problem of the plan or of the table, each listed (on
+the standard error with ``--list`` or ``--expect``), else 0.
+
+Wall time of ``plan``: the spec tier runs at normal priority beside the
+pool of the other jobs, the pool under ``nice``: the tier's vCPU-seconds
+are spread over the N vCPUs ahead of the pool's jobs; these then go, in
+the order above, each to the vCPU free first (a list schedule: the
+longest first, the last jobs to end are short ones). Printed: the end of
+the last vCPU, then that plus `OVERHEAD_S` (setup of the trees, the
+check there, the fetch: an estimate, not measured). It assumes that the
+table's costs hold at one job per vCPU, and that the spec tier keeps
+every vCPU busy while it runs (its longest configuration alone takes 54
+minutes with 4 workers: on more than 32 vCPUs the tier would not end
+sooner, the pool using the rest).
+
+``times``: merges the run times of the records under DIR (``--label L``:
+that label's only) into the time table, rewritten: each cell measured
+replaces its line, the seeds line too when measured, the other lines are
+kept. A cell's vCPU-seconds per run: the mean ``wall_s`` of its records
+times F (``--share``), the vCPUs per concurrent job of the campaign that
+made them (0.8 for 40 jobs on 32 vCPUs); a seeds shift's: the ``ms`` of
+its lines summed over the classes of the default selection
+(`seeds.collect`), on the shifts holding all of them, their mean times F
+(without the start of a chunk's process, which the lines do not time). Exit
+status: 0 when written; 2 on an input problem or nothing measured, the
+table unchanged.
 
 Inputs: directory trees (or files), walked: each ``*.json`` file is the
 record of one large-network run (`tests/large.py` ``record``), each
@@ -28,8 +89,10 @@ for origins it cannot reach, which MP5 exempts); the MP10 violations of
 the runs that are not overload cases (records without ``recovery``: no
 overload window accepts them); each failing (shift, class, test) of the
 seeds lines with the command reproducing it, then the shifts missing
-between the first and the last of each label and the chunks without end
-line (`seeds.verdict`). Each run listed comes with the count of its kind
+between the first and the last of each label (``--expect FIRST-LAST``:
+every shift FIRST to LAST of every class of each label with seeds lines;
+no seeds line at all, every shift) and the chunks without end line
+(`seeds.verdict`). Each run listed comes with the count of its kind
 in its cell (k of n runs) and its ``make large RUN=...`` command. Exit
 status: 2 on an input problem, a missing seeds shift or a crashed chunk,
 or nothing to judge; else 1 on a breach; else 0.
@@ -107,7 +170,9 @@ import large  # noqa: E402
 import seeds  # noqa: E402
 
 USAGE = (
-    "usage: campaign.py bounds DIR... [--label L]\n"
+    "usage: campaign.py plan PLANFILE [--jobs N] [--times FILE] [--list|--expect]\n"
+    "       campaign.py times DIR... --share F [--label L] [--times FILE]\n"
+    "       campaign.py bounds DIR... [--label L] [--expect FIRST-LAST]\n"
     "       campaign.py compare BASE NEW [--label L[:M]] [--q Q] [--all] [--exact]"
 )
 PAIRED_MIN = 20  # common seeds from which a cell's runs are paired
@@ -396,11 +461,13 @@ KINDS = (
 )
 
 
-def bounds(paths, label=None, out=print):
+def bounds(paths, label=None, out=print, expect=None):
     """Print the hard breaches and the listed runs of the records under paths; return the status.
 
     label: only the records and seeds lines of that label (None: all).
-    out: the printer of each output line.
+    out: the printer of each output line. expect: (first, last), the seeds
+    shifts every class of each label must have (None: from its first to its
+    last shift).
     """
     problems = []
     seeds_files = []
@@ -444,7 +511,7 @@ def bounds(paths, label=None, out=print):
         if breach:
             breached.update((x[0], x[1], x[2]) for x in runs)
         _print_kind(name, breach, runs, cells, out)
-    status = _print_seeds(lines, crashed, out)
+    status = _print_seeds(lines, crashed, out, expect)
     _problems(problems, out)
     listed = sum(len(runs) for (_, _, _, breach), runs in zip(KINDS, found) if not breach)
     out(
@@ -484,10 +551,11 @@ def _print_kind(name, breach, runs, cells, out):
             out("    %s%s" % (large._command(run[3]), note))
 
 
-def _print_seeds(lines, crashed, out):
+def _print_seeds(lines, crashed, out, expect=None):
     # The failing seeds (shift, class, test), per class then each with its
-    # command, the missing shifts and crashed chunks; return the worst status
-    # of `seeds.verdict` over the labels (0 without lines).
+    # command, the missing shifts (expect: (first, last), else each label's
+    # own span) and crashed chunks; return the worst status of
+    # `seeds.verdict` over the labels (0 without lines, 2 if some expected).
     classes = {}  # (label, module, class) -> [shifts, failing shifts, {test: shifts}]
     for d in lines:
         c = classes.setdefault((d.get("variant", ""), d["module"], d["class"]), [set(), set(), {}])
@@ -524,11 +592,15 @@ def _print_seeds(lines, crashed, out):
         shifts = [d["shift"] for d in group]
         # crashed chunks reported once, with the first label
         first = name == sorted(by_label)[0]
-        s = seeds.verdict(group, crashed if first else (), (min(shifts), max(shifts)), out)
+        span = expect or (min(shifts), max(shifts))
+        s = seeds.verdict(group, crashed if first else (), span, out)
         status = max(status, s)
     if crashed and not by_label:
         for path in crashed:
             out("CRASHED %s: the chunk did not end (no end line)" % path)
+        status = 2
+    if expect is not None and not by_label:
+        out("MISSING shifts %d-%d: no seeds line" % expect)
         status = 2
     return status
 
@@ -919,6 +991,490 @@ def _exact(a_runs, b_runs, a_lines, b_lines, out):
     return 1 if differ or line_differ else 0
 
 
+# --- Time table --------------------------------------------------------------------------
+
+TIMES = _parent(__file__) + "/campaign_times.txt"  # the default time table
+TIMES_HEADER = """\
+# Cost of the jobs of a campaign per run, in vCPU-seconds: read by
+# `tools/campaign.py plan`, merged by `tools/campaign.py times` (which
+# rewrites this file, this header included). One line per cell:
+#
+#   large LOAD SCENARIO TOPOLOGY NODES VCPU_S RUNS SHARE REVS  a large-network run
+#   seeds VCPU_S SHIFTS SHARE REVS   a seeds shift, every class of the default modules
+#   spec VCPU_S RUNS SHARE SOURCE    the full TLC tier (`make spec`)
+#
+# VCPU_S is not a measured processor time: it is the mean wall time of the
+# jobs measured (a record's wall_s; for a seeds shift, the ms of its lines
+# summed over its classes) times SHARE, the vCPUs per concurrent job of the
+# campaign that measured them (`times --share`: 0.8 for 40 jobs on 32
+# vCPUs; 32 on the spec line, the tier alone on 32 vCPUs). N runs on V
+# vCPUs kept busy then take N VCPU_S / V. It assumes every vCPU busy while
+# they were measured: jobs that ran with vCPUs idle (a sweep's tail) or
+# beside a higher-priority job are counted slower or faster than they
+# are. RUNS, SHIFTS: the runs or shifts measured; REVS: their revisions
+# (SOURCE: of the spec line, set by hand from a full run, all the vCPUs
+# counted for its whole wall time: an upper bound).
+"""
+
+
+def read_times(path, problems, absent_ok=False):
+    """Return the time table of the file path: {key: (vCPU-s, count, share, revisions)}.
+
+    key: ("large", load, scenario, topology, nodes), ("seeds",) or
+    ("spec",). A line not of the format, or a cell twice, is a problem;
+    absent_ok: a missing file is an empty table.
+    """
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        if not absent_ok:
+            problems.append("%s: unreadable (%s)" % (path, e))
+        return {}
+    table = {}
+    for i, line in enumerate(text.split("\n")):
+        words = line.split("#", 1)[0].split()
+        if not words:
+            continue
+        try:
+            n = 4 if words[0] == "large" else 0 if words[0] in ("seeds", "spec") else -1
+            if n < 0 or len(words) != n + 5:
+                raise ValueError("not a time table line: %s" % " ".join(words))
+            key = tuple(words[: n + 1])
+            if n:
+                key = key[:4] + (int(key[4]),)
+            if key in table:
+                raise ValueError("%s twice" % " ".join(words[: n + 1]))
+            value = float(words[n + 1]), int(words[n + 2]), float(words[n + 3]), words[n + 4]
+            if value[0] < 0 or value[2] <= 0:
+                raise ValueError("negative time or share: %s" % " ".join(words))
+            table[key] = value
+        except ValueError as e:
+            problems.append("%s:%d: %s" % (path, i + 1, e))
+    return table
+
+
+def write_times(path, table):
+    """Write the time table into the file path (`TIMES_HEADER`, then its lines sorted)."""
+    lines = []
+    for key in sorted(table):
+        v, n, share, revs = table[key]
+        lines.append("%s %.2f %d %g %s" % (" ".join(str(x) for x in key), v, n, share, revs))
+    with open(path + ".tmp", "w") as f:
+        f.write(TIMES_HEADER + "\n".join(lines) + "\n")
+    os.rename(path + ".tmp", path)
+
+
+def times(paths, share, table_path=TIMES, label=None, classes=None, out=print):
+    """Merge the run times of the records under paths into the time table; return the status.
+
+    share: the vCPUs per concurrent job when they ran. label: only the
+    records and seeds lines of that label (None: all). classes: the
+    (module, class) pairs of a seeds shift (None: those of the default
+    selection, `seeds.collect`).
+    """
+    problems = []
+    table = read_times(table_path, problems, absent_ok=True)
+    cells = {}  # cell -> [wall_s summed, runs, revisions]
+    seeds_files = []
+    for path in _files_of(paths, seeds_files, problems):
+        r = _read(path, problems)
+        if r is None:
+            continue
+        try:
+            if label is not None and r["variant"] != label:
+                continue
+            wall = float(r["wall_s"])
+            c = cells.setdefault(_cell(r), [0.0, 0, set()])
+            c[0] += wall
+            c[1] += 1
+            c[2].add(r["rev"] or "-")
+        except (KeyError, TypeError, AttributeError, ValueError) as e:
+            problems.append("%s: not a run record (%r)" % (path, e))
+    lines, _ = _seeds_lines(seeds_files, problems)
+    if classes is None:
+        classes = [(module, case.__name__) for module, case in seeds.collect(seeds.SCENARIOS)]
+    shifts = {}  # (label, shift) -> {(module, class): (ms, revision)}
+    for d in lines:
+        ms = d.get("ms")
+        if (label is None or d.get("variant", "") == label) and isinstance(ms, (int, float)):
+            key = (d.get("variant", ""), d["shift"])
+            shifts.setdefault(key, {})[(d["module"], d["class"])] = (ms, d.get("rev") or "-")
+    measured = [s for s in shifts.values() if all(c in s for c in classes)]
+    _problems(problems, out)
+    if problems or not (cells or measured):
+        out(
+            "times: %s, %s unchanged"
+            % ("input problems" if problems else "nothing measured", table_path)
+        )
+        return 2
+    replaced = sum(1 for cell in cells if ("large",) + cell in table)
+    for cell, (wall, n, revs) in cells.items():
+        table[("large",) + cell] = (wall / n * share, n, share, ",".join(sorted(revs)))
+    seeds_text = "not measured (no shift with the time of every class of the default selection)"
+    if measured:
+        ms = sum(sum(s[c][0] for c in classes) for s in measured) / len(measured)
+        revs = ",".join(sorted(set(s[c][1] for s in measured for c in classes)))
+        table[("seeds",)] = (ms / 1000 * share, len(measured), share, revs)
+        seeds_text = "%.2f vCPU-s per shift, from %d shifts" % (ms / 1000 * share, len(measured))
+    write_times(table_path, table)
+    out(
+        "times: %d cells measured from %d runs (%d new, %d replaced); seeds: %s"
+        % (
+            len(cells),
+            sum(c[1] for c in cells.values()),
+            len(cells) - replaced,
+            replaced,
+            seeds_text,
+        )
+    )
+    out("times: %s written, %d lines" % (table_path, len(table)))
+    return 0
+
+
+# --- plan --------------------------------------------------------------------------------
+
+VCPUS = 32  # vCPUs of the wall time by default (--jobs)
+OVERHEAD_S = 1080  # setup of the trees, the check there and the fetch, around the jobs
+SPEC_CFG = _parent(_parent(__file__)) + "/spec/cfg"
+SPEC_SETS = ("quick", "pass", "defects")  # the sets of spec/run.sh besides all
+DEFAULT_SELECTION = (seeds.SCENARIOS, ())  # seeds: the default modules, every class
+
+
+def _plan_groups(path, problems):
+    # [(where, words)] of the groups of the plan file path, where FILE:LINE.
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        problems.append("%s: unreadable (%s)" % (path, e))
+        return []
+    out = []
+    for i, line in enumerate(text.split("\n")):
+        words = line.split("#", 1)[0].split()
+        if words:
+            out.append(("%s:%d" % (path, i + 1), words))
+    if not out:
+        problems.append("%s: no group" % path)
+    return out
+
+
+def _seeds_group(words):
+    # (first, last, chunk, selection) of the words of a seeds group;
+    # selection (modules, classes sorted), checked by `seeds.collect`.
+    shifts = chunk = None
+    modules, classes = [], []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w in ("--shifts", "--chunk", "--class"):
+            if i + 1 >= len(words):
+                raise ValueError("%s without value" % w)
+            if w == "--shifts":
+                shifts = seeds._expect(words[i + 1])
+            elif w == "--chunk":
+                chunk = int(words[i + 1])
+            else:
+                classes.append(words[i + 1])
+            i += 2
+            continue
+        if w.startswith("--"):
+            raise ValueError("unknown option %s" % w)
+        modules.append(w)
+        i += 1
+    if shifts is None or chunk is None:
+        raise ValueError("seeds without --shifts or --chunk")
+    if shifts[0] < 0 or shifts[0] > shifts[1]:
+        raise ValueError("shifts %d-%d" % shifts)
+    if chunk < 1:
+        raise ValueError("chunk %d below 1" % chunk)
+    selection = (tuple(modules) or seeds.SCENARIOS, tuple(sorted(set(classes))))
+    seeds.collect(*selection)  # an unknown module or class raises here
+    return shifts[0], shifts[1], chunk, selection
+
+
+def _spec_names(words):
+    # The names of a spec group: ("all",) for the full tier.
+    if not words or "all" in words or "full" in words:
+        return ("all",)
+    for w in words:
+        if w not in SPEC_SETS and not large._exists("%s/%s.cfg" % (SPEC_CFG, w)):
+            raise ValueError("no spec configuration %s" % w)
+    return tuple(words)
+
+
+def _spans(values):
+    # The ranges of consecutive values of the sorted values: [[first, last]].
+    out = []
+    for k in values:
+        if out and out[-1][1] == k - 1:
+            out[-1][1] = k
+        else:
+            out.append([k, k])
+    return out
+
+
+def expand(groups, problems):
+    """Return (jobs, dropped) of a plan's groups: the jobs in plan order, duplicates dropped.
+
+    groups: [(where, words)]. A job: (group index, kind, args), kind
+    ``large`` (args: scenario, topology, seed, nodes, load), ``seeds``
+    (first shift, shifts, selection) or ``spec`` (names). dropped: per
+    group, its runs or shifts already in an earlier group. A group that
+    cannot be read, or without any job or duplicate, is a problem.
+    """
+    jobs = []
+    dropped = [0] * len(groups)
+    runs = set()
+    taken = {}  # seeds shift -> its selection
+    spec = None  # where of the spec group
+    for g, (where, words) in enumerate(groups):
+        kind = words[0]
+        before = len(jobs)
+        try:
+            if kind == "large":
+                for run in large.sweep_plan(**large.sweep_options(words[1:])):
+                    if run in runs:
+                        dropped[g] += 1
+                    else:
+                        runs.add(run)
+                        jobs.append((g, kind, run))
+            elif kind == "seeds":
+                first, last, chunk, selection = _seeds_group(words[1:])
+                new = []
+                for k in range(first, last + 1):
+                    if k not in taken:
+                        new.append(k)
+                    elif taken[k] == selection:
+                        dropped[g] += 1
+                    else:
+                        raise ValueError("shift %d already in another seeds selection" % k)
+                for k in new:
+                    taken[k] = selection
+                for a, b in _spans(new):
+                    for k, count in seeds.plan(b - a + 1, chunk, a):
+                        jobs.append((g, kind, (k, count, selection)))
+            elif kind == "spec":
+                if spec is not None:
+                    raise ValueError("a second spec group (the first: %s)" % spec)
+                spec = where
+                jobs.append((g, kind, _spec_names(words[1:])))
+            else:
+                raise ValueError("unknown group %s (large, seeds or spec)" % kind)
+        except (ValueError, ImportError) as e:
+            problems.append("%s: %s" % (where, e))
+            continue
+        if len(jobs) == before and not dropped[g]:
+            problems.append("%s: no job" % where)
+    return jobs, dropped
+
+
+def _selection_words(selection):
+    # The words of a seeds selection in a job line: modules unless the
+    # default ones, then --class NAME for each class.
+    modules, classes = selection
+    out = [] if modules == seeds.SCENARIOS else list(modules)
+    for c in classes:
+        out.extend(("--class", c))
+    return out
+
+
+def job_line(job):
+    """Return the line of a job of `expand` in the job list of ``plan --list``."""
+    _, kind, args = job
+    if kind == "large":
+        return "large %s %s %d %d %s" % args
+    if kind == "seeds":
+        return " ".join(["seeds", str(args[0]), str(args[1])] + _selection_words(args[2]))
+    return "spec " + " ".join(args)
+
+
+def cost(job, table):
+    """Return the vCPU-seconds of a job of `expand` from the time table, None if unknown."""
+    _, kind, args = job
+    if kind == "large":
+        scenario, topology, _, nodes, load = args
+        found = table.get(("large", load, scenario, topology, nodes))
+        return None if found is None else found[0]
+    if kind == "seeds":
+        found = table.get(("seeds",))
+        if found is None or args[2] != DEFAULT_SELECTION:
+            return None
+        return found[0] * args[1]
+    found = table.get(("spec",))
+    return None if found is None or args != ("all",) else found[0]
+
+
+def _unknown(job):
+    # (cell text, runs or shifts) of a job of unknown cost.
+    _, kind, args = job
+    if kind == "large":
+        return "large " + _cell_text((args[4], args[0], args[1], args[3])), 1
+    if kind == "seeds":
+        return " ".join(["seeds"] + _selection_words(args[2])), args[1]
+    return job_line(job), 1
+
+
+def schedule(costs, vcpus, ahead=0.0):
+    """Return the end of the list schedule of the jobs costs (in order) on vcpus vCPUs.
+
+    Each job goes to the vCPU free first; each vCPU is free from ahead.
+    """
+    free = [ahead] * vcpus
+    for c in costs:
+        i = free.index(min(free))
+        free[i] += c
+    return max(free)
+
+
+def order(jobs, costs):
+    """Return the indices of jobs in their run order: unknown cost first, then longest first."""
+    return sorted(range(len(jobs)), key=lambda i: (costs[i] is not None, -(costs[i] or 0.0), i))
+
+
+def plan(path, times_path=TIMES, vcpus=VCPUS, listing=False, out=print, err=None, expect=False):
+    """Print the summary of the plan file path, or its jobs or seeds shifts; return the status.
+
+    listing: the job list instead; expect: the seeds shifts instead,
+    ``FIRST-LAST``. out: the printer of each output line; err: of the
+    problems with listing or expect (None: the standard error).
+    """
+    problems = []
+    groups = _plan_groups(path, problems)
+    table = read_times(times_path, problems)
+    jobs, dropped = expand(groups, problems)
+    if expect and not problems:
+        spans, selections = seeds_shifts(jobs)
+        if len(spans) > 1 or len(selections) > 1:
+            problems.append(
+                "%s: seeds shifts %s in %d selections, not one range of one selection "
+                "(bounds --expect takes one)"
+                % (path, ",".join("%d-%d" % tuple(s) for s in spans), len(selections))
+            )
+        elif spans:
+            out("%d-%d" % tuple(spans[0]))
+    if problems:
+        _problems(problems, (err or _stderr) if listing or expect else out)
+        return 2
+    if expect:
+        return 0
+    costs = [cost(j, table) for j in jobs]
+    ranked = order(jobs, costs)
+    if listing:
+        for i in ranked:
+            out(job_line(jobs[i]))
+        return 0
+    _summary(path, groups, jobs, costs, dropped, ranked, vcpus, out)
+    return 0
+
+
+def _stderr(line):
+    print(line, file=sys.stderr)
+
+
+def seeds_shifts(jobs):
+    """Return (spans, selections) of the seeds jobs of `expand`.
+
+    spans: the ranges [first, last] of their shifts, sorted; selections:
+    the set of their selections.
+    """
+    shifts, selections = [], set()
+    for _, kind, args in jobs:
+        if kind == "seeds":
+            shifts.extend(range(args[0], args[0] + args[1]))
+            selections.add(args[2])
+    return _spans(sorted(shifts)), selections
+
+
+def _summary(path, groups, jobs, costs, dropped, ranked, vcpus, out):
+    # The summary of `plan`: groups, unknown costs, totals, wall time, seeds shifts.
+    per = [[0, 0, 0.0, 0] for _ in groups]  # jobs, runs or shifts, vCPU-s, of unknown cost
+    by_kind = {"large": [0, 0.0], "seeds": [0, 0.0], "spec": [0, 0.0]}  # jobs, vCPU-s
+    unknown = {}  # cell -> runs or shifts
+    for job, c in zip(jobs, costs):
+        g, kind, args = job
+        units = args[1] if kind == "seeds" else 1
+        per[g][0] += 1
+        per[g][1] += units
+        by_kind[kind][0] += 1
+        if c is None:
+            per[g][3] += units
+            name = _unknown(job)[0]
+            unknown[name] = unknown.get(name, 0) + units
+        else:
+            per[g][2] += c
+            by_kind[kind][1] += c
+    out(
+        "plan %s: %d jobs: %d large runs, %d seeds chunks, %d spec; duplicates dropped: %d"
+        % (
+            path,
+            len(jobs),
+            by_kind["large"][0],
+            by_kind["seeds"][0],
+            by_kind["spec"][0],
+            sum(dropped),
+        )
+    )
+    for g, (where, words) in enumerate(groups):
+        jobs_n, units, vcpu_s, unknown_n = per[g]
+        if words[0] == "large":
+            what = "%d runs" % units
+        elif words[0] == "seeds":
+            what = "%d shifts in %d chunks" % (units, jobs_n)
+        else:
+            what = "%d job" % jobs_n
+        notes = ""
+        if dropped[g]:
+            notes += ", %d duplicates dropped" % dropped[g]
+        if unknown_n:
+            notes += ", %d of unknown cost" % unknown_n
+        out("  %s: %s: %s, %.1f vCPU-h%s" % (where, " ".join(words), what, vcpu_s / 3600, notes))
+    if unknown:
+        out("unknown cost (not in the time table; run first, counted as zero below):")
+        for name in sorted(unknown):
+            out("  %s: %d" % (name, unknown[name]))
+    else:
+        out("unknown cost: none")
+    total = sum(c for c in costs if c is not None)
+    out(
+        "total: %.1f vCPU-h (large %.1f, seeds %.1f, spec %.1f)%s"
+        % (
+            total / 3600,
+            by_kind["large"][1] / 3600,
+            by_kind["seeds"][1] / 3600,
+            by_kind["spec"][1] / 3600,
+            ", a lower bound" if unknown else "",
+        )
+    )
+    pool = [costs[i] for i in ranked if costs[i] is not None and jobs[i][1] != "spec"]
+    wall = schedule(pool, vcpus, by_kind["spec"][1] / vcpus)
+    out(
+        "wall on %d vCPUs: %.2f h of jobs (spec ahead of the pool, %.2f h; longest pool job "
+        "%.0f s), %.2f h with %.2f h of setup and fetch"
+        % (
+            vcpus,
+            wall / 3600,
+            by_kind["spec"][1] / vcpus / 3600,
+            max(pool) if pool else 0,
+            (wall + OVERHEAD_S) / 3600,
+            OVERHEAD_S / 3600,
+        )
+    )
+    spans, selections = seeds_shifts(jobs)
+    text = ",".join("%d-%d" % tuple(s) for s in spans)
+    if not spans:
+        out("seeds: none")
+    elif len(spans) > 1:
+        out("seeds: shifts %s, not one range (bounds --expect takes one)" % text)
+    else:
+        out("seeds: bounds --expect %s" % text)
+    if len(selections) > 1:
+        out(
+            "seeds: %d selections (bounds --expect asks every class on each shift)"
+            % len(selections)
+        )
+
+
 # --- Command line ------------------------------------------------------------------------
 
 
@@ -947,11 +1503,40 @@ def _options(args, valued, flags):
 def main(argv):
     gc.threshold(GC_EVERY)
     try:
+        if len(argv) > 1 and argv[1] == "plan":
+            options, paths = _options(argv[2:], ("--jobs", "--times"), ("--list", "--expect"))
+            if len(paths) != 1:
+                raise ValueError("plan takes PLANFILE")
+            vcpus = int(options.get("--jobs", VCPUS))
+            if vcpus < 1:
+                raise ValueError("--jobs %d below 1" % vcpus)
+            listing = options.get("--list", False)
+            expect = options.get("--expect", False)
+            if listing and expect:
+                raise ValueError("plan takes --list or --expect, not both")
+            times_path = options.get("--times", TIMES)
+            return plan(paths[0], times_path, vcpus, listing, expect=expect)
+        if len(argv) > 1 and argv[1] == "times":
+            options, paths = _options(argv[2:], ("--share", "--label", "--times"), ())
+            if not paths:
+                raise ValueError("times without directory")
+            if "--share" not in options:
+                raise ValueError("times without --share")
+            share = float(options["--share"])
+            if share <= 0:
+                raise ValueError("--share %g not positive" % share)
+            label = options.get("--label")
+            return times(paths, share, options.get("--times", TIMES), label)
         if len(argv) > 1 and argv[1] == "bounds":
-            options, paths = _options(argv[2:], ("--label",), ())
+            options, paths = _options(argv[2:], ("--label", "--expect"), ())
             if not paths:
                 raise ValueError("bounds without directory")
-            return bounds(paths, options.get("--label"))
+            expect = None
+            if "--expect" in options:
+                expect = seeds._expect(options["--expect"])
+                if expect[0] < 0 or expect[0] > expect[1]:
+                    raise ValueError("--expect %d-%d" % expect)
+            return bounds(paths, options.get("--label"), print, expect)
         if len(argv) > 1 and argv[1] == "compare":
             options, paths = _options(argv[2:], ("--label", "--q"), ("--all", "--exact"))
             if len(paths) != 2:
@@ -964,7 +1549,7 @@ def main(argv):
                 options.get("--all", False),
                 options.get("--exact", False),
             )
-        raise ValueError("bounds or compare")
+        raise ValueError("plan, times, bounds or compare")
     except ValueError as e:
         print("campaign: %s" % e)
         print(USAGE)

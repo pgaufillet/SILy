@@ -10,7 +10,10 @@ root's queue alone and MP10 outside overload listed apart, failing,
 missing and crashed seeds shifts, the exit codes. ``compare``: runs
 paired by seed, the common cells only, a field one side lacks not
 tested, labels of one tree, seeds classes, and ``--exact`` on identical
-and on differing records and lines.
+and on differing records and lines. ``plan`` on small plan files and time
+tables: the job order, duplicates across groups, seeds chunks, unknown
+costs, the list schedule, input problems, the seeds shifts of ``plan
+--expect``; ``times`` merging records into a table; ``bounds --expect``.
 """
 
 import json
@@ -192,9 +195,9 @@ class StatisticsTest(unittest.TestCase):
 class BoundsTest(TmpTest):
     """bounds: hard breaches, runs listed apart, seeds failures, exit codes."""
 
-    def bounds(self, label=None, paths=None):
+    def bounds(self, label=None, paths=None, expect=None):
         self.printed = []
-        return campaign.bounds(paths or [TMP], label, self.printed.append)
+        return campaign.bounds(paths or [TMP], label, self.printed.append, expect)
 
     def kind(self, name):
         # The lines of the kind name: its header, then its cells and runs.
@@ -324,6 +327,24 @@ class BoundsTest(TmpTest):
         self.assertEqual(self.bounds(), 2)
         write_seeds("s", 3, 3)
         self.assertEqual(self.bounds(), 0)
+
+    def test_seeds_expected_shifts(self):
+        write("a", [make_record(seed=1)])
+        write_seeds("s", 0, 3)
+        write_seeds("s", 3, 3)
+        self.assertEqual(self.bounds(), 0)
+        self.assertEqual(self.bounds(expect=(0, 5)), 0)
+        # shifts 6 and 7 never ran: only --expect sees them
+        self.assertEqual(self.bounds(expect=(0, 7)), 2)
+        missing = [x for x in self.printed if x.startswith("MISSING")]
+        self.assertEqual(
+            missing,
+            ["MISSING current shift 6: all 2 classes", "MISSING current shift 7: all 2 classes"],
+        )
+        # no seeds line at all
+        self.assertEqual(self.bounds(paths=[TMP + "/a"]), 0)
+        self.assertEqual(self.bounds(paths=[TMP + "/a"], expect=(0, 5)), 2)
+        self.assertIn("MISSING shifts 0-5: no seeds line", self.printed)
 
 
 def counted(seed, relay, **fields):
@@ -470,3 +491,251 @@ class CompareTest(TmpTest):
         remove(TMP + "/new")
         write("new", [make_record(seed=7)])
         self.assertEqual(self.compare(exact=True), 2)  # nothing in common
+
+
+def write_text(name, text):
+    """Write text into the file TMP/name."""
+    with open("%s/%s" % (TMP, name), "w") as f:
+        f.write(text)
+
+
+# vCPU-s per run of a few cells, per seeds shift, and of the spec tier.
+TIMES = (
+    "large s15 forming star 30 10 100 0.8 abc1234\n"
+    "large s15 lossy star 30 30 100 0.8 abc1234\n"
+    "large s15 forming star 64 50 100 0.8 abc1234\n"
+    "seeds 2 100 0.8 abc1234\n"
+    "spec 3600 1 32 abc1234\n"
+)
+
+
+class PlanTest(TmpTest):
+    """plan: job order, duplicates across groups, seeds chunks, unknown costs, wall time."""
+
+    def plan(self, text, listing=False, vcpus=2, times=TIMES, expect=False):
+        write_text("plan.txt", text)
+        write_text("times.txt", times)
+        self.printed, self.errors = [], []
+        plan, times = TMP + "/plan.txt", TMP + "/times.txt"
+        out, err = self.printed.append, self.errors.append
+        return campaign.plan(plan, times, vcpus, listing, out, err, expect)
+
+    def jobs(self, text, times=TIMES):
+        # The job list of the plan text, its status checked.
+        self.assertEqual(self.plan(text, True, times=times), 0)
+        return self.printed
+
+    def test_longest_first(self):
+        text = (
+            "# runs at 10 and 30 vCPU-s, then seeds chunks at 10, a run at 50, spec at 3600\n"
+            "large --seeds 1-2 --topologies star --scenarios forming,lossy\n"
+            "seeds --shifts 0-9 --chunk 5\n"
+            "large --seeds 1 --nodes 64 --topologies star --scenarios forming  # one run\n"
+            "spec\n"
+        )
+        self.assertEqual(
+            self.jobs(text),
+            [
+                "spec all",
+                "large forming star 1 64 s15",
+                "large lossy star 1 30 s15",
+                "large lossy star 2 30 s15",
+                # ties in plan order
+                "large forming star 1 30 s15",
+                "large forming star 2 30 s15",
+                "seeds 0 5",
+                "seeds 5 5",
+            ],
+        )
+        self.assertEqual(self.plan(text), 0)
+        self.assertIn("total: 1.0 vCPU-h (large 0.0, seeds 0.0, spec 1.0)", self.printed)
+        # spec spread ahead (1800 s per vCPU), then 50 30 30 10 10 10 10 on 2 vCPUs: 1880 s
+        self.assertIn(
+            "wall on 2 vCPUs: 0.52 h of jobs (spec ahead of the pool, 0.50 h; longest pool job "
+            "50 s), 0.82 h with 0.30 h of setup and fetch",
+            self.printed,
+        )
+        self.assertIn("seeds: bounds --expect 0-9", self.printed)
+
+    def test_duplicates_dropped_across_groups(self):
+        text = (
+            "large --seeds 1-3 --topologies star --scenarios forming\n"
+            "large --seeds 2-5 --topologies star --scenarios forming\n"
+            "seeds --shifts 0-9 --chunk 4\n"
+            "seeds --shifts 5-14 --chunk 4\n"
+        )
+        jobs = self.jobs(text)
+        large = ["large forming star %d 30 s15" % s for s in range(1, 6)]
+        chunks = ["seeds 0 4", "seeds 4 4", "seeds 8 2", "seeds 10 4", "seeds 14 1"]
+        self.assertEqual(sorted(jobs), sorted(large + chunks))
+        self.assertEqual(self.plan(text), 0)
+        self.assertEqual(
+            self.printed[0],
+            "plan %s/plan.txt: 10 jobs: 5 large runs, 5 seeds chunks, 0 spec; "
+            "duplicates dropped: 7" % TMP,
+        )
+        groups = self.printed[1:5]
+        self.assertTrue(groups[0].endswith(": 3 runs, 0.0 vCPU-h"), groups[0])
+        self.assertTrue(groups[1].endswith(": 2 runs, 0.0 vCPU-h, 2 duplicates dropped"))
+        self.assertTrue(groups[2].endswith(": 10 shifts in 3 chunks, 0.0 vCPU-h"))
+        self.assertTrue(
+            groups[3].endswith(": 5 shifts in 2 chunks, 0.0 vCPU-h, 5 duplicates dropped")
+        )
+        self.assertIn("seeds: bounds --expect 0-14", self.printed)
+
+    def test_seeds_chunks(self):
+        # Shifts 5-6 taken first: the second group's shifts left form two
+        # ranges, each cut from its first shift, the last chunk shorter.
+        text = "seeds --shifts 5-6 --chunk 10\nseeds --shifts 0-12 --chunk 4\n"
+        chunks = [tuple(int(x) for x in line.split()[1:]) for line in self.jobs(text)]
+        self.assertEqual(sorted(chunks), [(0, 4), (4, 1), (5, 2), (7, 4), (11, 2)])
+        self.assertEqual(chunks[:2], [(0, 4), (7, 4)])  # 8 vCPU-s each, the longest
+
+    def test_unknown_cost(self):
+        text = (
+            "large --seeds 1-2 --topologies star,domain --scenarios forming\n"
+            "seeds --shifts 0-3 --chunk 2 test_dodag_scenario --class Forming\n"
+            "spec AckWindow_current_P4\n"
+        )
+        times = "large s15 forming star 30 1800 100 0.8 abc1234\nseeds 2 100 0.8 abc1234\n"
+        # the domain cell is absent, the seeds selection is not the default one,
+        # named configurations: unknown cost, run first in plan order
+        self.assertEqual(
+            self.jobs(text, times),
+            [
+                "large forming domain 1 30 s15",
+                "large forming domain 2 30 s15",
+                "seeds 0 2 test_dodag_scenario --class Forming",
+                "seeds 2 2 test_dodag_scenario --class Forming",
+                "spec AckWindow_current_P4",
+                "large forming star 1 30 s15",
+                "large forming star 2 30 s15",
+            ],
+        )
+        self.assertEqual(self.plan(text, times=times), 0)
+        i = self.printed.index(
+            "unknown cost (not in the time table; run first, counted as zero below):"
+        )
+        self.assertEqual(
+            self.printed[i + 1 : i + 5],
+            [
+                "  large s15 forming domain 30: 2",
+                "  seeds test_dodag_scenario --class Forming: 4",
+                "  spec AckWindow_current_P4: 1",
+                "total: 1.0 vCPU-h (large 1.0, seeds 0.0, spec 0.0), a lower bound",
+            ],
+        )
+        self.assertTrue(self.printed[1].endswith(": 4 runs, 1.0 vCPU-h, 2 of unknown cost"))
+
+    def test_expect(self):
+        # The seeds shifts of the plan as one range, for bounds --expect;
+        # the problems on the error printer, as with the job list.
+        text = "seeds --shifts 5-9 --chunk 2\nseeds --shifts 0-6 --chunk 3\nspec\n"
+        self.assertEqual(self.plan(text, expect=True), 0)
+        self.assertEqual((self.printed, self.errors), (["0-9"], []))
+        self.assertEqual(self.plan("large --seeds 1-2\nspec\n", expect=True), 0)
+        self.assertEqual((self.printed, self.errors), ([], []))  # no seeds group
+        for text, what in (
+            ("seeds --shifts 0-4 --chunk 2\nseeds --shifts 6-9 --chunk 2\n", "0-4,6-9 in 1"),
+            (
+                "seeds --shifts 0-4 --chunk 2\n"
+                "seeds --shifts 5-9 --chunk 2 test_dodag_scenario --class Forming\n",
+                "0-9 in 2",
+            ),
+        ):
+            self.assertEqual(self.plan(text, expect=True), 2, text)
+            self.assertEqual(self.printed, [])
+            self.assertEqual(
+                self.errors,
+                [
+                    "INPUT %s/plan.txt: seeds shifts %s selections, not one range of one "
+                    "selection (bounds --expect takes one)" % (TMP, what)
+                ],
+            )
+        self.assertEqual(self.plan("seeds --shifts 0-4\n", expect=True), 2)
+        self.assertEqual(self.printed, [])
+        self.assertTrue(self.errors[0].startswith("INPUT %s/plan.txt:1:" % TMP), self.errors)
+
+    def test_schedule(self):
+        # 5 4 3 3 3 on 2 vCPUs free from 1: [6, 1] [6, 5] [6, 8] [9, 8] [9, 11]
+        self.assertEqual(campaign.schedule([5, 4, 3, 3, 3], 2, 1.0), 11)
+        self.assertEqual(campaign.schedule([], 3, 2.5), 2.5)
+
+    def test_input_problems(self):
+        self.assertEqual(self.plan("seeds --shifts 0-9 --chunk 5\n"), 0)
+        for text in (
+            "",  # no group
+            "sweep --seeds 1-3\n",
+            "large --seeds 1-3 --topologies starry\n",
+            "large --seeds 3-1\n",  # no run
+            "seeds --shifts 0-9\n",
+            "seeds --shifts 0-9 --chunk 5 --class NoSuchClass\n",
+            "seeds --shifts 0-9 --chunk 5\nseeds --shifts 9 --chunk 1 --class Forming\n",
+            "spec\nspec quick\n",
+            "spec NoSuchConfiguration\n",
+        ):
+            self.assertEqual(self.plan(text), 2, text)
+            self.assertTrue(self.printed[0].startswith("INPUT %s/plan.txt" % TMP), self.printed)
+        for times in ("seeds 2 100\n", "large s15 forming star 30 1 1 0.8 a\n" * 2):
+            self.assertEqual(self.plan("spec\n", times=times), 2, times)
+            self.assertTrue(self.printed[0].startswith("INPUT %s/times.txt:" % TMP))
+        self.assertEqual(self.plan("spec\n", listing=True, times="spec x\n"), 2)
+        self.assertEqual(self.printed, [])  # the job list empty, the problems apart
+        self.assertEqual(
+            self.errors, ["INPUT %s/times.txt:1: not a time table line: spec x" % TMP]
+        )
+
+
+class TimesTest(TmpTest):
+    """times: records merged into the time table."""
+
+    def times(self, label="current"):
+        self.printed = []
+        return campaign.times(
+            [TMP + "/r"], 0.5, TMP + "/times.txt", label, CLASSES, self.printed.append
+        )
+
+    def test_merge(self):
+        write_text(
+            "times.txt",
+            "large steady forming star 30 99 10 1 old\n"
+            "large steady lossy star 30 5 10 1 old\n"
+            "seeds 9 10 1 old\n",
+        )
+        write("r", [make_record(seed=1, wall_s=10.0), make_record(seed=2, wall_s=20.0)])
+        write("r", [make_record(seed=1, topology="domain", wall_s=4.0, rev="def5678")])
+        write("r", [make_record(seed=3, wall_s=1000.0, variant="other")])  # another label
+        write_seeds("r", 0, 3, ms=100)
+        # a shift without every class: not measured
+        line = {"shift": 9, "module": "test_a", "class": "One", "ok": True, "tests": 1}
+        line.update({"failures": [], "ms": 9000, "variant": "current", "rev": "abc1234"})
+        write_text("r/seeds_9.jsonl", json.dumps(line) + "\n")
+        self.assertEqual(self.times(), 0)
+        self.assertEqual(
+            self.printed[0],
+            "times: 2 cells measured from 3 runs (1 new, 1 replaced); "
+            "seeds: 0.10 vCPU-s per shift, from 3 shifts",
+        )
+        problems = []
+        table = campaign.read_times(TMP + "/times.txt", problems)
+        self.assertEqual(problems, [])
+        self.assertEqual(
+            table,
+            {
+                ("large", "steady", "forming", "star", 30): (7.5, 2, 0.5, "abc1234"),
+                ("large", "steady", "forming", "domain", 30): (2.0, 1, 0.5, "def5678"),
+                ("large", "steady", "lossy", "star", 30): (5.0, 10, 1.0, "old"),  # kept
+                ("seeds",): (0.1, 3, 0.5, "abc1234"),
+            },
+        )
+        with open(TMP + "/times.txt") as f:
+            text = f.read()
+        self.assertTrue(text.startswith(campaign.TIMES_HEADER))
+        self.assertIn("\nlarge steady forming star 30 7.50 2 0.5 abc1234\n", text)
+
+    def test_nothing_measured(self):
+        write_text("times.txt", "seeds 9 10 1 old\n")
+        write("r", [make_record(seed=1, variant="other")])
+        self.assertEqual(self.times(), 2)
+        with open(TMP + "/times.txt") as f:
+            self.assertEqual(f.read(), "seeds 9 10 1 old\n")  # unchanged
