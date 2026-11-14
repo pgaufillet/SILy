@@ -3,12 +3,16 @@
 Measurements of the link layer on real boards: radio adapter, ESP32
 platform, frame security. Procedure: `tools/bench.py` (host side, drives two
 boards over their serial ports; see its docstring), with the current `src/`
-deployed on both boards:
+deployed on both boards (`make deploy PORT=<board>`):
 
 ```sh
 ~/git/t3s3-micropython/.venv/mpremote/bin/python tools/bench.py \
     --a /dev/serial/by-id/<board A> --b /dev/serial/by-id/<board B> --out results.json
 ```
+
+The root's reply turnaround runs apart, one spreading factor per run:
+`--only reply --sf <7|8|9>`, and `--only reply_routing` with the mesh routing
+on both boards.
 
 The last section times the simulator on the host (`make simbench`).
 
@@ -115,6 +119,139 @@ topology 60 s), board B as a node (address 2, `routing=True`), both with
 | Root reports | `PRESENCE 2 0 1` (parent 0, flag *first report*), then `TOPOLOGY 2 [[0, 20, true, 100]]` (margin 20 dB, parent-set member, 100 % delivery), `NODEINFO 2 dc5475db9604 bench2`, then `PRESENCE 2 0 0` one period later |
 | Counters | no rank error, loop, refusal or malformed report on either board |
 | Heap of the bench node with routing (`heap_engine`) | 31.3 KB (12.6–15.8 KB with static routes) |
+
+## 2026-11-14 — two T3S3 boards, SF7–SF9: baseline of the current code
+
+Conditions: the boards and settings of 2026-10-17 (A `b8f862d91b8c`, B
+`dc5475db9604`; same firmware, WiFi off, TX power −9 dBm: RSSI −48 dBm, SNR
++12 dB; bench key with 1000 iterations). Code: `src/mesh/` and `src/board/`
+of commit b7daf82, deployed after removing the boards' `mesh`, `sily` and
+`board` directories, as `.py` source, then compiled to `.mpy` (`mpy-cross`
+1.29.0, `main.py` kept as source) for the memory, key derivation and CPU
+figures. The noise floor was about 3 dB higher than on 2026-10-17 on both
+boards (A −100/−101 dBm, B −107 to −110 dBm): the room, not the code.
+Figures from one run of each test unless stated.
+
+### Memory and flash
+
+| Item | 2026-10-17 | `.py` | `.mpy` |
+|---|---|---|---|
+| Heap of the imported modules (`sily.bench` and dependencies) | 72.9 KB | **134.4 KB** | 133.4 KB |
+| Heap of the link engine (`open_link` + runner, static routes) | 12.6 KB (15.8 KB) | **36.1 KB** | 36.1 KB |
+| Heap of the bench node (static routes) | 15 KB | 38.5 KB | 38.4–38.6 KB |
+| Heap of the link engine with routing (`heap_engine`), root A / node B | – / 31.3 KB | **39.1 / 38.5 KB** | same |
+| Heap of the bench node with routing, root A / node B | – | 40.9 / 40.3 KB | same |
+| Free heap after start (PSRAM) | 1.96 MB | 1.93 MB | 1.93 MB |
+| Application files (`board`, `mesh`, `sily`, `main.py`) | – | 400 KB (`mesh` 358 KB) | 85 KB (21 %) |
+
+The link engine alone now takes 23.5 KB more than on 2026-10-17, and the
+routing only 2.4–3 KB on top of it (18.7 KB then): what the mechanisms added
+since allocate is mostly allocated with the engine (not broken down here).
+Compiled modules save flash and the compilation at import, not heap: the
+bytecode is in RAM either way.
+
+### Platform and key derivation
+
+| Item | 2026-10-17 | `.py` | `.mpy` |
+|---|---|---|---|
+| NVS write + commit of the counter record, mean / max | 2.6 / 15.8 ms | 2.38 / 11.3 ms | same |
+| PBKDF2, application loaded, per iteration (two runs) | 0.24–0.25 ms | 0.197–0.207 ms | **0.299–0.308 ms** |
+| 6 000 iterations (`kdf.DEFAULT_ITERATIONS`), timed | 1.44 s (computed) | 1.19 s | **1.75 s** |
+| PBKDF2, fresh heap (after soft reset) | 0.113 ms | 0.112 ms | 0.113 ms |
+
+RTC user memory unchanged (2048 B, kept across both resets). The derivation
+takes about 1.5 times as long with compiled modules, reproduced in two runs and two
+direct timings; presumably more of its small objects land in PSRAM, as
+between a fresh heap and the loaded application.
+
+### Frame security and CPU per frame (`.py`)
+
+Seal, open and decode medians within 0.06 ms of 2026-10-17 for every frame
+size; the open maxima reach 19.9–20.5 ms (127 and 254 B; 11–13 ms then).
+
+| Path (means of 20 echo exchanges, A / B) | 2026-10-17 | `.py` | `.mpy` |
+|---|---|---|---|
+| Step CHANNEL (encode, seal, adapter `transmit`) | 8.2 / 8.1 ms | 8.6 / 8.5 ms | 8.4 / 8.6 ms |
+| Step RX | 4.0 / 8.0 ms | 4.6 / 7.9 ms | 4.6 / 8.1 ms |
+| **TX path** | 12.4 / 12.2 ms | 13.0 / 12.8 ms | 12.9 / 12.8 ms |
+| **RX path** | 6.8 / 10.6 ms | 7.3 / 10.7 ms | 7.3 / 10.5 ms |
+| Driver only, per frame sent / received | 8.2 + 1.4 / 2.7 ms | 8.35 + 1.35 / 2.73 ms | same |
+
+Means without one collection of 20–26 ms in the run (with it: RX path of A
+8.4 ms in `.py`, of B 11.7 ms in `.mpy`). Echo round trip: 20/20 replies,
+median 201 ms (199–222), about 46 ms of processing on the two boards (42 ms
+then). Packing and sensing before a transmission: 3.6 ms.
+
+### Carrier sense, time on air, error counters, routing
+
+| Carrier sense (A senses every 30 ms while B sends 20 frames of 219 B), five runs | 2026-10-17 | 2026-11-14 |
+|---|---|---|
+| Idle channel, busy / senses | 0 / 50 | 0 / 50 in each run |
+| B transmitting, busy / 100 senses | 96, 95, 97, 93, 77 | 94, 96, 95, 92, 96 |
+| of which by IRQ window | 95, 93, 95, 92, 52 | 90, 93, 95, 91, 96 |
+| of which by RSSI only | 1, 2, 2, 1, 25 | 4, 3, 0, 1, 0 |
+| A's engine while B floods: busy / senses, give-ups | 4–21 / 6–23, 0–3 | 1–21 / 3–23, 0–3 |
+| A received of B's 40 frames | 39 | 39, 39, 39, 40, 40 |
+
+The 2026-10-17 run with 25 senses busy by RSSI only is not reproduced; the
+idle senses still fall in the gaps between B's frames. Time on air (B, 40
+frames of 219 B): measured 13 961.6–13 970.1 ms in five runs for
+13 936.6 ms computed, accounted 14 000–14 008 ms, never below the measured
+time. Error counters (wrong password, cut frames, neighbour filter): the
+same counts as on 2026-10-17. Routing smoke test: the same reports and
+counters; B attached after 2.2 s (6.2 s then), adopting the root's DODAG
+information heard before it solicited it.
+
+### Root's reply turnaround
+
+`--only reply` (`reply_routing`: both boards with the mesh routing). B sends
+probes at random gaps, each one frame to the root carrying an upward message
+of another node (so that the root counts B as relaying) and B's own
+presence: the root answers each at once and B keeps its reply window
+(MESH_DESIGN §8). Root measure: from the RxDone IRQ of B's frame to the
+SetTx of the reply. B's estimate: from its TxDone to the reply's RxDone
+minus the reply's computed time on air. Margin: what is left of B's reply
+window when the reply is received. The root forces a collection in every
+10th turnaround. The design gives the turnaround one backoff slot (time on
+air of a 17 B frame) of the window's two slots of slack. Code: the commit
+that adds this test (no change to `src/mesh/` or `src/board/`).
+
+| Run | Samples, natural / forced collection | Root, natural: median / p95 / p99 / max | Root, forced collection: median / max | B's estimate, max | B's margin, min | Slot / slack |
+|---|---|---|---|---|---|---|
+| SF7 | 360 / 40 | 20.8 / 23.1 / 25.0 / 34.5 ms | 42.3 / 44.5 ms | 46.6 ms | 85 ms | 52 / 104 ms |
+| SF8 | 135 / 15 | 20.7 / 23.7 / 29.3 / 32.3 ms | 45.2 / 46.7 ms | 50.2 ms | 194 ms | 93 / 186 ms |
+| SF9 | 135 / 15 | 20.8 / 22.3 / 32.2 / 37.6 ms | 45.0 / 46.1 ms | 53.1 ms | 385 ms | 165 / 330 ms |
+| SF7, routing | 142 / 15 | 23.0 / 25.9 / 30.1 / 37.0 ms | 47.7 / 49.0 ms | 51.0 ms | 79 ms | 52 / 104 ms |
+
+- No turnaround above one slot; B's margin always positive. Every probe
+  answered at once (replies = probes = samples in the static runs); with
+  routing, one probe of 150 lost on the air (the root was sending a beacon),
+  none to the turnaround, and B's periodic presences answered at once too.
+- At SF7: RxDone service 3.1 ms, RX step 8.35 ms (sensing included), CHANNEL
+  step 8.6 ms, asyncio wake-ups about 1–1.5 ms. The routing adds about
+  2.1 ms per reply (its hooks and the bench's `PRESENCE` print).
+- Tail: a frame counter block written to NVS (every 256 frames, on both
+  boards at once here) +12–17 ms, also delaying B's frame (B's margin 85
+  instead of 111 ms at SF7); a collection +21.5–25 ms; the first frame after
+  start 24–32 ms. A collection and a counter block in one turnaround (about
+  60 ms at SF7 by addition: above one slot, below two) was not observed.
+- B's estimate exceeds the root's measure by a near-constant 2.1 / 3.5 /
+  6.9 ms at SF7 / 8 / 9: the RxDone delay after the last symbol on both
+  boards, and the reply on air 0.63 ms longer than computed.
+
+### Against the simulator's assumptions
+
+| Item | Simulator (`sim/`) | Boards |
+|---|---|---|
+| Root's immediate reply turnaround | 1 ms (`sense_ms`) | median 21 ms (23 with routing), max 38 ms, 42–49 ms with a collection |
+| Start of the sender's reply window | its frame's start on air | about 8 ms before it (the CHANNEL step), 21 ms when a counter block is written |
+| Steps and collections | no time | 8–9 ms per CHANNEL or RX step; collections 20–26 ms |
+| Time on air | computed | +0.63–0.70 ms |
+| Carrier sense during a frame | every audible frame busy | 92–96 % busy; the idle senses fall between frames |
+
+Not measured here (a third board needed): the start of the window of a
+child that overhears its parent's frame to the root, and back-to-back
+reply windows.
 
 ## 2026-10-19 — simulator speed, host
 
