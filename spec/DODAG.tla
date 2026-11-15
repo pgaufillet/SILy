@@ -20,6 +20,14 @@
 (* - holding (2 presence periods) expires only while the node has no      *)
 (*   route; the duplicate cache (2 periods) never expires (loops close    *)
 (*   within a few Imin);                                                   *)
+(* - Errors "once", "retest": a neighbour is heard within the silence      *)
+(*   limit (2.5 presence periods) while fewer than QUIET = 2 of its last   *)
+(*   frames, presences or others, were lost in a row by the node; an error *)
+(*   held by its relay without route expires at any moment, but not just   *)
+(*   after QUIET frames of its origin, a live neighbour over a live link,  *)
+(*   were lost by the relay: the error's holding (2 periods) outlasts a    *)
+(*   presence period, so the origin sends one more frame first (heard, or  *)
+(*   lost: beyond the limit);                                              *)
 (* - attached nodes may send a frame at any time (presence every period,  *)
 (*   Trickle advertisements after a reset, at once after a rank error or  *)
 (*   a parent change, root beacon): Announce;                             *)
@@ -104,12 +112,42 @@
 (* ordered freely with its other frames, carrying its rank (255 when it   *)
 (* is detached); a detaching node holds its waiting copies. The queue is  *)
 (* unbounded (never refuses); one copy per node and message (a duplicate  *)
-(* taken again replaces a copy still waiting). An error (port 4, class 1)  *)
-(* is abstracted: it is "sent" when a relay fails a message, "recv" when the *)
-(* origin itself fails it or when the error reaches it, which happens once *)
-(* both the failing node and the origin are connected to the root (the    *)
-(* error travels as class 1 to the root, then downward, reliable.py:       *)
-(* 691-757; its own custody is not modelled).                             *)
+(* taken again replaces a copy still waiting).                             *)
+(*                                                                         *)
+(* Errors (port 4, class 1; Errors): the origin knows the failure ("recv") *)
+(* at once when it fails its own message, or when the error of a relay     *)
+(* reaches it.                                                             *)
+(* - "arrive" (the earlier model): the error of a relay is "sent" and      *)
+(*   reaches the origin once both the failing node and the origin are      *)
+(*   connected to the root (the error travels as class 1 to the root, then *)
+(*   downward, reliable.py:945-993); it never expires, and the direct      *)
+(*   error is left out.                                                    *)
+(* - "once" (the code): the relay holding the error (errFrom) chooses its  *)
+(*   path once, at the failure (Reliable._send_error,                      *)
+(*   reliable.py:977-993). To an origin that is a neighbour heard within   *)
+(*   the silence limit (Near, Reliable._near, reliable.py:995-1002):       *)
+(*   link-local ("dir", ErrDirect), heard, or not answered (a dead origin  *)
+(*   or link: its attempts, and the fresh ones while the origin is heard,  *)
+(*   exhausted, reliable.py:731-742) and then upward, the same error,      *)
+(*   never direct again ("upd", reliable.py:961-967). Otherwise upward     *)
+(*   ("up"). An upward error reaches the origin as under "arrive"; while   *)
+(*   its relay has no route it is held (reliable.py:1017-1018), and its    *)
+(*   own holding (2 periods) may end: it is dropped, never an error about  *)
+(*   an error (reliable.py:930-933, 968; ErrExpire).                       *)
+(* - "retest" (the remedy): the same, and the relay re-tests the direct    *)
+(*   path while it holds an upward error (ErrRetest) and at the error's    *)
+(*   expiry.                                                               *)
+(* A dropped error is MP5's accepted exception ("drop", MESH_DESIGN §12)   *)
+(* when the origin is cut off from the root (not Connected) and cannot be  *)
+(* told directly: dead, not a neighbour of the relay, over a dead link,    *)
+(* unheard beyond the silence limit, or its direct error not answered;     *)
+(* otherwise it is a silent loss ("lost"). Abstractions: one error per     *)
+(* message (a relay failing a copy while an error of the message is        *)
+(* received or under way adds none); a direct error to a live origin over  *)
+(* a live link always arrives (losing all its attempts would only send it  *)
+(* upward, as one not answered); the error's custody beyond its relay (the *)
+(* relays above it, the root's downward holding) is not modelled, as under *)
+(* "arrive".                                                               *)
 (*                                                                         *)
 (* Late root acknowledgements (LateAck, Acks = "frame"): the root batches *)
 (* its acknowledgements, and under load its medium access can delay one   *)
@@ -272,9 +310,10 @@
 (*   whatever was lost. Ungrounded nodes hold their upward messages        *)
 (*   (Float, below).                                                        *)
 (*                                                                         *)
-(* The relay Victim may die once, at a moment it holds no message (a      *)
-(* relay dying with a message it acknowledged is MP5's accepted exception, *)
-(* §12, left out of the model). Victim = 0 (the root): no node dies.       *)
+(* The relay Victim may die once, at a moment it holds no message (a relay *)
+(* dying with a message it acknowledged is MP5's accepted exception, §12,  *)
+(* left out of the model) and no error (Errors "once", "retest"). With     *)
+(* Victim = 0 (the root), no node dies.                                    *)
 (*                                                                         *)
 (* Fixes (design issues of spec/README.md, and the later ones):            *)
 (* - Fix3 = "custody": a node other than the destination acknowledges and  *)
@@ -361,7 +400,9 @@ CONSTANTS
                 \* "reachetx" (the same, relay links by ETX) or "reachall" (every link by reachability)
     Seq,        \* root sequence: "none" (a ghost only: the code before remedy C) or "babel" (feasibility, floating)
     MaxSeq,     \* increments of the root sequence (0: none; values 0..MaxSeq, no wrap-around)
-    Probe       \* presence to the root: "none" (no sample: the code before) or "presence" (acknowledged, a probe)
+    Probe,      \* presence to the root: "none" (no sample: the code before) or "presence" (acknowledged, a probe)
+    Errors      \* a relay's error: "arrive" (abstracted: the earlier model), "once" (direct path chosen at the
+                \* failure: the code) or "retest" (re-tested while held, and at its expiry: the remedy)
 
 NONE == -1
 Root == 0
@@ -386,6 +427,9 @@ ByReach(c) == Elig = "reachall" \/ (RootReach /\ c = Root)
 Counted(c) == Elig \in {"none", "reachetx", "reachall"} \/ c = Root
 LimOf(c) == IF ByReach(c) THEN UNREACH ELSE INELIG
 Lim == IF RootReach THEN UNREACH ELSE INELIG    \* the largest LimOf
+\* Frames of a neighbour lost in a row making it unheard within the silence limit
+\* (2.5 presence periods; Errors "once", "retest": Near).
+QUIET == 2
 
 (***************************************************************************)
 (* Graphs: edges <<a, b, cost>>, cost in hops (ETX).                       *)
@@ -460,6 +504,7 @@ ASSUME Elig \in {"none", "etx", "reach", "reachetx", "reachall"} /\ (Elig # "non
 ASSUME Seq \in {"none", "babel"} /\ MaxSeq \in Nat
 ASSUME Seq = "babel" => Thr = "low" /\ Versions = 1 /\ Acks = "frame" /\ Fix5 = "solicit"
 ASSUME Probe \in {"none", "presence"} /\ (Probe = "presence" => Acks = "frame")
+ASSUME Errors \in {"arrive", "once", "retest"}
 
 \* The rank of the last frame is tracked (otherwise constant).
 TrackAir == Thr \in {"air", "minair"}
@@ -508,8 +553,10 @@ VARIABLES
     cp,        \* cp[m][n]: copy of m at n, [st, hop, att, acc]
     giver,     \* giver[m][n]: node m was first received from (n itself: origin); NONE: not in the cache
     delivered, \* m reached the root
-    err,       \* "none", "sent" (by a relay, towards the origin), "recv" (the origin knows)
-    errFrom,   \* node that sent the error
+    err,       \* "none"; "sent" (by a relay, Errors "arrive"); "up", "dir", "upd" (the error of a
+               \* relay: upward, direct, upward after a direct one not answered); "recv" (the
+               \* origin knows); "drop", "lost" (dropped: MP5's exception, a silent loss)
+    errFrom,   \* relay that failed the message (sent or holds the error)
     loops,     \* loop formations, saturated at LoopCap
     rl,        \* a rejoin (attachment from rank 255) closed a loop
     rerr,      \* a rank error was detected (data-path validation)
@@ -559,7 +606,8 @@ TypeOK ==
     /\ lost \in 0..MaxLoss /\ consec \in [Nodes -> [Nodes -> 0..MaxConsec]]
     /\ sub \in [Msgs -> BOOLEAN] /\ cp \in [Msgs -> [Nodes -> Copies]]
     /\ giver \in [Msgs -> [Nodes -> Nodes \cup {NONE}]]
-    /\ delivered \in [Msgs -> BOOLEAN] /\ err \in [Msgs -> {"none", "sent", "recv"}]
+    /\ delivered \in [Msgs -> BOOLEAN]
+    /\ err \in [Msgs -> {"none", "sent", "up", "dir", "upd", "recv", "drop", "lost"}]
     /\ errFrom \in [Msgs -> Nodes \cup {NONE}]
     /\ loops \in 0..LoopCap /\ rl \in BOOLEAN /\ rerr \in BOOLEAN /\ xv \in BOOLEAN
     /\ dc \in [Nodes -> [Nodes -> 0..Rise]] /\ rises \in 0..Rise
@@ -826,7 +874,8 @@ LossOK(s, L, extra) ==
 
 FrameCounters(s, L, H, extra) ==
     /\ lost' = lost + Cardinality(L) + extra
-    /\ consec' = IF MaxConsec >= MaxLoss THEN consec     \* no constraint: not tracked
+    \* no constraint and no error reading it (Near): not tracked
+    /\ consec' = IF MaxConsec >= MaxLoss /\ Errors = "arrive" THEN consec
                  ELSE [consec EXCEPT ![s] = [k \in Nodes |->
                           IF k \in L THEN consec[s][k] + 1
                           ELSE IF k \in H THEN 0 ELSE consec[s][k]]]
@@ -1010,6 +1059,7 @@ Expire(k, c) ==
 Die ==
     /\ Victim # Root /\ alive[Victim]
     /\ \A m \in Msgs : cp[m][Victim].st = "no"
+    /\ \A m \in Msgs : ~(errFrom[m] = Victim /\ err[m] \in {"up", "dir", "upd"})
     \* its explicit acknowledgements are out (sent at once)
     /\ \A m \in Msgs, k \in Nodes : ~(cp[m][k].st = "p" /\ cp[m][k].hop = Victim /\ cp[m][k].acc = "exp")
     /\ alive' = [alive EXCEPT ![Victim] = FALSE]
@@ -1425,9 +1475,16 @@ Resume(s, m) ==
     /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, err, errFrom, loops, rl, rerr, xv,
                    linkvars>>
 
-\* Holding expired without route (reliable.py:677-679), or ungrounded (Seq "babel"):
-\* failure (reliable.py:691-712): the origin's own message fails to its application, a
-\* relay's makes an error.
+\* o is a neighbour heard by k within the silence limit (Reliable._near,
+\* reliable.py:995-1002): alive, its entry present (removed for a dead node or over a
+\* dead link only, Expire), fewer than QUIET of its last frames lost in a row by k. A
+\* dead origin is never near (the code may still try it, not answered: the same end).
+Near(k, o) == alive[o] /\ o \in Nbr(k) /\ view[k][o] # NONE /\ consec[o][k] < QUIET
+
+\* Holding expired without route (Reliable._resume_held, reliable.py:930-933), or
+\* ungrounded (Seq "babel"): failure (Reliable.fail, reliable.py:945-975): the origin's
+\* own message fails to its application, a relay's makes an error (Errors "once",
+\* "retest": direct to an origin near, otherwise upward, Reliable._send_error).
 HoldExpire(s, m) ==
     /\ alive[s] /\ cp[m][s].st = "h" /\ (pref[s] = NONE \/ fl[s])
     \* the owed acknowledgements (half a timeout) precede the holding (2 periods)
@@ -1435,16 +1492,69 @@ HoldExpire(s, m) ==
     /\ cp' = [cp EXCEPT ![m][s] = NoCopy]
     /\ IF s = Orig(m)
        THEN err' = [err EXCEPT ![m] = "recv"] /\ UNCHANGED errFrom
-       ELSE /\ err' = [err EXCEPT ![m] = IF err[m] = "recv" THEN "recv" ELSE "sent"]
+       ELSE IF Errors = "arrive"
+       THEN /\ err' = [err EXCEPT ![m] = IF err[m] = "recv" THEN "recv" ELSE "sent"]
+            /\ errFrom' = [errFrom EXCEPT ![m] = s]
+       \* one error per message: an error received or under way is kept
+       ELSE IF err[m] \in {"recv", "up", "dir", "upd"} THEN UNCHANGED <<err, errFrom>>
+       ELSE /\ err' = [err EXCEPT ![m] = IF Near(s, Orig(m)) THEN "dir" ELSE "up"]
             /\ errFrom' = [errFrom EXCEPT ![m] = s]
     /\ UNCHANGED <<routing, lost, consec, sub, giver, delivered, loops, rl, rerr, xv, linkvars>>
 
-\* The error reaches the origin (abstraction: both ends connected to the root).
+\* An upward error reaches the origin (abstraction: both ends connected to the root).
 ErrorArrives(m) ==
-    /\ err[m] = "sent" /\ Connected(errFrom[m]) /\ Connected(Orig(m))
+    /\ err[m] \in {"sent", "up", "upd"} /\ Connected(errFrom[m]) /\ Connected(Orig(m))
     /\ err' = [err EXCEPT ![m] = "recv"]
     /\ UNCHANGED <<routing, lost, consec, sub, cp, giver, delivered, errFrom, loops, rl, rerr, xv,
                    linkvars>>
+
+(***************************************************************************)
+(* The error of a relay (Errors "once", "retest"; header): direct, held    *)
+(* without route, expired.                                                 *)
+(***************************************************************************)
+\* The direct error (link-local): heard by its origin, alive over a live link; or not
+\* answered (a dead origin or link), then upward, never direct again.
+ErrDirect(m) ==
+    LET k == errFrom[m]
+        o == Orig(m)
+    IN  /\ err[m] = "dir"
+        /\ err' = [err EXCEPT ![m] = IF alive[o] /\ ~Severed(k, o) THEN "recv" ELSE "upd"]
+        /\ UNCHANGED <<routing, lost, consec, sub, cp, giver, delivered, errFrom, loops, rl, rerr,
+                       xv, linkvars>>
+
+\* The remedy ("retest"): a relay holding an upward error without route sends it direct
+\* once its origin is near.
+ErrRetest(m) ==
+    LET k == errFrom[m] IN
+    /\ Errors = "retest" /\ err[m] = "up" /\ alive[k] /\ (pref[k] = NONE \/ fl[k])
+    /\ Near(k, Orig(m))
+    /\ err' = [err EXCEPT ![m] = "dir"]
+    /\ UNCHANGED <<routing, lost, consec, sub, cp, giver, delivered, errFrom, loops, rl, rerr, xv,
+                   linkvars>>
+
+\* MP5's accepted exception (MESH_DESIGN §12) at the drop of the error of relay k: the
+\* origin o is cut off from the root (no route) and cannot be told directly: dead, not
+\* a neighbour of k, over a dead link, unheard beyond the silence limit, or its direct
+\* error not answered.
+Exempt(k, o, m) ==
+    /\ ~Connected(o)
+    /\ \/ err[m] = "upd" \/ ~alive[o] \/ o \notin Nbr(k) \/ Severed(o, k)
+       \/ consec[o][k] > QUIET
+
+\* The error's own holding (2 periods) ends while its relay has no route: dropped, never
+\* an error about an error (reliable.py:930-933, 968), within the exception ("drop") or
+\* not ("lost"); "retest": sent direct instead to an origin near. Timing (header): not
+\* just after QUIET frames of an origin alive over a live link were lost by the relay
+\* (its next frame comes first, heard or lost).
+ErrExpire(m) ==
+    LET k == errFrom[m]
+        o == Orig(m)
+    IN  /\ Errors # "arrive" /\ err[m] \in {"up", "upd"} /\ alive[k] /\ (pref[k] = NONE \/ fl[k])
+        /\ ~(alive[o] /\ o \in Nbr(k) /\ ~Severed(o, k) /\ consec[o][k] = QUIET)
+        /\ err' = [err EXCEPT ![m] = IF Errors = "retest" /\ err[m] = "up" /\ Near(k, o) THEN "dir"
+                                     ELSE IF Exempt(k, o, m) THEN "drop" ELSE "lost"]
+        /\ UNCHANGED <<routing, lost, consec, sub, cp, giver, delivered, errFrom, loops, rl, rerr,
+                       xv, linkvars>>
 
 (***************************************************************************)
 (* Specification. Initial state: the formed DODAG (shortest paths, lower   *)
@@ -1489,7 +1599,7 @@ Protocol ==
     \/ \E s \in Nodes, m \in Msgs :
           SendData(s, m) \/ AckFrame(s, m) \/ Timeout(s, m) \/ Resume(s, m) \/ HoldExpire(s, m)
           \/ LateAckFrame(s, m)
-    \/ \E m \in Msgs : ErrorArrives(m)
+    \/ \E m \in Msgs : ErrorArrives(m) \/ ErrDirect(m) \/ ErrRetest(m) \/ ErrExpire(m)
 
 \* IncAdv: a node whose rank rose sends its frame before anything else happens.
 Owed == {k \in Nodes : inc[k]}
@@ -1518,6 +1628,8 @@ WNodes == IF Track THEN Nodes ELSE {}
 LNodes == IF LateAck = "accept" THEN Nodes \ {Root} ELSE {}
 \* Presence probes towards the root are sent, and answered or failed.
 PNodes == IF Probe = "presence" THEN Nodes \ {Root} ELSE {}
+\* The error of a relay moves on: direct, re-tested, expired (Errors "once", "retest").
+EMsgs == IF Errors # "arrive" THEN Msgs ELSE {}
 
 Fairness ==
     /\ \A s \in Nodes : WF_vars(Announce(s)) /\ WF_vars(HoldEnd(s))
@@ -1530,6 +1642,7 @@ Fairness ==
     /\ \A k \in LNodes, m \in Msgs : WF_vars(LateAckFrame(k, m))
     /\ \A k \in PNodes : WF_vars(Presence(k)) /\ WF_vars(ProbeStep(k))
     /\ (Seq = "babel" /\ MaxSeq >= 2) => WF_vars(NewSeq)
+    /\ \A m \in EMsgs : WF_vars(ErrDirect(m)) /\ WF_vars(ErrRetest(m)) /\ WF_vars(ErrExpire(m))
 
 Spec == Init /\ [][Next]_vars
 FairSpec == Spec /\ Fairness
@@ -1539,14 +1652,20 @@ FairSpec == Spec /\ Fairness
 (***************************************************************************)
 Holds(n, m) == alive[n] /\ cp[m][n].st # "no"
 
-\* MP5, safety: a submitted message is delivered, failed (error), or held by a node
-\* (queued, held, or sent and waiting: sent again after its timeout, or released
-\* only by the forward of its next hop, which then holds it).
+\* MP5, safety: a submitted message is delivered, failed (an error received, under way,
+\* or dropped within MP5's exception: not "lost"), or held by a node (queued, held, or
+\* sent and waiting: sent again after its timeout, or released only by the forward of
+\* its next hop, which then holds it).
 NoSilentLoss ==
-    \A m \in Msgs : sub[m] => (delivered[m] \/ err[m] # "none" \/ \E n \in Nodes : Holds(n, m))
+    \A m \in Msgs : sub[m] => (delivered[m] \/ err[m] \notin {"none", "lost"}
+                               \/ \E n \in Nodes : Holds(n, m))
 
 \* MP5, liveness: delivered, or the origin learns the failure.
 MP5Live == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] = "recv")
+
+\* MP5, liveness within its accepted exception (Errors "once", "retest"): delivered, the
+\* origin learns the failure, or the error is dropped where the origin cannot be told.
+MP5Exempt == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] \in {"recv", "drop"})
 
 \* Late root acknowledgements, exhausted attempts: no node drops the root after
 \* failed attempts, unless its link to the root died (Cut). With Exhaust = "drop",
@@ -1604,8 +1723,9 @@ CutOffLive == <>[]CutOffDetached
 \* ends detached.
 CutOffLiveTraffic == <>(cut /\ \E m \in Msgs : cp[m][CutChild].st = "q") => CutOffLive
 \* MP5, partition: every submitted message ends delivered or failed by some node (its
-\* error may not reach an origin cut off with it, DODAG_line_partition_MP5Live): no
-\* copy is retried for ever.
+\* error may not reach an origin cut off with it: under Errors "arrive",
+\* DODAG_line_partition_MP5Live; the direct error reaches a neighbour origin,
+\* DODAG_line_partitiononce_MP5Live): no copy is retried for ever.
 MP5Decided == \A m \in Msgs : sub[m] ~> (delivered[m] \/ err[m] # "none")
 \* Global repair: every node connected to the root ends in the root's version.
 AllInVersion == \A n \in Nodes : (alive[n] /\ GraphConnected(n)) => ver[n] = ver[Root]
@@ -1683,6 +1803,7 @@ RejoinBest ==
 \* Non-vacuity witnesses (each must be violated).
 NeverDelivered == \A m \in Msgs : ~delivered[m]
 NeverError == \A m \in Msgs : err[m] # "recv"
+NeverDropped == \A m \in Msgs : err[m] # "drop"
 NoRankError == ~rerr
 \* A copy sent again while the root's acknowledgement of an earlier transmission
 \* is still expected (LateAck = "accept").
