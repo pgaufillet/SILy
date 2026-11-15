@@ -1480,6 +1480,65 @@ class Rules(unittest.TestCase):
         self.assertEqual(failures, [(ROOT, 20, 6, 4)])
 
 
+class RootErrors(unittest.TestCase):
+    """§12: the root forwards an error to its origin; without a downward route
+    (§10, a later step) it drops the error at once instead of holding it."""
+
+    def _error_from_r(self, root, origin):
+        # The root receives relay R's error about origin's message to the root.
+        payload = encode_error(1, R, origin, ROOT, 20, 5)
+        msg = Message(UPWARD, 1, ports.ERROR, payload, origin=R, seq=1)
+        root.reliable.on_error(R, msg, frame.Header(ROOT, R, 1, 1))
+        return payload
+
+    def test_error_without_route_dropped_at_once(self):
+        root = _engine(ROOT, None, seed=3)
+        self._error_from_r(root, X)  # X: not a neighbour of the root
+        c = root.counters
+        self.assertEqual((c.errors_forwarded, c.errors_dropped, c.errors_direct), (1, 1, 0))
+        self.assertEqual((len(root.queue), c.held), (0, 0))
+        frames, _ = _run(root, 0, 3 * root.neighbours.period_ms)
+        self.assertEqual((frames, c.hold_expired, c.errors_dropped), ([], 0, 1))
+
+    def test_error_with_a_route_queued_downward(self):
+        root = _engine(ROOT, R, seed=3)  # a downward route to X through R (stub)
+        payload = self._error_from_r(root, X)
+        c = root.counters
+        self.assertEqual((c.errors_forwarded, c.errors_dropped, c.held), (1, 0, 0))
+        self.assertEqual(len(root.queue), 1)
+        (f,), _ = _run(root, 0)
+        h, msgs = _messages(_KEY, f)
+        self.assertEqual(h.dest, R)
+        self.assertEqual(
+            [(m.mode, m.port, m.dest, bytes(m.payload)) for m in msgs],
+            [(DOWNWARD, ports.ERROR, X, payload)],
+        )
+
+    def test_direct_error_dropped_once_its_fresh_attempts_end(self):
+        # N, a neighbour of the root, never answers the root's direct error:
+        # fresh attempts while N is heard, for at most the holding from the
+        # first exhaustion; then downward as any error of the root, without
+        # route: dropped and counted, never held.
+        root = _engine(ROOT, None, seed=3)
+        n = _engine(N, ROOT)
+        n.submit(20, 1, ROOT, b"x")
+        (f,), now = _run(n, 0)
+        _rx(root, now, f)  # N heard by the root
+        self._error_from_r(root, N)
+        c = root.counters
+        self.assertEqual((c.errors_direct, len(root.queue)), (1, 1))
+        frames, now = _run(root, now, now + 4 * root.neighbours.period_ms)
+        sent = []
+        for g in frames:
+            h, msgs = _messages(_KEY, g)
+            sent.extend((h.dest, m.mode) for m in msgs if m.port == ports.ERROR)
+        k = len(sent)
+        self.assertEqual(sent, [(N, LINK_LOCAL)] * k)
+        self.assertTrue(k > ATTEMPTS and k % ATTEMPTS == 0, k)
+        self.assertEqual((c.unreachable, c.errors_dropped), (1, 1))
+        self.assertEqual((c.held, c.hold_expired, len(root.queue)), (0, 0, 0))
+
+
 def _grounded_hop(hop):
     # next_hop of routing (`Dodag.next_hop`): none for an upward class 1/2
     # message while the node is ungrounded.

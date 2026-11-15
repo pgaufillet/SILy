@@ -112,9 +112,12 @@ the grounding (a link-local message is never held); once its attempts are
 exhausted it gets fresh ones, after a retry delay, while the origin is
 heard, for at most the holding from the first exhaustion (``_since``),
 then goes upward as any error (the same error, not a new one). The root
-sends its errors to a neighbour origin the same way. An error takes the
-entry of the message it reports, whatever the node's quota
-(`mesh.txqueue`).
+sends its errors to a neighbour origin the same way. An error the root
+cannot route (``engine.next_hop`` gives none: downward routing, §10, comes
+later, so any origin it does not reach directly) is dropped and counted at
+once (``errors_dropped``), not held: so is the root's direct error once
+its fresh attempts end. An error takes the entry of the message it
+reports, whatever the node's quota (`mesh.txqueue`).
 
 **Receiver** (`mesh.link.LinkEngine._receive`): every class 1/2 message
 received is looked up in the duplicate cache (`DUPLICATES` = 128 entries,
@@ -731,7 +734,8 @@ class Reliable:
         if msg.mode == LINK_LOCAL and msg.port == ERROR:
             # A direct error: fresh attempts while its origin is heard, for
             # at most the holding from the first exhaustion (`_since`);
-            # then failed, which sends it upward (`fail`).
+            # then failed, which sends it upward (`fail`; the root's,
+            # without downward route, is dropped).
             if self._since[slot] is None:
                 self._since[slot] = now
             if self._near(hop, now) and now < self._since[slot] + self.hold_ms():
@@ -950,9 +954,11 @@ class Reliable:
         §12 makes errors go "to the root"; a relay without route therefore
         holds its error like any class 1 message, so the origin learns of a
         failure only if a path to the root returns within that holding. The
-        error takes the entry the message leaves: admitted whatever the
-        node's quota (`mesh.txqueue`), it occupies no more room than the
-        message did (refused, it would be a silent loss, MP5).
+        root, without a route to the origin, drops its error at once
+        (`_send_error`). The error takes the entry the message leaves:
+        admitted whatever the node's quota (`mesh.txqueue`), it occupies no
+        more room than the message did (refused, it would be a silent loss,
+        MP5).
         """
         engine = self.engine
         self.queue.remove(slot, msg)
@@ -976,7 +982,8 @@ class Reliable:
 
     def _send_error(self, payload, origin, now, exempt=False, direct=True):
         # To origin itself when it is a neighbour (direct), else upward (or
-        # from the root, downward). exempt: as `send_own`.
+        # from the root, downward; dropped without route). exempt: as
+        # `send_own`.
         engine = self.engine
         seq = engine.next_seq()
         if direct and self._near(origin, now):
@@ -988,6 +995,12 @@ class Reliable:
             return
         if engine.is_root:
             msg = Message(DOWNWARD, 1, ERROR, payload, dest=origin, seq=seq)
+            if engine.next_hop is None or engine.next_hop(msg) is None:
+                # No route to the origin (downward routing, §10, comes
+                # later): dropped and counted at once, not held; holding
+                # it would end the same way, the root's queue busy meanwhile.
+                self.counters.errors_dropped += 1
+                return
         else:
             msg = Message(FIRST_HOP, 1, ERROR, payload, seq=seq)
         self.send_own(msg, now, exempt)

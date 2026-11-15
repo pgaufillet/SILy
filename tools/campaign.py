@@ -84,8 +84,9 @@ MP5); a violation of MP11, MP9 or MP13; an overload run whose recovery
 failed with a board other than the root still holding messages at the
 end (``recovery.nodes``; a record without the field counts as a breach).
 Listed apart, not breaches: the recovery failures with only the root's
-queue left (the recovery check counts the downward errors the root holds
-for origins it cannot reach, which MP5 exempts); the MP10 violations of
+queue left (before the root dropped at once the errors it cannot route,
+the recovery check counted those it held for origins it could not reach,
+which MP5 exempts); the MP10 violations of
 the runs that are not overload cases (records without ``recovery``: no
 overload window accepts them); each failing (shift, class, test) of the
 seeds lines with the command reproducing it, then the shifts missing

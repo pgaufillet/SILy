@@ -1952,8 +1952,12 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   frames lost per Node, two distinct sequences, 2 G + 2 periods; one more
   G per further frame lost.
 - **Errors are class 1** (port 4, upward). The root forwards an error about an
-  upward or P2P message to its origin. An error about an error is never
-  generated, only counted.
+  upward or P2P message to its origin. An error it cannot route (no
+  downward route to the origin: until downward routing exists, §10, any
+  origin that is not its neighbour, direct error below) is dropped and
+  counted at once, not held: with no route to wait for, holding it only
+  delayed the same outcome and kept it 2 periods in the root's queue. An
+  error about an error is never generated, only counted.
 - **Direct error**: when the origin of the failed message is a neighbour
   (heard within the silence limit), the error goes to it directly,
   link-local (mode 0, link destination the origin), whatever the node's
@@ -1963,10 +1967,12 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   most the holding (2 presence periods) from the first exhaustion; then
   it goes upward as any error (the same error, once). The root sends its
   errors (forwarded, or about its own messages) to a neighbour origin
-  the same way. Without it, an error had to reach the root first: a
-  relay cut off from the root by an overload (its uplink's
-  acknowledgements drowned by hidden terminals, the 30-node star with a
-  single relay after its burst) looks, from where it stands, like a relay
+  the same way; once their fresh attempts end, they take the downward
+  route as any error of the root, dropped without one (above). Without
+  the direct error, an error had to reach the root first: a relay cut off
+  from the root by an overload (its uplink's acknowledgements drowned by
+  hidden terminals, the 30-node star with a single relay after its
+  burst) looks, from where it stands, like a relay
   over a dead uplink; it failed its held messages after the holding and
   its errors expired in turn before the relay could rejoin (the
   reachability of the link it left comes back a silence limit after its
@@ -1993,7 +1999,9 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   drowned by hidden terminals for longer (the overloaded single-relay
   star) has its origins among its neighbours. The return path of an
   error to an origin that is not the relay's neighbour is an open point
-  of downward routing (§10). Applications that cannot accept
+  of downward routing (§10); until it exists, such an error reaching the
+  root is dropped there (above): the failure is explicit at the root, not
+  at the origin. Applications that cannot accept
   these risks use class 2, whose end-to-end recovery covers them.
 - A frame holding a refused message is not acknowledged at all (one entry
   per frame): its other, delivered messages may then be retried (duplicates,
@@ -2119,9 +2127,10 @@ holding; a relay under load):
   only, before.
 - **Acknowledgements outside the quota**: the node's own acknowledgements
   (port 3) are not refused by the quota (still by a full queue: their
-  number is not bounded). The root holding errors it cannot route yet
-  (§10) beyond its quota otherwise refused its acknowledgements to its
-  child, which then left it as unreachable.
+  number is not bounded). Before this rule, the errors the root could not
+  route yet (§10), which it then held (it now drops them, §12), took its
+  quota, which refused its acknowledgements to its child: the child then
+  left the root as unreachable.
 - **An error takes the entry of its message**: the error a relay queues
   for a message it fails (§12 class 1) is admitted whatever its own
   quota: it occupies no more room than the message did. Refused, it was a

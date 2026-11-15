@@ -258,7 +258,9 @@ class Counters:
         self.errors_received = 0  # errors about own messages (failure callback)
         self.errors_forwarded = 0  # root: errors forwarded to the origin
         self.errors_direct = 0  # errors sent to their origin, a neighbour (link-local)
-        self.errors_dropped = 0  # errors failed (never an error about an error) or refused
+        # Errors failed (never an error about an error), refused, or at the
+        # root without route to their origin (dropped at once, not held).
+        self.errors_dropped = 0
         self.errors_misrouted = 0
         self.errors_malformed = 0
 

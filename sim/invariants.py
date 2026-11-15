@@ -631,12 +631,13 @@ class Delivery(Check):
     counterexample of the TLA+ `DODAG_line_partition_MP5Live`), counted
     ``partition``.
 
-    Until downward routing exists (§10), the root cannot forward to the
-    origin an error about a message failed by a relay (port 4): the root
-    holds it without route and drops it. Such a message, whose error
-    reached the root, is counted apart (``at_root``), not as a violation:
-    the failure is explicit, and reaching the sender is the downward step's
-    to check.
+    Until downward routing exists (§10), the root forwards an error about a
+    message failed by a relay (port 4) only to an origin among its
+    neighbours (§12 direct error): any other it drops at once, without
+    route. Such a message, whose error reached the root and not its
+    sender, is counted apart (``at_root``), not as a violation: the
+    failure is explicit, and reaching the sender is the downward step's to
+    check.
 
     Copies delivered more than once (§2 MP5 exceptions, §12 duplicates: a
     copy arriving after the root's duplicate window) are counted

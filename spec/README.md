@@ -572,9 +572,9 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   ones while the origin is heard, would only send it upward as one not
   answered); one error per message (a relay failing a copy while an error
   of the message is received or under way adds none); the error's custody
-  beyond its relay (the relays above it, the root's downward holding) is
-  not modelled, as under `"arrive"`. A relay holding an error does not
-  die (as with a message, below).
+  beyond its relay (the relays above it, the root's forwarding to the
+  origin) is not modelled, as under `"arrive"`. A relay holding an error
+  does not die (as with a message, below).
 - **Root sequence** (`Seq`, `MaxSeq`): the root increments a sequence at
   each beacon (`NewSeq`, `MaxSeq` times, no wrap-around: the code compares
   in serial arithmetic and forgets a sequence that has not advanced for 50
