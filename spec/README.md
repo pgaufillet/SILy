@@ -1384,8 +1384,9 @@ How each fix is implemented, what it costs, and the limits accepted.
   (`"retest"`), not yet in the code. With it, one silent loss remains
   (`DODAG_diamond_errretest_cutrelay`): a relay without route drops the
   error of an origin that is not its neighbour while that origin has a
-  route through another branch. To decide: its remedy, and the wording of
-  MP5's exception (MESH_DESIGN §12).
+  route through another branch. MP5's exception states this limit
+  (MESH_DESIGN §2, §12); the return path of such an error is decided with
+  downward routing (§10).
 - **Global repair wave**: a solicitation of finite rank (only a node behind
   a newer version sends one) answered by newer neighbours only, so that the
   node's own children no longer answer it in the window of its parent's
