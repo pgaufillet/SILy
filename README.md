@@ -74,6 +74,7 @@ esptool, ruff, codespell).
 make test                      # host tests on the MicroPython unix port
 make lint                      # ruff check, ruff format --check, codespell
 make check                     # lint + test
+make push-check                # before a push: lint + messages and added lines of the unpushed commits
 make simbench NODES=30         # simulator wall clock for 10 simulated minutes
 make seeds                     # scenario suites on 500 seed shifts, about 10 min (not in check)
 make large                     # large-network invariants, about 7 min (not in check)

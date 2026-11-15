@@ -152,7 +152,7 @@ OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
 .PHONY: help check test seeds simbench large sweep sweep-summary campaign-plan \
-	campaign campaign-fetch trace lint firmware flash deploy \
+	campaign campaign-fetch trace lint push-check firmware flash deploy \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -169,6 +169,7 @@ help:
 	@echo "make trace TEST=M[.C]|RUN=\"...\" record traces of a test class or a large run [OUT=build/trace]"
 	@echo "make lint                 ruff (check, format), codespell, no logbook references"
 	@echo "make check                lint + test"
+	@echo "make push-check           before a push: lint + the unpushed commits' messages and added lines"
 	@echo "make firmware             build the $(BOARD) firmware"
 	@echo "make flash PORT=<dev>     flash the $(BOARD) firmware"
 	@echo "make deploy PORT=<dev>    copy src/ to the board and reset it"
@@ -243,6 +244,9 @@ lint:
 	$(RUFF) format --check .
 	$(CODESPELL) $(LINT_PATHS)
 	sh tools/public_text.sh
+
+push-check: lint
+	sh tools/public_text.sh --commits
 
 firmware:
 	$(MAKE) -C $(T3S3) build BOARD=$(BOARD) BOARD_DIR=$(BOARD_DIR)
