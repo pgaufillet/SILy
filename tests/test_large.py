@@ -7,7 +7,8 @@ older record) not counted; a run's record names the boards still holding
 messages at the end and counts the attempts to a stale hop; a record
 already written is skipped (a sweep resumes); the load names round trip
 through a run's name, and only the ``s15`` load makes the star an
-overload case.
+overload case; an overload run goes on past its end while messages are
+queued, within its bound (a stub network).
 """
 
 import os
@@ -314,3 +315,41 @@ class LoadsTest(unittest.TestCase):
         self.assertFalse(large.Run("forming", "domain", 1, 30, "s15").overload)
         with self.assertRaises(ValueError):
             large.Run("forming", "star", 1, 30, "peak")
+
+
+class TailTest(unittest.TestCase):
+    """play: an overload run goes on 1 s at a time while class 1/2 messages are
+    queued, at most TAIL_PERIODS presence periods; any other run ends at its end."""
+
+    def _play(self, load, queued_until):
+        # The network's runs (their until), the queues empty from queued_until.
+        r = large.Run("forming", "star", 1, 30, load)
+        runs = []
+        r.net = Stub(run=runs.append)
+        r.recovery = Stub(queued=lambda: [ROOT] if runs[-1] < queued_until else [])
+        r.play()
+        return r, runs
+
+    def test_nothing_queued_no_tail(self):
+        r, runs = self._play("s15", 0)
+        self.assertTrue(r.overload)
+        self.assertEqual((runs, r.tail_ms, r.notes), ([r.end_ms], 0, []))
+
+    def test_tail_while_queued(self):
+        end = large.Run("forming", "star", 1, 30, "s15").end_ms
+        r, runs = self._play("s15", end + 3500)
+        self.assertEqual(runs, [end, end + 1000, end + 2000, end + 3000, end + 4000])
+        self.assertEqual((r.tail_ms, r.notes), (4000, ["tail 4 s"]))
+
+    def test_tail_bounded(self):
+        end = large.Run("forming", "star", 1, 30, "s15").end_ms
+        r, runs = self._play("s15", end + 400000)
+        tail = large.TAIL_PERIODS * large.INFO.presence_s * 1000
+        self.assertEqual(tail, 150000)  # 5 periods of 30 s at SF8
+        self.assertEqual((runs[-1], r.tail_ms), (r.end_ms + tail, tail))
+        self.assertEqual(len(runs), tail // 1000 + 1)
+
+    def test_no_tail_outside_overload(self):
+        r, runs = self._play("steady", 10**9)
+        self.assertFalse(r.overload)
+        self.assertEqual((runs, r.tail_ms), ([r.end_ms], 0))

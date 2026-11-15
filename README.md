@@ -114,7 +114,10 @@ from each other (the nominal case, e.g. `RUN="relay-death course 1 14"`).
 Scenarios: `forming`, `relay-death` (the relay that forwarded the most is
 switched off at 6 minutes), `global-repair` (new DODAG version at 6
 minutes), `lossy` (30 % of the links lose 10–25 % of their frames). Each
-run lasts 15 simulated minutes, the last 2.5 without submissions.
+run lasts 15 simulated minutes, the last 2.5 without submissions; an
+overload run (below) goes on, still without submissions, while a board
+holds class 1 messages, for at most 2.5 more (its recovery wants nothing
+queued at the end).
 
 The checks (`sim/invariants.py`, each shown able to fail by
 `tests/test_invariants.py`) sample every board each second and watch the

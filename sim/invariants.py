@@ -1031,12 +1031,17 @@ class Recovery(Check):
     at the deadline, ``repairing`` those of them routed again after
     after_ms: information, the count of a single-instant rule.
 
-    At the end of the run (``drain`` after the last submission, the suite's
-    5 periods: holding of 2 periods, then the error's, MP15), no class 1 or
-    2 message left in any queue (waiting or held included): nothing still
-    circulating; ``copies`` counts those left, ``nodes`` names the boards
-    holding them. ``deadline`` is known from the first sample at or after
-    after_ms; a run ending before it is judged at its end.
+    At the end of the run, no class 1 or 2 message left in any queue
+    (waiting or held included, `queued`): nothing still circulating;
+    ``copies`` counts those left, ``nodes`` names the boards holding them.
+    The suite (`tests/large.py`) stops its submissions a drain of 5 periods
+    before its planned end, then goes on, still without submissions, while
+    anything is queued, for at most 5 more periods: the error of a message
+    failed late outlives the drain (the message's holding of 2 periods,
+    MP15; its direct error's attempts and fresh ones, up to 2 more; its
+    holding upward, 2 more; their retries). ``deadline`` is known from the
+    first sample at or after after_ms; a run ending before it is judged at
+    its end.
     """
 
     name = "recovery"
@@ -1108,22 +1113,31 @@ class Recovery(Check):
                 % (now / 1000, (now - self.after_ms) / 1000, self.after_ms / 1000, what),
             )
 
+    def queued(self):
+        """Return [(board, [(slot, msg)])], the boards switched on holding class 1/2 messages.
+
+        Waiting and held messages included: what `finish` wants empty.
+        """
+        out = []
+        for b in self.checker.alive():
+            held = b.engine.queue.select(lambda m: m.cls, True)
+            if held:
+                out.append((b, held))
+        return out
+
     def finish(self, now):
         if self.checked is None:
             self._routes(now)
-        c = self.checker
-        for b in c.alive():
-            held = b.engine.queue.select(lambda m: m.cls, True)
-            if held:
-                self.copies += len(held)
-                self.nodes.append(b.name)
-                ports = sorted(set(m.port for _, m in held))
-                self.violate(
-                    now,
-                    (b.name,),
-                    "%d class 1/2 messages still queued at the end (ports %s)"
-                    % (len(held), " ".join(str(p) for p in ports)),
-                )
+        for b, held in self.queued():
+            self.copies += len(held)
+            self.nodes.append(b.name)
+            ports = sorted(set(m.port for _, m in held))
+            self.violate(
+                now,
+                (b.name,),
+                "%d class 1/2 messages still queued at the end (ports %s)"
+                % (len(held), " ".join(str(p) for p in ports)),
+            )
 
     def stats(self):
         if self.deadline is None:

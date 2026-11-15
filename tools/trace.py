@@ -143,7 +143,7 @@ def large(out, args):
     r.build()
     path, rec = _recorders[-1]
     rec.positions = r.topology.positions
-    r.net.run(r.end_ms)
+    r.play()
     r.violations = r.checker.finish()
     r.wall_ms = time.ticks_diff(time.ticks_ms(), start)
     r.judge()

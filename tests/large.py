@@ -50,7 +50,9 @@ MP10 at the network's depth (11.6 periods at 2 hops), every board not
 routed since that end routed or, cut off, detached (a board routed again
 since and without a route at the deadline is in an ordinary repair,
 judged by MP10, after the deadline too: counted, not a failure), and
-nothing still queued at the end; accepted and
+nothing still queued at the end (the run goes on, without submissions,
+while anything is queued, for at most `TAIL_PERIODS` more presence
+periods: `Run.play`); accepted and
 counted, from the burst to that deadline: MP10 beyond its bounds
 (attachment, version wave), messages refused or failed with an error. Its
 result reads ``overload`` instead of ``ok``.
@@ -104,7 +106,8 @@ until the drain; one burst of 100 punches within a minute (mass start)
 from nodes drawn at random. A punch is a class 1 message of 10 B to the
 root, a frame of 27 B (§16). No message is submitted during the last
 `DRAIN_PERIODS` presence periods, so that each one is delivered or failed
-by the end (MP5).
+by the end (MP5); an overload run may then go on longer (above), its
+checks sampling meanwhile, still without submissions.
 
 Scenarios (`TIMELINE`: the event at 6 minutes of 15 at 30 nodes, at 4 of
 10 at 64 nodes):
@@ -141,6 +144,7 @@ PUNCHES_PER_HOUR = 1000  # §15 peak through the busiest relay
 BURST = 100  # punches within a minute (§15 mass start)
 TRAFFIC_START_MS = 60000
 DRAIN_PERIODS = 5  # presence periods without submission at the end (MP5)
+TAIL_PERIODS = 5  # overload runs: at most this much longer while class 1/2 is queued
 LOSSY_SHARE = 0.3  # share of the links made lossy (scenario lossy)
 LOSS = (0.1, 0.25)  # their loss, drawn uniformly, both ways
 TRAFFIC_LABEL = (1 << 20) + 1  # derive() labels of the suite's own generators
@@ -195,6 +199,7 @@ class Run:
         self.notes = []
         self.overload = overload and topology in OVERLOAD
         self.recovery = None
+        self.tail_ms = 0  # time run past end_ms (`play`)
         # End of the overload: the burst minute, or the scenario's event if later.
         self.after_ms = self.burst_ms + 60000
         if scenario in ("relay-death", "global-repair"):
@@ -290,11 +295,33 @@ class Run:
         """Build, run and check; return the violations."""
         start = time.ticks_ms()
         self.build()
-        self.net.run(self.end_ms)
+        self.play()
         self.violations = self.checker.finish()
         self.wall_ms = time.ticks_diff(time.ticks_ms(), start)
         self.judge()
         return self.violations
+
+    def play(self):
+        """Run the built network to end_ms, then an overload run's tail.
+
+        An overload run goes on, without submissions, while a board switched
+        on holds class 1/2 messages (`invariants.Recovery.queued`), 1 s at a
+        time, for at most `TAIL_PERIODS` presence periods (``tail_ms``, a
+        note of the report): the error of a message failed late outlives
+        the drain (`invariants.Recovery`), whose check wants nothing left
+        in any queue. The checks go on sampling meanwhile.
+        """
+        self.net.run(self.end_ms)
+        if not self.overload:
+            return
+        stop = self.end_ms + TAIL_PERIODS * INFO.presence_s * 1000
+        t = self.end_ms
+        while t < stop and self.recovery.queued():
+            t += 1000
+            self.net.run(t)
+        self.tail_ms = t - self.end_ms
+        if self.tail_ms:
+            self.notes.append("tail %d s" % (self.tail_ms // 1000))
 
     def judge(self):
         """Split the violations into ``failing`` and ``accepted`` (overload cases).
