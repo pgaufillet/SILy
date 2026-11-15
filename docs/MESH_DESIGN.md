@@ -155,7 +155,7 @@ measurement recorded).
 | MP2 | Application-agnostic: opaque payloads multiplexed by an 8-bit port; the mesh never interprets payloads; applications act on the mesh only through documented parameters | designed | layering (§1); relays never read application payloads (§11) |
 | MP3 | Transparent to applications: they address nodes (or the root implicitly), never routes; topology changes appear only as delay or explicit failure | designed | §12: applications address nodes or the root; topology changes show as delay or explicit failure |
 | MP4 | Service classes chosen per message: **class 0** datagram (at most once, optional replace-by-newer); **class 1** hop-by-hop reliable (passive ack by overhearing the next hop, piggybacked ack on the last hop, 3 attempts, held during route repair); **class 2** end-to-end reliable (exactly once, unordered; NACK on sequence gaps, tail announcement, lazy cumulative ack, sender buffer) — SILy's punch recovery made generic | designed | §12: class 0 (replace by newer), class 1 (passive and explicit acknowledgements, 3 attempts, holding), class 2 (class 1 per hop + NACK, tail, lazy cumulative acknowledgement, send window) |
-| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a copy received by its destination more than the duplicate window after the last copy received is delivered again (acknowledgements lost on the last hop, or a copy taken again under custody; class 2 and the application filter it); in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay cut off from the root when its origin is cut off too and is not its neighbour (no link, no failure can travel; class 2 recovers it) |
+| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a copy received by its destination more than the duplicate window after the last copy received is delivered again (acknowledgements lost on the last hop, or a copy taken again under custody; class 2 and the application filter it); in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay without route whose origin is not its neighbour, when the relay stays without route until its error's holding ends (a relay knows no downward route; class 2 recovers it) |
 | MP6 | Explicit limits: maximum payload announced (≈ 200 B), no fragmentation in v1 | designed | §11: 200 B announced |
 | MP7 | Priorities chosen by the application, mapped to duty-cycle allowances; fairness between forwarded and local traffic | designed | §6: priority implicit in the port (application ports 16–127 high, 128–255 low), allowances per priority; §7: round robin by origin within a priority, per-origin queue quota with back-pressure |
 | MP8 | Compact headers: fields implicit when deducible from context (root address upward, root origin downward), SCHC-style | designed | §11: implicit root, first-hop compression, implicit last length, bundles |
@@ -1979,12 +1979,21 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   failure (MP5), **except** when a relay that already acknowledged the
   message reboots before forwarding it: the message is then lost silently
   (accepted: custody records in RTC memory would cost writes per message
-  and still not survive a power loss); and when a relay cut off from the
-  root fails a held message (end of holding) while its origin is cut off
-  too and is not its neighbour (or does not answer its direct error): the
-  error cannot reach the origin, held in turn then dropped (TLA+
-  `DODAG_line_partition_MP5Live`). Accepted: with no link at all nobody
-  can communicate, not even a failure. Applications that cannot accept
+  and still not survive a power loss); and when a relay without route
+  fails a held message (end of holding) whose origin is not its neighbour
+  (or does not answer its direct error): a relay knows no downward route,
+  so the error can only go upward; it is held in turn while the relay
+  stays without route and dropped at the end of its own holding, about 4
+  presence periods without route in all, whether the origin is cut off
+  too (TLA+ `DODAG_line_partition_MP5Live`) or has a route through
+  another branch (`DODAG_diamond_errretest_cutrelay`). Accepted: with no
+  link at all nobody can communicate, not even a failure; and in
+  simulation, relays holding other nodes' messages on deep lossy
+  topologies were back on a route within 3.4 periods, while a relay
+  drowned by hidden terminals for longer (the overloaded single-relay
+  star) has its origins among its neighbours. The return path of an
+  error to an origin that is not the relay's neighbour is an open point
+  of downward routing (§10). Applications that cannot accept
   these risks use class 2, whose end-to-end recovery covers them.
 - A frame holding a refused message is not acknowledged at all (one entry
   per frame): its other, delivered messages may then be retried (duplicates,
