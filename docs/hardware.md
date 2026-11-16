@@ -125,3 +125,7 @@ The box closed, its switch on (battery connected), its USB to the host
    the start guard and resets the board, which prints `SILY <version>` and
    starts the application: the LED lights once the box is attached to the
    mesh (at once on the gateway).
+5. After a run, `make journal PORT=... OUT=build/<box>`: stops the
+   application, copies the box's journal (`/journal/`) into
+   `OUT/journal`, resets the board and prints its summary per boot
+   (README *Application*).

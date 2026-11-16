@@ -10,6 +10,8 @@ A thin bundle over ``board.t3s3``, ``board.platform`` and
 - `mac()`: the 6-byte MAC address (node information);
 - `led()`: the user LED (one Pin, made once);
 - `power_on()`: this boot follows a power-on (a brownout reads as one);
+- `reset_cause()`: the cause of this boot, a word (`RESET_CAUSES`);
+- `battery_mv()`: the battery voltage in mV (``board.t3s3``);
 - `reset()`, `sleep_ms(ms)`, `kbd_intr(char)`: ``machine.reset``,
   ``time.sleep_ms``, ``micropython.kbd_intr``;
 - `blink(period_ms)`: the LED toggled by a hardware timer every period_ms,
@@ -32,6 +34,14 @@ from board.sx1262 import Sx1262
 from sily.guard import NAMESPACE, Guard
 
 BLINK_TIMER = 0  # hardware timer of the safe mode's blink
+
+RESET_CAUSES = {
+    machine.PWRON_RESET: "power",
+    machine.HARD_RESET: "hard",
+    machine.WDT_RESET: "watchdog",
+    machine.DEEPSLEEP_RESET: "deepsleep",
+    machine.SOFT_RESET: "soft",
+}
 
 _led = None
 _blinker = None
@@ -71,6 +81,15 @@ def led():
 
 def power_on():
     return machine.reset_cause() == machine.PWRON_RESET
+
+
+def reset_cause():
+    cause = machine.reset_cause()
+    return RESET_CAUSES.get(cause, str(cause))
+
+
+def battery_mv():
+    return t3s3.battery_millivolts()
 
 
 def reset():

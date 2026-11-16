@@ -53,6 +53,9 @@ class Adapter(FakeAdapter):
     def start(self):
         self.started += 1
 
+    def stats(self):
+        return {"rx": 0, "crc": 0, "hdr_err": 0, "tx": 0, "noise": -110.5}
+
     def transmit(self, frame):
         super().transmit(bytes(frame))
         self._pending.append(ticks_ms())
@@ -81,7 +84,8 @@ class FakeHw:
     """The ``sily.hw`` bundle on fakes; records what the application does.
 
     fail: as `Adapter`; adapter_error: raised by `adapter` (a silent radio);
-    interrupt_sleep: `sleep_ms` raises KeyboardInterrupt (Ctrl-C).
+    interrupt_sleep: `sleep_ms` raises KeyboardInterrupt (Ctrl-C);
+    battery: the reading of `battery_mv` (mV).
     """
 
     def __init__(self, power_on=False, fail=None, adapter_error=None, seed=1):
@@ -96,6 +100,7 @@ class FakeHw:
         self.sleeps = []
         self.kbd = []
         self.blinks = []
+        self.battery = 3900
 
     def adapter(self, lora_cfg):
         if self.adapter_error is not None:
@@ -123,6 +128,12 @@ class FakeHw:
 
     def power_on(self):
         return self.on
+
+    def reset_cause(self):
+        return "power" if self.on else "hard"
+
+    def battery_mv(self):
+        return self.battery
 
     def reset(self):
         self.resets += 1

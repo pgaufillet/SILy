@@ -30,6 +30,11 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     - `hw.py` — the board's hardware as the application takes it (over
       `board/`);
     - `radio.py` — binding of the SX1262 adapter to the mesh radio;
+    - `journal.py` — the field journal: JSON lines in size-bounded
+      segments, sync policy, read-back (also on CPython);
+    - `record.py` — what the journal records (boot, minute, events,
+      gateway reports) and the presence extension (battery, mode);
+    - `tap.py` — link measurements (frames, RSSI, SNR) per source heard;
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
     on the unix port and can be extracted later; its core is event-driven
@@ -57,6 +62,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 - `tools/box.py` — configuration of the boxes from the host (`config`:
   one box, `make configure`; `check`: a whole network), with the templates
   `tools/network.example.json` and `tools/box.example.json`.
+- `tools/journal_summary.py` — summary of a journal read back from a box
+  (`make journal`), per boot (CPython 3 or the unix port).
 - `tools/bench.py` — two-board bench measurements, run from the host over
   the serial ports; results in `docs/measurements.md`.
 - `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
@@ -105,6 +112,7 @@ make flash PORT=/dev/ttyACM0   # flash it
 make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it (keeps /config.json)
 make box-check PORT=/dev/ttyACM0  # per-box hardware check (docs/hardware.md)
 make configure PORT=/dev/ttyACM0 NETWORK=<file> BOX=<file>  # the box's /config.json, then reset
+make journal PORT=/dev/ttyACM0 OUT=build/box3  # copy the box's journal, reset it, print the summary
 ```
 
 Host tests use micropython-lib's `unittest` from the MicroPython tree (through
@@ -347,7 +355,7 @@ key come from `/config.json`, which `make deploy` keeps. The configuration
 is made on the host from two files kept outside this repository, since
 they hold passwords: one network file shared by every box (password,
 network name, spreading factor, presence period) and one file per box
-(role, address, name, power, LED; display, WiFi and journal sections for
+(role, address, name, power, LED, journal; display and WiFi sections for
 later parts), as in the templates `tools/network.example.json` and
 `tools/box.example.json`. `make configure` merges them, checks the result
 (every problem reported as `field: problem`), derives the frame key and its
@@ -368,6 +376,28 @@ At boot the board prints `SILY <version>`; then:
   LED off, `SILY STOP`) and leaves the REPL; any other error is a crash:
   `SILY FATAL` with its traceback, then a reset 5 s later (Ctrl-C in
   between keeps the REPL).
+
+Each box keeps a field journal in `/journal/` (`src/sily/journal.py`,
+records in `src/sily/record.py`; kept by `make deploy`): JSON lines in
+segments `NNNNNN.log`, a new one at each boot and every `journal.segment_kb`
+(64 KB), the oldest removed beyond `journal.max_kb` (1024 KB, about 18 h of
+a node, 10 h of a gateway with four nodes at SF7). Each boot writes a
+`boot` record, then every `journal.minute_s` (60 s) a `min` record: state
+(attached, parent, rank, parent set, grounded), battery, heap, queue, duty
+cycle, about 60 counter totals, the neighbours (margin, ETX, d_in, age;
+frames, RSSI and SNR measured per source), the journal's own longest write
+and sync; `ev` lines for the state changes seen by a poll once a second
+and for failed messages; on the gateway, the presence (with each box's
+battery and mode, carried in its presence extension), topology and node
+information reports received; `stop` or `fatal` (with the traceback) at
+the end. The file stays open and is synced every `journal.sync_s` (300 s),
+after the boot record and at stop or crash: a power cut loses at most the
+last 5 minutes. `make journal PORT=... OUT=...` stops the application,
+copies the journal into `OUT/journal`, resets the board and prints a
+summary per boot (`tools/journal_summary.py`: span and end, attach time,
+parent changes, margins per link, counters, battery, write and sync
+stalls). Times are per boot (ms since the board started): no absolute
+time on the boxes.
 
 ## Bench
 

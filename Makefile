@@ -73,6 +73,14 @@ NETWORK ?=
 BOX ?=
 PYTHON ?= $(VENV)/bin/python
 
+# Journal read-back (`make journal`, tools/journal_summary.py): the
+# application of the board at PORT stopped (mpremote's Ctrl-C: a `stop`
+# line, the journal synced and closed), its /journal copied into
+# OUT/journal (OUT given on the command line, else build/journal; an earlier
+# copy there replaced), the board reset (the application starts again, in
+# a new segment), then the summary printed.
+JOURNAL_OUT = $(if $(filter command line,$(origin OUT)),$(OUT),build/journal)
+
 # Top-level entries of src/ copied to the board's filesystem root, from a
 # staged copy without the host's __pycache__ directories (files of the
 # board's root that src/ lacks, /config.json among them, stay).
@@ -170,7 +178,7 @@ OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
 .PHONY: help check test seeds simbench large sweep sweep-summary campaign-plan \
-	campaign campaign-fetch trace lint push-check firmware flash deploy box-check configure \
+	campaign campaign-fetch trace lint push-check firmware flash deploy box-check configure journal \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -193,6 +201,7 @@ help:
 	@echo "make deploy PORT=<dev>    copy src/ to the board and reset it"
 	@echo "make box-check PORT=<dev> [BATTERY=0 HOLD=15]  per-box hardware check (docs/hardware.md)"
 	@echo "make configure PORT=<dev> NETWORK=<file> BOX=<file>  write the box's /config.json, reset"
+	@echo "make journal PORT=<dev> [OUT=build/journal]  copy the box's journal, reset, summary"
 	@echo "make spec                 TLC: every model, each against its expected outcome (full tier)"
 	@echo "make spec-quick           TLC: the models recorded at most QUICK_SECS=60 s (quick tier)"
 	@echo "make spec-pass            TLC: the models that must hold"
@@ -288,6 +297,12 @@ configure:
 	@test -n "$(NETWORK)" && test -n "$(BOX)" || \
 		{ echo "make configure PORT=<dev> NETWORK=<file> BOX=<file>"; exit 2; }
 	$(PYTHON) tools/box.py config $(NETWORK) $(BOX) --port $(PORT) --mpremote $(MPREMOTE)
+
+journal:
+	rm -rf $(JOURNAL_OUT)/journal && mkdir -p $(JOURNAL_OUT)
+	$(MPREMOTE) connect $(PORT) resume exec "from sily import app; app.close()" \
+		+ fs cp -r :journal $(JOURNAL_OUT) + reset
+	$(PYTHON) tools/journal_summary.py $(JOURNAL_OUT)/journal
 
 spec:
 	$(SPEC) all

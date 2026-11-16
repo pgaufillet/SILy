@@ -38,8 +38,8 @@ not pass silently), defaults filled in. Fields:
 - ``journal``: ``minute_s`` (record period), ``sync_s`` (flush period),
   ``max_kb`` (bound of the journal), ``segment_kb`` (one file).
 
-The display, WiFi and journal sections are checked now, used by later
-parts of the application.
+The journal section sets the field journal (``sily.app``); the display
+and WiFi sections are checked now, used by later parts of the application.
 
 Host merge (`board_config`): one network file for every box (password,
 network name, derivation count, profile, SF, presence period) and one file

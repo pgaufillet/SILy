@@ -28,19 +28,42 @@ adapter, a monitor polling the mesh state once a second (no application
 code inside the mesh's step) and driving the LED (on while attached, the
 gateway always), and the stability timer clearing the crash count. Later
 parts add their tasks with `App.add_task` before the start.
+
+The field journal (``sily.journal``, records of ``sily.record``) starts a
+new segment at each boot (boot number counted in the NVS namespace
+``sily``): the ``boot`` record, then a ``min`` record every
+``journal.minute_s`` (the battery read then, and cached for the presence
+extension), the ``ev`` events of the monitor's polls, the failures of own
+messages and, on the gateway, the reports received; a ``stop`` or
+``fatal`` line ends it. It is synced after the boot record, every
+``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
+handler, failure callback, presence extension) run inside its step, on the
+root's reply path: they only queue an item or return cached bytes; a task
+formats and writes, yielding between items.
 """
 
 import asyncio
+import gc
+import io
 import sys
 
 import sily
-from sily import config, guard
+from mesh.runner import Clock
+from sily import config, guard, journal, record
 from sily.stack import Stack
+from sily.tap import Tap
 
 CONFIG_PATH = "/config.json"
 CRASH_PAUSE_MS = 5000
 MONITOR_MS = 1000
 SAFE_BLINK_MS = 100
+WRITER_MS = 200  # period of the journal writer's look at the queue
+QUEUE_ITEMS = 64  # callback items waiting for the writer
+BOOT_KEY = "boots"  # boot number, NVS namespace guard.NAMESPACE
+
+# Kinds of the queued items.
+_REPORT = 0  # (_REPORT, t, port, origin, report)
+_FAIL = 1  # (_FAIL, t, dest, port, seq, reason)
 
 # Outcomes of `boot` and `start` (the board only sees the console lines).
 STOPPED = "stopped"  # Ctrl-C or App.stop: at the REPL
@@ -50,18 +73,29 @@ current = None  # the App last started (`close`)
 console = None  # file of the console lines (None: standard output; tests set one)
 
 
-def _out(*items):
+def _out(*items, end="\n"):
     if console is None:
-        print(*items)
+        print(*items, end=end)
     else:
-        print(*items, file=console)
+        print(*items, end=end, file=console)
+
+
+def next_boot(store):
+    """Count one more boot in store (``get``, ``set``, ``commit``); return its number."""
+    value = store.get(BOOT_KEY)
+    n = 1
+    if value:
+        n = int.from_bytes(value, "little") + 1
+    store.set(BOOT_KEY, n.to_bytes(4, "little"))
+    store.commit()
+    return n
 
 
 def close():
-    """Stop the radio and LED of the application last started (idempotent).
+    """Stop the application last started: journal closed, radio, LED (idempotent).
 
     For host tools that connect to a box (their Ctrl-C has already stopped
-    it).
+    it: ``make journal``).
     """
     if current is not None:
         current.close()
@@ -72,18 +106,37 @@ class App:
 
     hw: ``sily.hw`` on the board. start_guard: the `guard.Guard` whose crash
     count `stable_ms` of running clears (None: no stability timer);
-    monitor_ms: period of the monitor.
+    monitor_ms: period of the monitor; journal_dir, fs: the journal's
+    directory and file system (``sily.journal``).
     """
 
     def __init__(
-        self, cfg, hw, start_guard=None, stable_ms=guard.STABLE_MS, monitor_ms=MONITOR_MS
+        self,
+        cfg,
+        hw,
+        start_guard=None,
+        stable_ms=guard.STABLE_MS,
+        monitor_ms=MONITOR_MS,
+        journal_dir=journal.DIR,
+        fs=None,
     ):
         self.cfg = cfg
         self.hw = hw
         self.guard = start_guard
         self.stable_ms = stable_ms
         self.monitor_ms = monitor_ms
+        self.journal_dir = journal_dir
+        self.fs = fs
+        self.clock = Clock()
         self.stack = None
+        self.tap = None
+        self.journal = None
+        self.queue = journal.Queue(QUEUE_ITEMS)
+        self.boot = None
+        self.state = record.DETACHED
+        self.battery = None  # mV, read every minute
+        self.mode = 0  # operating mode (record.MODES), carried in the presence extension
+        self.extension = record.encode_extension(None, 0)
         self.led = None
         self.attached = False
         self.error = None  # the first exception of a task
@@ -94,10 +147,31 @@ class App:
         """Start factory(app), a coroutine, once the node is built."""
         self._factories.append(factory)
 
+    def open_journal(self):
+        """Count this boot and start its journal segment."""
+        self.boot = next_boot(self.hw.storage(guard.NAMESPACE))
+        j = self.cfg["journal"]
+        self.journal = journal.Journal(
+            self.journal_dir,
+            self.boot,
+            self.clock.now,
+            j["max_kb"],
+            j["segment_kb"],
+            j["sync_s"],
+            self.fs,
+        )
+        self.journal.open()
+
+    def _wrap(self, stack, radio):
+        self.tap = Tap(radio)
+        return self.tap
+
     def build(self):
         """Assemble the node from the configuration (``sily.stack``)."""
         cfg = self.cfg
         hw = self.hw
+        self.read_battery()
+        gateway = cfg["role"] == config.GATEWAY
         self.stack = Stack(
             hw,
             cfg["address"],
@@ -109,20 +183,38 @@ class App:
             gain=cfg["antenna_gain"],
             allow=cfg["allow"],
             presence_s=cfg["presence_s"],
+            extension=self._extension,
+            on_report=self._on_report if gateway else None,
+            wrap=self._wrap,
+            clock=self.clock,
         )
+        self.stack.engine.on_failure(self._on_failure)
         if cfg["led"]:
             self.led = hw.led()
             self.led.value(0)
+
+    def read_battery(self):
+        """Read the battery; cache it for the presence extension."""
+        self.battery = self.hw.battery_mv()
+        self.extension = record.encode_extension(self.battery, self.mode)
 
     async def main(self):
         """Build the node, run it and its tasks until `stop`; raise a task's exception."""
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(self._task_error)
         try:
+            self.open_journal()
             self.build()
             stack = self.stack
+            crashes = 0 if self.guard is None else self.guard.crashes
+            fields = record.boot(self.cfg, stack, self.hw.reset_cause(), crashes, sily.__version__)
+            self.journal.write(self.clock.now(), "boot", fields)
+            self.journal.sync()
             asyncio.create_task(stack.adapter.run())
             asyncio.create_task(self._monitor())
+            asyncio.create_task(self._minutes())
+            asyncio.create_task(self._writer())
+            asyncio.create_task(self._syncer())
             if self.guard is not None:
                 asyncio.create_task(self._stability())
             for factory in self._factories:
@@ -132,6 +224,60 @@ class App:
             loop.set_exception_handler(None)
         if self.error is not None:
             raise self.error
+
+    # --- Callbacks of the mesh core: inside its step, queue only -----------------------
+
+    def _extension(self):
+        return self.extension
+
+    def _on_report(self, port, origin, report, header):
+        self.queue.put((_REPORT, self.clock.now(), port, origin, report))
+
+    def _on_failure(self, dest, port, seq, reason):
+        self.queue.put((_FAIL, self.clock.now(), dest, port, seq, reason))
+
+    # --- Journal tasks -----------------------------------------------------------------
+
+    def _write_item(self, item):
+        if item[0] == _FAIL:
+            self.journal.write(item[1], "ev", record.failure(item[2], item[3], item[4], item[5]))
+        else:
+            kind, fields = record.report(item[2], item[3], item[4])
+            self.journal.write(item[1], kind, fields)
+
+    async def _writer(self):
+        queue = self.queue
+        while True:
+            while len(queue):
+                self._write_item(queue.get())
+                await asyncio.sleep_ms(0)
+            await asyncio.sleep_ms(WRITER_MS)
+
+    async def _syncer(self):
+        while True:
+            await asyncio.sleep_ms(self.journal.maybe_sync())
+
+    async def record_minute(self):
+        """Write the minute record, built in pieces (other tasks run between them)."""
+        self.read_battery()
+        now = self.clock.now()
+        fields = {}
+        for piece in record.minute(self.stack, now, self.tap):
+            fields.update(piece)
+            await asyncio.sleep_ms(0)
+        j = self.journal
+        fields["bat"] = self.battery
+        fields["heap"] = gc.mem_free()
+        fields["jw"], fields["js"] = j.stalls()
+        fields["jq"] = self.queue.overflow
+        fields["je"] = j.errors
+        j.write(now, "min", fields)
+
+    async def _minutes(self):
+        period = self.cfg["journal"]["minute_s"] * 1000
+        while True:
+            await asyncio.sleep_ms(period)
+            await self.record_minute()
 
     def _task_error(self, loop, context):
         if self.error is None:
@@ -144,8 +290,17 @@ class App:
             self.stack.runner.stop()
 
     def poll(self):
-        """Read the mesh state (once a second) and show it."""
-        attached = self.stack.routing.attached
+        """Read the mesh state (once a second): journal its changes, show it."""
+        stack = self.stack
+        cur = record.state(stack.engine, stack.routing)
+        if cur != self.state:
+            events = record.transitions(self.state, cur)
+            self.state = cur
+            now = self.clock.now()
+            for name, fields in events:
+                fields["e"] = name
+                self.journal.write(now, "ev", fields)
+        attached = cur[0] == 1
         if attached != self.attached:
             self.attached = attached
             if self.led is not None:
@@ -160,15 +315,77 @@ class App:
         await asyncio.sleep_ms(self.stable_ms)
         self.guard.stable()
 
-    def close(self):
-        """Stop the node: runner, radio in standby, LED off. Idempotent."""
+    def status(self):
+        """Return the state of the box as one dict (display, web page)."""
+        cfg = self.cfg
+        out = {
+            "role": cfg["role"],
+            "address": cfg["address"],
+            "name": cfg["name"],
+            "boot": self.boot,
+            "battery": self.battery,
+            "mode": record.MODES[self.mode],
+            "attached": False,
+        }
+        stack = self.stack
+        if stack is None:
+            return out
+        e = stack.engine
+        now = self.clock.now()
+        s = record.state(e, stack.routing)
+        rows, foreign = record.neighbours(e.neighbours, now, self.tap)
+        c = e.counters
+        j = self.journal
+        out.update(
+            {
+                "time_s": now // 1000,
+                "attached": s[0] == 1,
+                "parent": s[1],
+                "rank": s[2],
+                "grounded": s[3] == 1,
+                "neighbours": [dict(zip(record.NEIGHBOUR_FIELDS, row)) for row in rows],
+                "foreign": foreign,
+                "counters": {
+                    "tx_frames": c.tx_frames,
+                    "rx_frames": c.rx_frames,
+                    "rx_crc": c.rx_crc,
+                    "rx_auth": c.rx_auth,
+                    "forwarded": c.forwarded,
+                    "retries": c.retries,
+                    "unreachable": c.unreachable,
+                    "queue": len(e.queue),
+                    "duty_ms": e.dutycycle.used(now),
+                    "journal_lines": 0 if j is None else j.lines,
+                    "journal_errors": 0 if j is None else j.errors,
+                    "items_lost": self.queue.overflow,
+                },
+            }
+        )
+        return out
+
+    def close(self, kind="stop", fields=None):
+        """Stop the node: pending items and a last line of kind (None: none)
+        journaled, the journal synced and closed, runner stopped, radio in
+        standby, LED off. Idempotent."""
         if self._closed:
             return
         self._closed = True
-        if self.stack is not None:
-            self.stack.close()
-        if self.led is not None:
-            self.led.value(0)
+        try:
+            j = self.journal
+            if j is not None:
+                try:
+                    queue = self.queue
+                    while len(queue):
+                        self._write_item(queue.get())
+                    if kind is not None:
+                        j.write(self.clock.now(), kind, fields)
+                finally:
+                    j.close()
+        finally:
+            if self.stack is not None:
+                self.stack.close()
+            if self.led is not None:
+                self.led.value(0)
 
 
 def _read(path):
@@ -223,15 +440,19 @@ def _stop(app, hw):
     _out("SILY STOP")
 
 
+def _traceback(error):
+    buf = io.StringIO()
+    sys.print_exception(error, buf)
+    return buf.getvalue()
+
+
 def _crash(app, hw, start_guard, error):
     _out("SILY FATAL", repr(error))
-    if console is None:
-        sys.print_exception(error)
-    else:
-        sys.print_exception(error, console)
+    text = _traceback(error)
+    _out(text, end="")
     n = start_guard.crashed()
     try:
-        app.close()
+        app.close("fatal", {"err": repr(error), "tb": text})
     except Exception as e:  # the reset below must still come
         _out("SILY FATAL close", repr(e))
     _out(
