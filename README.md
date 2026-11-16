@@ -395,14 +395,20 @@ and sync; `ev` lines for the state changes seen by a poll once a second
 and for failed messages; on the gateway, the presence (with each box's
 battery and mode, carried in its presence extension), topology and node
 information reports received; `stop` or `fatal` (with the traceback) at
-the end. The file stays open and is synced every `journal.sync_s` (300 s),
-after the boot record and at stop or crash: a power cut loses at most the
-last 5 minutes. `make journal PORT=... OUT=...` stops the application,
-copies the journal into `OUT/journal`, resets the board and prints a
-summary per boot (`tools/journal_summary.py`: span and end, attach time,
-parent changes, margins per link, counters, battery, write and sync
-stalls; display, access point and web server; test traffic). Times are
-per boot (ms since the board started): no absolute time on the boxes.
+the end. On the gateway, the `min` record also carries the turnaround of
+its immediate replies, timed as the bench's `timed` does but with the
+journal, display, test traffic and web server running (`src/sily/turn.py`,
+`tr`: replies, median, 90th percentile and maximum, in 0.1 ms, from the
+RxDone interrupt of the frame answered to the start of the reply). The
+file stays open and is synced every `journal.sync_s` (300 s), after the
+boot record and at stop or crash: a power cut loses at most the last 5
+minutes. `make journal PORT=... OUT=...` stops the application, copies
+the journal into `OUT/journal`, resets the board and prints a summary per
+boot (`tools/journal_summary.py`: span and end, attach time, parent
+changes, margins per link, counters, battery, write and sync stalls;
+display, access point and web server; reply turnaround; test traffic).
+Times are per boot (ms since the board started): no absolute time on the
+boxes.
 
 Test traffic (`src/sily/traffic.py`) measures the mesh in the field before
 punches exist. With `traffic.enabled` in the network file, every node
@@ -459,8 +465,9 @@ stay connected) and opens http://192.168.4.1/: the page asks the box for
 `/status.json` every 5 s (none while hidden) and says how old its data is.
 Every box shows its own view: state (attached, parent, rank), duty cycle,
 queue, heap, journal, frames; its neighbours (margin, ETX, d_in, age, RSSI,
-SNR; parents first); its test traffic and the web server's counters. The
-gateway adds the view of the mesh from the reports it receives: the parent
+SNR; parents first); its test traffic, the gateway's reply turnaround
+of the last minute and the web server's counters. The gateway adds the
+view of the mesh from the reports it receives: the parent
 tree in text (each node with its state when not ok, battery, uplink margin
 and delivery, parent changes; nodes whose chain does not reach the gateway
 under `?`), then one row per node: state (`late` after 2.5 presence periods

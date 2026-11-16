@@ -9,16 +9,18 @@ it too.
 
 import asyncio
 import unittest
-from time import ticks_diff, ticks_ms
+from time import ticks_diff, ticks_ms, ticks_us
 
 import framebuf
 from test_sily_radio import FakeAdapter
 
 import sily
 from mesh import profile as profiles
+from mesh.frame import FIRST_HOP, ROOT, UPWARD, Message
 from mesh.link import destination, open_link
+from mesh.ports import PRESENCE
 from mesh.radio import CHANNEL, RX, SENSE, TX_DONE, Radio
-from mesh.reports import decode_node_info
+from mesh.reports import Presence, decode_node_info, encode_presence
 from sily.radio import lora_config
 from sily.stack import Stack, firmware_version
 from sim.platform import FakePlatform
@@ -42,6 +44,8 @@ class Adapter(FakeAdapter):
     """Scripted adapter: transmissions end TX_MS later, run may raise.
 
     fail: (after_ms, exception) raised by `run` once after_ms have passed.
+    ``_irq_us`` (the last DIO1 IRQ: the caller sets it before reporting a
+    frame) and ``_tx_us`` (SetTx: each transmission) as on the board.
     """
 
     def __init__(self, lora_cfg, fail=None):
@@ -51,6 +55,8 @@ class Adapter(FakeAdapter):
         self.started = 0
         self.fail = fail
         self._pending = []
+        self._irq_us = 0
+        self._tx_us = 0
 
     def start(self):
         self.started += 1
@@ -59,6 +65,7 @@ class Adapter(FakeAdapter):
         return {"rx": 0, "crc": 0, "hdr_err": 0, "tx": 0, "noise": -110.5}
 
     def transmit(self, frame):
+        self._tx_us = ticks_us()
         super().transmit(bytes(frame))
         self._pending.append(ticks_ms())
 
@@ -272,8 +279,8 @@ class Recorder(Radio):
         self.sink(event)
 
 
-def peer_frame(source, dest, payload, key=KEY, port=PORT, cls=0):
-    """Return a frame sealed by another board's engine: payload on port to dest."""
+def _peer(source, key):
+    """Return another board's engine (static routes), started."""
     platform = FakePlatform(XorShift32(7))
     peer = open_link(
         source,
@@ -286,13 +293,35 @@ def peer_frame(source, dest, payload, key=KEY, port=PORT, cls=0):
         destination,
     )
     peer.step(0, None)
-    peer.submit(port, cls, dest, payload)
+    return peer
+
+
+def _first_frame(peer):
+    """Return the next frame peer sends (the channel found free)."""
     actions = list(peer.step(0, None))
     while actions[0][0] == SENSE:
         actions = list(peer.step(0, (CHANNEL, False)))
     frame = actions[0][1]
     peer.step(100, (TX_DONE, 100))
     return bytes(frame)
+
+
+def peer_frame(source, dest, payload, key=KEY, port=PORT, cls=0):
+    """Return a frame sealed by another board's engine: payload on port to dest."""
+    peer = _peer(source, key)
+    peer.submit(port, cls, dest, payload)
+    return _first_frame(peer)
+
+
+def probe_frame(source, key=KEY):
+    """Return a frame of source that the root answers at once (reply window,
+    MESH_DESIGN §8): an upward message of another node, so that source
+    relays, and its own presence (its link's probe)."""
+    peer = _peer(source, key)
+    peer.send(Message(UPWARD, 0, PORT, b"..", origin=source + 1), ROOT)
+    own = encode_presence(Presence(0, b"\0\0", None, (), 0))
+    peer.send(Message(FIRST_HOP, 0, PRESENCE, own), ROOT)
+    return _first_frame(peer)
 
 
 def run_for(stack, ms, during=None):

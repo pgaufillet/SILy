@@ -136,6 +136,24 @@ class Summary(unittest.TestCase):
             lines[-2:], ["  access point SILy-box3: no web figures", "  wifi failed: OSError(5,)"]
         )
 
+    def test_reply_turnaround(self):
+        s = journal_summary.summarise(self.runs[0])  # a node: none
+        self.assertIsNone(s["turnaround"])
+        self.assertFalse(any("turnaround" in line for line in journal_summary.report(s)))
+        run = [{"b": 5, "t": 0, "k": "boot", "role": "gateway"}]
+        for t, tr in ((60000, [12, 213, 231, 380]), (120000, [30, 220, 450, 490])):
+            run.append({"b": 5, "t": t, "k": "min", "tr": tr})
+        run.append({"b": 5, "t": 180000, "k": "min"})  # no reply in that minute
+        run.append({"b": 5, "t": 240000, "k": "min", "tr": [5, 190, 200, 210]})
+        s = journal_summary.summarise(run)
+        self.assertEqual(s["turnaround"], (47, 3, 213, 450, 490))
+        lines = journal_summary.report(s)
+        self.assertTrue(
+            "  reply turnaround: 47 replies in 3 minutes; median of the minute medians"
+            " 21.3 ms, worst minute p90 45.0 ms, max 49.0 ms" in lines,
+            lines,
+        )
+
     def test_power_cut_boot(self):
         s = journal_summary.summarise(self.runs[1])
         self.assertEqual((s["boot"], s["end"], s["attach_s"]), (2, None, 5.0))

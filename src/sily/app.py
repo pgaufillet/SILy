@@ -52,8 +52,11 @@ messages and, on the gateway, the reports received; a ``stop`` or
 in the view of the mesh (``sily.nodes``, `App.mesh`, for the web page).
 The minute record carries the test traffic's figures (``tt``) when there
 are some, the display's longest row write and refresh (``ow``, ``or``)
-when it wrote, and the web server's figures with the stations joined
-(``web``) while it runs. The journal is synced after the boot record, every
+when it wrote, the web server's figures with the stations joined
+(``web``) while it runs and, on the gateway, the turnaround of its
+immediate replies when it made some (``tr``, ``sily.turn``: a radio
+wrapper beside the tap, timing each reply from the adapter's
+timestamps). The journal is synced after the boot record, every
 ``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
 handler, failure callback, presence extension) run inside its step, on the
 root's reply path: they only queue an item or return cached bytes; a task
@@ -67,7 +70,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, display, guard, journal, nodes, record, traffic, web
+from sily import config, display, guard, journal, nodes, record, traffic, turn, web
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -151,6 +154,7 @@ class App:
         self.clock = Clock()
         self.stack = None
         self.tap = None
+        self.turn = None  # turn.Turn on the gateway: its replies timed
         self.journal = None
         self.queue = journal.Queue(QUEUE_ITEMS)
         self.boot = None
@@ -191,7 +195,10 @@ class App:
 
     def _wrap(self, stack, radio):
         self.tap = Tap(radio)
-        return self.tap
+        if not stack.engine.is_root:
+            return self.tap
+        self.turn = turn.Turn(self.tap, stack.adapter, stack.engine.counters)
+        return self.turn
 
     def build(self):
         """Assemble the node from the configuration (``sily.stack``)."""
@@ -419,6 +426,11 @@ class App:
                 fields["tt"] = tt
         if self._serving():
             fields["web"] = self.web.minute() + [self._stations()]
+        if self.turn is not None:
+            await asyncio.sleep_ms(0)
+            tr = self.turn.minute()
+            if tr is not None:
+                fields["tr"] = tr
         j.write(now, "min", fields)
 
     async def _minutes(self):
@@ -513,6 +525,8 @@ class App:
         )
         if self.traffic is not None:
             out["traffic"] = self.traffic.status()
+        if self.turn is not None:
+            out["turnaround"] = self.turn.figures()
         if self._serving():
             out["web"] = self.web.figures()
         return out

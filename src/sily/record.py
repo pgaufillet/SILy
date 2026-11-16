@@ -17,7 +17,12 @@ since the board's boot) and ``k``, its kind:
   wrote, ``sily.display``; ``web`` while the web server runs
   (``sily.web``): [requests, errors, idle, refused, kB sent: totals since
   its start; its longest stretch in ms since the last record; the
-  stations joined to the access point, null when unreadable]);
+  stations joined to the access point, null when unreadable]; ``tr`` on
+  the gateway, when it made immediate replies since the last record
+  (``sily.turn``): [replies, median, 90th percentile, maximum] of their
+  turnaround, from the RxDone IRQ of the frame answered to the start of
+  the reply, in 0.1 ms, the median and percentile of the first 256 when
+  more came);
 - ``ev``: ``e`` names the event: ``attach``, ``detach``, ``parent``,
   ``rank``, ``grounded``, ``ungrounded`` (`transitions`, from the state
   polled once a second; each with the parent set's counters ``sw``,

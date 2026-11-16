@@ -14,11 +14,12 @@ import os
 import socket
 import struct
 import unittest
+from time import ticks_diff, ticks_us
 
-from test_sily_stack import FakeHw, peer_frame
+from test_sily_stack import FakeHw, peer_frame, probe_frame
 from test_sily_web import _get, _request, _split
 
-from mesh.frame import ROOT
+from mesh.frame import DEST_OFFSET, ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.reports import FIRST_REPORT, NodeInfo, Presence
 from sily import app, guard, journal, record, traffic
@@ -547,6 +548,77 @@ class Traffic(Console):
         self.assertIsNone(a.traffic)
         self.assertFalse("tt" in minute)
         self.assertFalse("traffic" in status)
+
+
+class Turnaround(Console):
+    """The gateway's reply turnaround in the application (``sily.turn``)."""
+
+    def _run(self, hw, tasks=(), **fields):
+        fields.setdefault("journal", {"minute_s": 1})
+        a = _app(hw, **fields)
+        for factory in tasks:
+            a.add_task(factory)
+        out = []
+        a.add_task(_after(1490, lambda a: out.append(a.status())))
+        a.add_task(_after(1500, lambda a: a.stop()))
+        self.assertEqual(app.start(a), app.STOPPED)
+        records, _ = journal.read(JOURNAL)
+        minutes = [r for r in records if r["k"] == "min"]
+        self.assertEqual(len(minutes), 1)
+        return a, minutes[0], out[0]
+
+    def test_gateway_times_its_immediate_reply(self):
+        frame = probe_frame(1, bytes.fromhex(KEY))
+        irq = []
+        starts = []  # (link destination, SetTx) of each frame sent after the probe
+
+        def deliver(a):
+            adapter = a.stack.adapter
+            transmit = adapter.transmit
+
+            def stamped(f):
+                transmit(f)
+                starts.append((f[DEST_OFFSET], adapter._tx_us))
+
+            adapter.transmit = stamped
+            irq.append(ticks_us())
+            adapter._irq_us = irq[0]
+            adapter.on_receive(frame, -70, 6.5)
+
+        a, minute, status = self._run(FakeHw(), (_after(50, deliver),))
+        self.assertIs(a.stack.runner.radio, a.turn)  # between the tap and the runner
+        self.assertIs(a.turn.radio, a.tap)
+        self.assertEqual(minute["link"]["rep"], 1)  # answered at once
+        dest, start = starts[0]  # the reply, first on air
+        self.assertEqual(dest, 1)
+        us = ticks_diff(start, irq[0])
+        self.assertEqual(a.turn.samples[0], us)
+        tenths = (us + 50) // 100
+        self.assertEqual(minute["tr"], [1, tenths, tenths, tenths])
+        self.assertTrue(us < 200000, us)
+        figures = status["turnaround"]  # the last minute record's
+        self.assertEqual((figures["n"], figures["max_ms"]), (1, tenths / 10))
+
+    def test_gateway_without_reply(self):
+        a, minute, status = self._run(FakeHw())
+        self.assertIs(a.stack.runner.radio, a.turn)
+        self.assertFalse("tr" in minute)
+        self.assertEqual(
+            status["turnaround"], {"n": 0, "median_ms": None, "p90_ms": None, "max_ms": None}
+        )
+
+    def test_node_not_timed(self):
+        frame = probe_frame(1, bytes.fromhex(KEY))
+        a, minute, status = self._run(
+            FakeHw(),
+            (_after(50, lambda a: a.stack.adapter.on_receive(frame, -70, 6.5)),),
+            role="node",
+            address=3,
+        )
+        self.assertIsNone(a.turn)
+        self.assertIs(a.stack.runner.radio, a.tap)
+        self.assertFalse("tr" in minute)
+        self.assertFalse("turnaround" in status)
 
 
 class Display(Console):

@@ -24,7 +24,10 @@ lines of one boot number, in order):
   (``web`` of the minute records, ``sily.web``): requests, errors, longest
   stretch (ms), most stations joined; its failures at start (``ev wifi``);
 - on the gateway, per origin of the reports received: presences,
-  topologies, last battery;
+  topologies, last battery; the turnaround of its immediate replies
+  (``tr`` of the minute records, ``sily.turn``): the replies timed, the
+  median of the per-minute medians, the worst minute's 90th percentile
+  and the highest maximum (ms);
 - the test traffic (``sily.traffic``, the ``tt`` field of the minute
   records): on a node, its messages submitted, accepted, refused and
   failed (per reason: the codes of ``mesh.link`` refusals, negative, and
@@ -135,6 +138,7 @@ def summarise(run):
             if r["k"] == "rp" and r.get("bat") is not None:
                 o["bat"] = r["bat"]
     s["origins"] = origins
+    s["turnaround"] = turnaround(minutes)
     s["traffic"] = traffic(minutes)
     return s
 
@@ -157,6 +161,21 @@ def web(minutes):
 def _median(values):
     values = sorted(values)
     return values[(len(values) - 1) // 2]
+
+
+def turnaround(minutes):
+    """Return (replies, minutes, median of the medians, worst p90, highest
+    maximum; 0.1 ms) of the minute records' ``tr``, None without one."""
+    rows = [m["tr"] for m in minutes if m.get("tr")]
+    if not rows:
+        return None
+    return (
+        sum(row[0] for row in rows),
+        len(rows),
+        _median([row[1] for row in rows]),
+        max(row[2] for row in rows),
+        max(row[3] for row in rows),
+    )
 
 
 def traffic(minutes):
@@ -315,6 +334,13 @@ def report(s):
         lines.append(
             "  from %s: %d presences, %d topologies, %d node information, battery %s mV"
             % (origin, o["rp"], o["rt"], o["ri"], o["bat"])
+        )
+    if s["turnaround"] is not None:
+        replies, minutes, median, p90, top = s["turnaround"]
+        lines.append(
+            "  reply turnaround: %d replies in %d minutes; median of the minute medians"
+            " %.1f ms, worst minute p90 %.1f ms, max %.1f ms"
+            % (replies, minutes, median / 10, p90 / 10, top / 10)
         )
     lines.extend(_traffic_lines(s["traffic"]))
     return lines
