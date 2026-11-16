@@ -170,8 +170,8 @@ class Recorder(Radio):
         self.sink(event)
 
 
-def peer_frame(source, dest, payload, key=KEY):
-    """Return a frame sealed by another board's engine: payload on PORT to dest."""
+def peer_frame(source, dest, payload, key=KEY, port=PORT, cls=0):
+    """Return a frame sealed by another board's engine: payload on port to dest."""
     platform = FakePlatform(XorShift32(7))
     peer = open_link(
         source,
@@ -184,7 +184,7 @@ def peer_frame(source, dest, payload, key=KEY):
         destination,
     )
     peer.step(0, None)
-    peer.submit(PORT, 0, dest, payload)
+    peer.submit(port, cls, dest, payload)
     actions = list(peer.step(0, None))
     while actions[0][0] == SENSE:
         actions = list(peer.step(0, (CHANNEL, False)))

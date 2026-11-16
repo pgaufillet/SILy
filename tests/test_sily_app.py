@@ -10,13 +10,15 @@ import asyncio
 import io
 import json
 import os
+import struct
 import unittest
 
-from test_sily_stack import FakeHw
+from test_sily_stack import FakeHw, peer_frame
 
+from mesh.frame import ROOT
 from mesh.ports import PRESENCE
 from mesh.reports import Presence
-from sily import app, guard, journal, record
+from sily import app, guard, journal, record, traffic
 from sily.config import check
 
 DIR = "build/test_sily_app"  # relative to the repository root, where the tests run
@@ -394,3 +396,71 @@ class Journal(Console):
         self.assertEqual(s["neighbours"], [])
         self.assertEqual(s["counters"]["journal_lines"], a.journal.lines - 1)  # before stop
         self.assertTrue("tx_frames" in s["counters"])
+
+
+class Traffic(Console):
+    """Test traffic in the application (``sily.traffic``): wiring, journal, status."""
+
+    def _run(self, hw, ms, tasks=(), **fields):
+        fields.setdefault("journal", {"minute_s": 1})
+        a = _app(hw, **fields)
+        for factory in tasks:
+            a.add_task(factory)
+        out = []
+        a.add_task(_after(ms - 10, lambda a: out.append(a.status())))
+        a.add_task(_after(ms, lambda a: a.stop()))
+        self.assertEqual(app.start(a), app.STOPPED)
+        records, _ = journal.read(JOURNAL)
+        minutes = [r for r in records if r["k"] == "min"]
+        self.assertEqual(len(minutes), 1)
+        return a, minutes[0], out[0]
+
+    def test_gateway_counts_a_node_message(self):
+        hw = FakeHw()
+        payload = bytearray(traffic.HEAD_SIZE + 6)
+        struct.pack_into(traffic.HEAD, payload, 0, 4, 17, 1000)
+        key = bytes.fromhex(KEY)
+        frame = peer_frame(1, ROOT, bytes(payload), key, traffic.PORT, 1)
+
+        def deliver(a):
+            a.stack.adapter.on_receive(frame, -70, 6.5)
+
+        a, minute, status = self._run(hw, 1500, (_after(50, deliver),))
+        self.assertEqual(minute["tt"]["o"], [[1, 4, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0]])
+        self.assertEqual((minute["tt"]["mal"], minute["tt"]["q"]), (0, 0))
+        node = status["traffic"]["nodes"][0]
+        self.assertEqual((node["address"], node["boot"], node["delivery"]), (1, 4, 1.0))
+
+    def test_gateway_without_traffic_adds_nothing(self):
+        a, minute, status = self._run(FakeHw(), 1500)
+        self.assertFalse("tt" in minute)
+        self.assertEqual(status["traffic"]["nodes"], [])
+
+    def test_node_counts_its_messages_and_failures(self):
+        hw = FakeHw()
+        seen = []
+
+        def send(a):
+            seen.append(a.traffic.send(a.clock.now()))  # detached: held
+            a.stack.engine.failed(ROOT, traffic.PORT, seen[0], 3)
+            a.stack.engine.failed(ROOT, 20, 9, 3)  # another port's
+
+        a, minute, status = self._run(
+            hw,
+            1500,
+            (_after(50, send),),
+            role="node",
+            address=3,
+            traffic={"enabled": True, "period_s": 3600},
+        )
+        self.assertTrue(seen[0] >= 0, seen)
+        self.assertEqual(minute["tt"], {"n": 1, "ok": 1, "ref": [], "fail": [[3, 1]]})
+        t = status["traffic"]
+        self.assertEqual((t["submitted"], t["accepted"], t["failed"]), (1, 1, 1))
+        self.assertEqual(a.failure_listeners, [a.traffic.failed])
+
+    def test_node_without_traffic(self):
+        a, minute, status = self._run(FakeHw(), 1500, role="node", address=3)
+        self.assertIsNone(a.traffic)
+        self.assertFalse("tt" in minute)
+        self.assertFalse("traffic" in status)

@@ -35,6 +35,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     - `record.py` — what the journal records (boot, minute, events,
       gateway reports) and the presence extension (battery, mode);
     - `tap.py` — link measurements (frames, RSSI, SNR) per source heard;
+    - `traffic.py` — test traffic: numbered messages from the nodes,
+      delivery and latency per node at the gateway (*Application*);
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
     on the unix port and can be extracted later; its core is event-driven
@@ -354,10 +356,10 @@ Every box runs the same application (`src/sily/app.py`), started at boot by
 key come from `/config.json`, which `make deploy` keeps. The configuration
 is made on the host from two files kept outside this repository, since
 they hold passwords: one network file shared by every box (password,
-network name, spreading factor, presence period) and one file per box
-(role, address, name, power, LED, journal; display and WiFi sections for
-later parts), as in the templates `tools/network.example.json` and
-`tools/box.example.json`. `make configure` merges them, checks the result
+network name, spreading factor, presence period, test traffic) and one
+file per box (role, address, name, power, LED, journal; display and WiFi
+sections for later parts), as in the templates `tools/network.example.json`
+and `tools/box.example.json`. `make configure` merges them, checks the result
 (every problem reported as `field: problem`), derives the frame key and its
 fingerprint on the host (no password on the boxes), writes `/config.json`,
 clears the start guard and resets the board. `tools/box.py check --network
@@ -396,8 +398,33 @@ last 5 minutes. `make journal PORT=... OUT=...` stops the application,
 copies the journal into `OUT/journal`, resets the board and prints a
 summary per boot (`tools/journal_summary.py`: span and end, attach time,
 parent changes, margins per link, counters, battery, write and sync
-stalls). Times are per boot (ms since the board started): no absolute
-time on the boxes.
+stalls; test traffic). Times are per boot (ms since the board started):
+no absolute time on the boxes.
+
+Test traffic (`src/sily/traffic.py`) measures the mesh in the field before
+punches exist. With `traffic.enabled` in the network file, every node
+sends a numbered class 1 message to the gateway on port 110 (high
+priority, as punches) every `traffic.period_s` (30 s; each interval within
+`jitter_pct`, 25 %, of it, the first at a random phase after the node's
+first attachment), of `traffic.size` bytes (10, a punch's, to 200). A
+period that would take the messages of 5 nodes through one relay above
+half its duty-cycle budget is refused (for 10 bytes: 8 s at SF7, 14 s at
+SF8, 26 s at SF9). The gateway always counts what it receives, per node:
+messages received against expected (the span of the numbers of each node
+boot: a reboot is neither losses nor duplicates; losses before the first
+and after the last message received of a boot are not seen, the node's own
+counts are), duplicates, reordered; and the latency *above the best case*:
+the clocks of the boxes are not synchronised and no downward route exists
+yet, so each message gives the gateway's reception time minus the node's
+submission time, the unknown clock offset included, and the figure is that
+minus its smallest value over the last 10 minute records of that node
+boot. It shows queueing, medium access, retries and holding above the
+fastest delivery seen, not the absolute delay (median, 90th percentile and
+maximum per minute record). Nodes count their messages submitted,
+accepted, refused at submission and failed afterwards, per reason. The
+figures go into the `tt` field of the minute records and into
+`App.status()` (`traffic`); the summary of `make journal` gives them over
+the run.
 
 ## Bench
 

@@ -111,3 +111,88 @@ class Summary(unittest.TestCase):
             "  link 0: margin 8.5 / 8.5 / 8.5 dB (min/mean/max, 1), RSSI -97 dBm, 12 frames"
             in lines
         )
+
+
+GATEWAY_DIR = DIR + "_gateway"
+
+
+def _clear(directory):
+    try:
+        os.mkdir("build")
+    except OSError:
+        pass
+    try:
+        for name in os.listdir(directory):
+            os.remove(directory + "/" + name)
+    except OSError:
+        pass
+
+
+def _row(address, received, expected, latency, boots=1):
+    return [address, boots, received, expected, 1, 2, 0, 0, boots] + latency
+
+
+class Traffic(unittest.TestCase):
+    """Test traffic: a node's own counts, the gateway's figures per node."""
+
+    @classmethod
+    def setUpClass(cls):
+        _clear(GATEWAY_DIR)
+        boot = {"role": "gateway", "address": 0, "name": "base", "sf": 7, "version": "0.2"}
+        minutes = [
+            [_row(3, 5, 6, [6, 100, 900, 900]), _row(4, 6, 6, [6, 0, 50, 50])],
+            [_row(3, 11, 12, [6, 300, 2000, 2000]), _row(4, 12, 12, [0, None, None, None])],
+            [_row(3, 17, 18, [6, 200, 500, 700]), _row(4, 15, 18, [6, 10, 80, 80], 2)],
+        ]
+        lines = [(0, "boot", boot)]
+        for i, rows in enumerate(minutes):
+            tt = {"o": rows, "mal": 0, "q": 0, "ovf": 0}
+            lines.append((60000 * (i + 1), "min", {"tt": tt}))
+        lines[-1][2]["tt"]["mal"] = 2
+        j = journal.Journal(GATEWAY_DIR, 1, lambda: 0)
+        j.open()
+        for t, kind, fields in lines:
+            j.write(t, kind, fields)
+        j.close()
+        records, _ = journal.read(GATEWAY_DIR)
+        cls.gateway = journal_summary.summarise(journal_summary.boots(records)[0])
+
+    def test_gateway_figures_per_node(self):
+        t = self.gateway["traffic"]["gateway"]
+        self.assertEqual(sorted(t), [3, 4])
+        self.assertEqual(t[3]["row"][2:4], [17, 18])
+        self.assertEqual(
+            (t[3]["medians"], t[3]["maxima"], t[3]["samples"]),
+            ([100, 300, 200], [900, 2000, 700], 18),
+        )
+        self.assertEqual((t[4]["medians"], t[4]["samples"]), ([0, 10], 12))
+        self.assertEqual(t[4]["row"][8], 2)
+
+    def test_gateway_lines(self):
+        lines = journal_summary.report(self.gateway)
+        self.assertTrue(
+            "  test traffic from 3: 17/18 received (94.4 %), 1 duplicates, 2 reordered,"
+            " 0 late, 0 stale, 1 boots" in lines,
+            lines,
+        )
+        self.assertTrue(
+            "    latency above the best case: minute medians 200 ms median, 300 highest;"
+            " minute maxima 900 ms median, 2000 highest; 18 samples in 3 minutes" in lines,
+            lines,
+        )
+        self.assertTrue("from 4: 15/18 received (83.3 %)" in lines[-3], lines)
+        self.assertTrue(lines[-1].startswith("  test traffic lost to the gateway: 2 malformed"))
+
+    def test_node_counts(self):
+        tt = {"n": 40, "ok": 38, "ref": [[-7, 2]], "fail": [[3, 1]]}
+        s = journal_summary.summarise([{"b": 1, "t": 0, "k": "min", "tt": tt}])
+        self.assertEqual(s["traffic"], {"node": tt})
+        lines = journal_summary.report(s)
+        self.assertEqual(
+            lines[-1], "  test traffic: 40 submitted, 38 accepted, refused: -7 x2; failed: 3 x1"
+        )
+
+    def test_no_traffic_no_line(self):
+        s = journal_summary.summarise([{"b": 1, "t": 0, "k": "min"}])
+        self.assertIsNone(s["traffic"])
+        self.assertFalse(any("test traffic" in line for line in journal_summary.report(s)))

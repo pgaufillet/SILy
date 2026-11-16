@@ -26,8 +26,12 @@ watchdog: it would also reset a board stopped at the REPL.
 `App` runs the node (``sily.stack``) and the tasks around it: the radio
 adapter, a monitor polling the mesh state once a second (no application
 code inside the mesh's step) and driving the LED (on while attached, the
-gateway always), and the stability timer clearing the crash count. Later
-parts add their tasks with `App.add_task` before the start.
+gateway always), the stability timer clearing the crash count, and the
+test traffic (``sily.traffic``): on the gateway, always, the accounting of
+what the nodes send on its port; on a node whose configuration enables
+it, the sender (its failures passed on by the journal writer). Later parts
+add their tasks with `App.add_task` before the start, and their failure
+callbacks to ``failure_listeners``.
 
 The field journal (``sily.journal``, records of ``sily.record``) starts a
 new segment at each boot (boot number counted in the NVS namespace
@@ -35,8 +39,9 @@ new segment at each boot (boot number counted in the NVS namespace
 ``journal.minute_s`` (the battery read then, and cached for the presence
 extension), the ``ev`` events of the monitor's polls, the failures of own
 messages and, on the gateway, the reports received; a ``stop`` or
-``fatal`` line ends it. It is synced after the boot record, every
-``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
+``fatal`` line ends it. The minute record carries the test traffic's
+figures (``tt``) when there are some. The journal is synced after the boot
+record, every ``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
 handler, failure callback, presence extension) run inside its step, on the
 root's reply path: they only queue an item or return cached bytes; a task
 formats and writes, yielding between items.
@@ -49,7 +54,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, guard, journal, record
+from sily import config, guard, journal, record, traffic
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -140,6 +145,8 @@ class App:
         self.led = None
         self.attached = False
         self.error = None  # the first exception of a task
+        self.traffic = None  # traffic.Receiver (gateway), traffic.Sender or None
+        self.failure_listeners = []  # fn(dest, port, seq, reason), outside the step
         self._factories = []
         self._closed = False
 
@@ -192,6 +199,36 @@ class App:
         if cfg["led"]:
             self.led = hw.led()
             self.led.value(0)
+        self.traffic = self._traffic()
+
+    def _traffic(self):
+        """Set up the test traffic (module documentation); return it or None."""
+        engine = self.stack.engine
+        if engine.is_root:
+            receiver = traffic.Receiver(self.clock.now)
+            engine.bind(traffic.PORT, receiver.handler)
+            self.add_task(lambda app: traffic.receive(receiver))
+            return receiver
+        t = self.cfg["traffic"]
+        if not t["enabled"]:
+            return None
+        sender = traffic.Sender(
+            self.submit,
+            self.hw.random(),
+            self.boot,
+            t["period_s"] * 1000,
+            t["size"],
+            t["jitter_pct"],
+        )
+        self.failure_listeners.append(sender.failed)
+        self.add_task(lambda app: traffic.send(sender, app.clock.now, lambda: app.attached))
+        return sender
+
+    def submit(self, port, cls, dest, payload):
+        """Submit an application message (``LinkEngine.submit``), then wake the runner."""
+        result = self.stack.engine.submit(port, cls, dest, payload)
+        self.stack.runner.wake()
+        return result
 
     def read_battery(self):
         """Read the battery; cache it for the presence extension."""
@@ -241,6 +278,8 @@ class App:
     def _write_item(self, item):
         if item[0] == _FAIL:
             self.journal.write(item[1], "ev", record.failure(item[2], item[3], item[4], item[5]))
+            for listener in self.failure_listeners:
+                listener(item[2], item[3], item[4], item[5])
         else:
             kind, fields = record.report(item[2], item[3], item[4])
             self.journal.write(item[1], kind, fields)
@@ -271,6 +310,11 @@ class App:
         fields["jw"], fields["js"] = j.stalls()
         fields["jq"] = self.queue.overflow
         fields["je"] = j.errors
+        if self.traffic is not None:
+            await asyncio.sleep_ms(0)
+            tt = self.traffic.minute()
+            if tt is not None:
+                fields["tt"] = tt
         j.write(now, "min", fields)
 
     async def _minutes(self):
@@ -361,6 +405,8 @@ class App:
                 },
             }
         )
+        if self.traffic is not None:
+            out["traffic"] = self.traffic.status()
         return out
 
     def close(self, kind="stop", fields=None):

@@ -10,7 +10,7 @@ network password, and a box may hold WiFi passwords); the templates
 
 - the network file: what every box of the network shares (``password``,
   ``network`` name, ``iterations`` of the key derivation, ``profile``,
-  ``sf``, ``presence_s``);
+  ``sf``, ``presence_s``, ``traffic`` the test traffic);
 - one file per box: the rest (``role``, ``address``, ``name``, power,
   LED, display, WiFi, journal; ``sily.config``).
 

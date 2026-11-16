@@ -129,3 +129,9 @@ The box closed, its switch on (battery connected), its USB to the host
    application, copies the box's journal (`/journal/`) into
    `OUT/journal`, resets the board and prints its summary per boot
    (README *Application*).
+
+For a field measurement of the mesh, set `traffic.enabled` (period, size)
+in the network file before step 4 of every box: the nodes send numbered
+test messages, and the gateway's summary gives per node the delivery and
+the latency above the best case (README *Application*); set it back to
+false, and configure every box again, after the measurement.

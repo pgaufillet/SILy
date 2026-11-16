@@ -51,6 +51,9 @@ class Defaults(unittest.TestCase):
         self.assertEqual(
             cfg["journal"], {"minute_s": 60, "sync_s": 300, "max_kb": 1024, "segment_kb": 64}
         )
+        self.assertEqual(
+            cfg["traffic"], {"enabled": False, "period_s": 30, "size": 10, "jitter_pct": 25}
+        )
 
     def test_partial_section_keeps_the_other_defaults(self):
         cfg, errors = check(_minimal(journal={"sync_s": 30}, display={"mode": "off"}))
@@ -181,6 +184,46 @@ class Errors(unittest.TestCase):
         self.assertEqual(errors, ["sf: out of range 7 to 12", "tx_pwr: unknown key"])
 
 
+class Traffic(unittest.TestCase):
+    """The test traffic's section: bounds, and the period against the duty cycle."""
+
+    def test_period_against_the_duty_cycle(self):
+        # SF7, 10-byte payload: 29-byte frames of 67 ms; 5 nodes through one
+        # relay within half of 324 s per hour: one message per 7.4 s each.
+        message = (
+            "traffic.period_s: at least 8 s at SF7 with 10 bytes (5 nodes through one relay"
+            " within 50 % of its duty-cycle budget)"
+        )
+        self.assertEqual(_errors(traffic={"enabled": True, "period_s": 7}), [message])
+        self.assertEqual(_errors(traffic={"enabled": True, "period_s": 8}), [])
+
+    def test_larger_size_and_spreading_factor_need_longer_periods(self):
+        self.assertEqual(
+            _errors(sf=7, traffic={"enabled": True, "period_s": 14, "size": 50}),
+            [
+                "traffic.period_s: at least 15 s at SF7 with 50 bytes (5 nodes through one relay"
+                " within 50 % of its duty-cycle budget)"
+            ],
+        )
+        errors = _errors(sf=12, traffic={"enabled": True})
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("traffic.period_s: at least 183 s at SF12"), errors)
+
+    def test_disabled_traffic_is_not_judged(self):
+        self.assertEqual(_errors(traffic={"enabled": False, "period_s": 1}), [])
+
+    def test_bounds(self):
+        self.assertEqual(
+            _errors(traffic={"size": 9, "jitter_pct": 60, "enabled": 1}),
+            [
+                "traffic.enabled: true or false expected",
+                "traffic.size: out of range 10 to 200",
+                "traffic.jitter_pct: out of range 0 to 50",
+            ],
+        )
+        self.assertEqual(_errors(traffic={"size": 201}), ["traffic.size: out of range 10 to 200"])
+
+
 def _network(**fields):
     net = {"password": "correct horse", "network": "club", "iterations": ITERATIONS, "sf": 9}
     net.update(fields)
@@ -214,6 +257,18 @@ class Merge(unittest.TestCase):
         node, errors = board_config(net, {"role": "node", "address": 1})
         self.assertEqual(errors, [])
         self.assertIsNone(node["presence_s"])
+
+    def test_traffic_from_the_network_file_for_every_box(self):
+        net = _network(traffic={"enabled": True, "period_s": 60})
+        for box in ({"role": "gateway", "address": 0}, {"role": "node", "address": 2}):
+            cfg, errors = board_config(net, box)
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                cfg["traffic"], {"enabled": True, "period_s": 60, "size": 10, "jitter_pct": 25}
+            )
+        _, errors = board_config(_network(traffic={"enabled": True, "period_s": 20}), box)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("traffic.period_s: at least 26 s at SF9"), errors)
 
     def test_box_overriding_a_network_field_refused(self):
         cfg, errors = board_config(_network(), {"role": "node", "address": 4, "sf": 7})

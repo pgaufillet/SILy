@@ -36,13 +36,21 @@ not pass silently), defaults filled in. Fields:
   ``<prefix>-<name>``, WPA2, password of 8 to 63 characters), ``known`` a
   list of ``{"ssid", "password"}``;
 - ``journal``: ``minute_s`` (record period), ``sync_s`` (flush period),
-  ``max_kb`` (bound of the journal), ``segment_kb`` (one file).
+  ``max_kb`` (bound of the journal), ``segment_kb`` (one file);
+- ``traffic``: the test traffic (``sily.traffic``), network-wide:
+  ``enabled`` (default false: the nodes send; the gateway always counts
+  what it receives), ``period_s`` (default 30), ``size`` (payload bytes,
+  10 to 200, default 10, a punch's), ``jitter_pct`` (each interval within
+  that many % of the period, default 25); enabled, a period below
+  ``sily.traffic.min_period_s`` (5 nodes' messages through one relay
+  within half its duty-cycle budget at that SF and size) is refused.
 
 The journal section sets the field journal (``sily.app``); the display
 and WiFi sections are checked now, used by later parts of the application.
 
 Host merge (`board_config`): one network file for every box (password,
-network name, derivation count, profile, SF, presence period) and one file
+network name, derivation count, profile, SF, presence period, test
+traffic) and one file
 per box (the other fields); a box may not override a network field. The key
 and fingerprint are derived with ``mesh.kdf``; the result holds no password.
 """
@@ -50,6 +58,7 @@ and fingerprint are derived with ``mesh.kdf``; the result holds no password.
 import json
 
 from mesh import profile as profiles
+from sily import traffic
 
 VERSION = 1
 ADDRESS_MAX = 65534  # 0xFFFF is the broadcast address
@@ -60,7 +69,7 @@ NODE = "node"
 
 # Fields of the network file: the network-wide settings. A box file may set
 # none of them, nor what is derived from them.
-NETWORK_FIELDS = ("password", "network", "iterations", "profile", "sf", "presence_s")
+NETWORK_FIELDS = ("password", "network", "iterations", "profile", "sf", "presence_s", "traffic")
 _DERIVED = ("version", "key", "fingerprint")
 
 _REQUIRED = "required"  # default of a required field
@@ -241,6 +250,12 @@ _JOURNAL = (
     ("max_kb", 1024, _int(16, 1536)),
     ("segment_kb", 64, _int(4, 256)),
 )
+_TRAFFIC = (
+    ("enabled", False, _leaf(_bool_test)),
+    ("period_s", 30, _int(1, 3600)),
+    ("size", traffic.HEAD_SIZE, _int(traffic.HEAD_SIZE, traffic.SIZE_MAX)),
+    ("jitter_pct", 25, _int(0, 50)),
+)
 _BOARD = (
     ("version", _REQUIRED, _leaf(_version_test)),
     ("role", _REQUIRED, _one_of((GATEWAY, NODE))),
@@ -259,6 +274,7 @@ _BOARD = (
     ("display", {}, _section(_DISPLAY)),
     ("wifi", {}, _section(_WIFI)),
     ("journal", {}, _section(_JOURNAL)),
+    ("traffic", {}, _section(_TRAFFIC)),
 )
 _NETWORK = (
     ("password", _REQUIRED, _text(1, 128)),
@@ -267,6 +283,7 @@ _NETWORK = (
     ("profile", profiles.EU_869, _leaf(_profile_test)),
     ("sf", _REQUIRED, _int(profiles.SF_MIN, profiles.SF_MAX)),
     ("presence_s", None, _optional(_int(1, 65535))),
+    ("traffic", {}, _section(_TRAFFIC)),
 )
 
 
@@ -320,6 +337,30 @@ def _cross(cfg, errors):
         bound = journal.get("max_kb")
         if type(segment) is int and type(bound) is int and segment > bound:
             errors.append("journal.segment_kb: above journal.max_kb")
+    _cross_traffic(cfg, profile, errors)
+
+
+def _cross_traffic(cfg, profile, errors):
+    """The test traffic's period against the duty cycle (`traffic.min_period_s`)."""
+    t = cfg.get("traffic")
+    sf = cfg.get("sf")
+    if profile is None or type(t) is not dict or t.get("enabled") is not True:
+        return
+    if not (_is_int(cfg, "sf") and profiles.SF_MIN <= sf <= profiles.SF_MAX):
+        return
+    period = t.get("period_s")
+    size = t.get("size")
+    if type(period) is not int or type(size) is not int:
+        return
+    if not traffic.HEAD_SIZE <= size <= traffic.SIZE_MAX:
+        return
+    least = traffic.min_period_s(profile, sf, size)
+    if period < least:
+        errors.append(
+            "traffic.period_s: at least %d s at SF%d with %d bytes (%d nodes through one relay"
+            " within %d %% of its duty-cycle budget)"
+            % (least, sf, size, traffic.LOAD_NODES, traffic.SHARE_PERCENT)
+        )
 
 
 def check(obj):
@@ -381,6 +422,7 @@ def board_config(network, box, derive=None):
     merged["network"] = net["network"]
     merged["profile"] = net["profile"]
     merged["sf"] = net["sf"]
+    merged["traffic"] = net["traffic"]
     if box.get("role") == GATEWAY and net["presence_s"] is not None:
         merged["presence_s"] = net["presence_s"]
     return check(merged)

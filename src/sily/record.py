@@ -10,7 +10,8 @@ since the board's boot) and ``k``, its kind:
   application's figures (``bat`` battery mV, ``heap`` free bytes, ``jw``
   and ``js`` the longest journal write and sync in ms since the last
   record, ``jq`` callback items lost to a full queue, ``je`` journal
-  errors; all totals since boot);
+  errors; all totals since boot; ``tt`` the test traffic's figures when
+  there are some, ``sily.traffic``);
 - ``ev``: ``e`` names the event: ``attach``, ``detach``, ``parent``,
   ``rank``, ``grounded``, ``ungrounded`` (`transitions`, from the state
   polled once a second; each with the parent set's counters ``sw``,

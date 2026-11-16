@@ -2,5 +2,6 @@
   "password": "replace with the network passphrase",
   "network": "club",
   "sf": 7,
-  "presence_s": 30
+  "presence_s": 30,
+  "traffic": {"enabled": false, "period_s": 30, "size": 10, "jitter_pct": 25}
 }

@@ -19,7 +19,15 @@ lines of one boot number, in order):
   ones), the battery (first, last, lowest mV) and the journal's own
   costs: longest write and sync (ms), items lost, errors;
 - on the gateway, per origin of the reports received: presences,
-  topologies, last battery.
+  topologies, last battery;
+- the test traffic (``sily.traffic``, the ``tt`` field of the minute
+  records): on a node, its messages submitted, accepted, refused and
+  failed (per reason: the codes of ``mesh.link`` refusals, negative, and
+  of ``mesh.reliable`` failures); on the gateway, per node, the messages
+  received against those expected, duplicates, reordered, late, stale,
+  node boots (the last minute record's totals), and the latency above the
+  best case over the minute records: the median and highest of the
+  per-minute medians and maxima, with the samples and minutes counted.
 
 Times are the boards' own (ms since the board's boot): no absolute time on
 the boxes.
@@ -116,7 +124,78 @@ def summarise(run):
             if r["k"] == "rp" and r.get("bat") is not None:
                 o["bat"] = r["bat"]
     s["origins"] = origins
+    s["traffic"] = traffic(minutes)
     return s
+
+
+def _median(values):
+    values = sorted(values)
+    return values[(len(values) - 1) // 2]
+
+
+def traffic(minutes):
+    """Return the test traffic's summary of the minute records, None without one."""
+    with_tt = [m["tt"] for m in minutes if m.get("tt")]
+    if not with_tt:
+        return None
+    final = with_tt[-1]
+    if "o" not in final:  # a node's own counts
+        return {"node": final}
+    nodes = {}
+    for tt in with_tt:
+        for row in tt["o"]:
+            node = nodes.setdefault(row[0], {"medians": [], "maxima": [], "samples": 0})
+            node["row"] = row
+            if row[9]:
+                node["samples"] += row[9]
+                node["medians"].append(row[10])
+                node["maxima"].append(row[12])
+    lost = {"mal": final.get("mal", 0), "q": final.get("q", 0), "ovf": final.get("ovf", 0)}
+    return {"gateway": nodes, "lost": lost}
+
+
+def _reasons(pairs):
+    return ", ".join("%s x%s" % (reason, n) for reason, n in pairs) or "none"
+
+
+def _traffic_lines(t):
+    if t is None:
+        return []
+    if "node" in t:
+        n = t["node"]
+        return [
+            "  test traffic: %s submitted, %s accepted, refused: %s; failed: %s"
+            % (n["n"], n["ok"], _reasons(n["ref"]), _reasons(n["fail"]))
+        ]
+    lines = []
+    for address in sorted(t["gateway"]):
+        node = t["gateway"][address]
+        row = node["row"]
+        rate = "%.1f %%" % (100 * row[2] / row[3]) if row[3] else "-"
+        lines.append(
+            "  test traffic from %s: %s/%s received (%s), %s duplicates, %s reordered,"
+            " %s late, %s stale, %s boots" % ((address, row[2], row[3], rate) + tuple(row[4:9]))
+        )
+        if node["medians"]:
+            lines.append(
+                "    latency above the best case: minute medians %d ms median, %d highest;"
+                " minute maxima %d ms median, %d highest; %d samples in %d minutes"
+                % (
+                    _median(node["medians"]),
+                    max(node["medians"]),
+                    _median(node["maxima"]),
+                    max(node["maxima"]),
+                    node["samples"],
+                    len(node["medians"]),
+                )
+            )
+    lost = t["lost"]
+    if lost["mal"] or lost["q"] or lost["ovf"]:
+        lines.append(
+            "  test traffic lost to the gateway: %s malformed, %s queue overflows,"
+            " %s beyond the node bound" % (lost["mal"], lost["q"], lost["ovf"])
+        )
+    return lines
 
 
 def _duration(seconds):
@@ -198,6 +277,7 @@ def report(s):
             "  from %s: %d presences, %d topologies, %d node information, battery %s mV"
             % (origin, o["rp"], o["rt"], o["ri"], o["bat"])
         )
+    lines.extend(_traffic_lines(s["traffic"]))
     return lines
 
 
