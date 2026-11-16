@@ -155,7 +155,7 @@ measurement recorded).
 | MP2 | Application-agnostic: opaque payloads multiplexed by an 8-bit port; the mesh never interprets payloads; applications act on the mesh only through documented parameters | designed | layering (§1); relays never read application payloads (§11) |
 | MP3 | Transparent to applications: they address nodes (or the root implicitly), never routes; topology changes appear only as delay or explicit failure | designed | §12: applications address nodes or the root; topology changes show as delay or explicit failure |
 | MP4 | Service classes chosen per message: **class 0** datagram (at most once, optional replace-by-newer); **class 1** hop-by-hop reliable (passive ack by overhearing the next hop, piggybacked ack on the last hop, 3 attempts, held during route repair); **class 2** end-to-end reliable (exactly once, unordered; NACK on sequence gaps, tail announcement, lazy cumulative ack, sender buffer) — SILy's punch recovery made generic | designed | §12: class 0 (replace by newer), class 1 (passive and explicit acknowledgements, 3 attempts, holding), class 2 (class 1 per hop + NACK, tail, lazy cumulative acknowledgement, send window) |
-| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a copy received by its destination more than the duplicate window after the last copy received is delivered again (acknowledgements lost on the last hop, or a copy taken again under custody; class 2 and the application filter it); in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay without route whose origin is not its neighbour, when the relay stays without route until its error's holding ends (a relay knows no downward route; class 2 recovers it) |
+| MP5 | **No silent loss**: in classes 1 and 2 a message is delivered, or its sender gets an explicit failure (no route, queue or buffer full, duty-cycle budget, timeout) | designed | §12: failures at submission and from the network (errors are class 1); class 2 kept until acknowledged, *gone* declared at sender reboot; exceptions: duplicates possible across a receiver reboot; in class 1, a copy received by its destination more than the duplicate window after the last copy received is delivered again (acknowledgements lost on the last hop, or a copy taken again under custody; class 2 and the application filter it); in class 1, a message lost by a relay that reboots after acknowledging it (class 2 recovers it), and a message failed by a relay without route whose origin is not its neighbour, stays unheard by that relay during its error's holding, or does not answer its direct error (the error stays with the relay, which knows no downward route; class 2 recovers it) |
 | MP6 | Explicit limits: maximum payload announced (≈ 200 B), no fragmentation in v1 | designed | §11: 200 B announced |
 | MP7 | Priorities chosen by the application, mapped to duty-cycle allowances; fairness between forwarded and local traffic | designed | §6: priority implicit in the port (application ports 16–127 high, 128–255 low), allowances per priority; §7: round robin by origin within a priority, per-origin queue quota with back-pressure |
 | MP8 | Compact headers: fields implicit when deducible from context (root address upward, root origin downward), SCHC-style | designed | §11: implicit root, first-hop compression, implicit last length, bundles |
@@ -1498,7 +1498,8 @@ and the second half of a node → node (P2P) message.
   it with a source route.
 - **Both**: direct delivery when the destination is a neighbour; class 1
   hop-by-hop delivery; an error goes back towards the root (and the sender)
-  when a hop fails.
+  when a hop of a source route fails; the error of an upward message stays
+  with the relay that failed it, told directly to a neighbour origin (§12).
 
 | Criterion | Storing | Non-storing |
 |---|---|---|
@@ -1664,7 +1665,7 @@ Addressing modes:
 | 1 | presence | upward (mode 6 on the first hop, 1 when forwarded), 0 | preferred parent 2 B (mode 1 only; in mode 6 it is the link destination); root sequence 1 B (mode 6 only: the sequence the sender holds, §9; dropped when forwarded); flags 1 B (bit 0 first report since boot, bit 1 queue overflow since last report, bit 2 duty-cycle use above 80 % since last report (seen at every transmission, kept until a presence goes on air: presence itself is refused above 80 %), bit 3 class 2 tails follow, bit 4 rank errors since last report (§9), bit 5 address conflict, bit 6 authentication failures since last report (§13), bit 7 next key loaded (§14)); if bit 3: tail count 1 B, then per idle flow not yet acknowledged: port 1 B, oldest unacknowledged sequence 2 B, last sequence 2 B (§12); application extension: the remaining bytes, opaque (length set by configuration; SILy: battery and mode, 1 B) |
 | 2 | topology | upward (6 / 1), 0 | count 1 B; per neighbour: address 2 B, margin 1 B (signed dB, saturated, §5), quality 1 B (bit 7 parent-set member, bits 6–0 delivery ratio 0–100 %); parent set first, then best other links; 6 entries by default |
 | 3 | acknowledgement | link-local, 0 | per acknowledged frame: link source 2 B, frame counter low 16 bits 2 B |
-| 4 | error | upward (6 / 1), or link-local (0) to its origin when a neighbour (§12), 1 | reason 1 B (1 next hop unreachable, 2 next hop not a neighbour, 3 no route, 4 queue full, 5 duty-cycle budget, 6 route beyond 8 hops); next hop 2 B; failed message: origin 2 B, destination 2 B, port 1 B, sequence 2 B (§10, §12; the root forwards it to the origin) |
+| 4 | error | upward (6 / 1) for a failure on a source route (§10), or link-local (0) to its origin when a neighbour (§12), 1 | reason 1 B (1 next hop unreachable, 2 next hop not a neighbour, 3 no route, 4 queue full, 5 duty-cycle budget, 6 route beyond 8 hops); next hop 2 B; failed message: origin 2 B, destination 2 B, port 1 B, sequence 2 B (§10, §12; the root forwards it to the origin) |
 | 5 | node information | upward (6 / 1), 0 | full MAC 6 B, protocol version 1 B, firmware version 2 B, name (remaining bytes, UTF-8, ≤ 16 B) |
 | 6 | echo | any, 0 | kind 1 B (0 request, 1 response); identifier 2 B; hop count out 1 B; hop count back 1 B; padding (optional) (§13) |
 | 7 | traceroute | any, 0 | kind 1 B (0 request, 1 response, bit 7 truncated); identifier 2 B; then per hop, out and back: address 2 B, margin of the received frame 1 B (signed dB), link cost 1 B (8 × ETX); 16 entries at most (§13) |
@@ -1916,17 +1917,19 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   (detached, or floating: §9, root sequence and grounding), keeps its
   upward class 1 and 2 messages for **2 presence periods counted from the
   loss of grounding** (its detach, or the moment it became ungrounded),
-  longer than a detach and rejoin at every SF (§9). Then it drops them and
-  queues an error (reason 3) for the root. After a detach, the queued
+  longer than a detach and rejoin at every SF (§9). Then it fails them:
+  the origin of each relayed one is told by an error (reason 3, error of
+  an upward message below), the node's own fail to its application.
+  After a detach, the queued
   upward class 1/2 messages, those waiting for an acknowledgement
   included, are held; queued class 0 messages are dropped. An ungrounded
   node forwards no upward message: its queued ones are held, a waiting one
   is held at its timeout (no retry, no drop of the parent), one it receives
   is held and acknowledged explicitly. The node's own upward messages (its
-  submissions and its errors) count their 2 periods from their own hold:
-  they are no hand-over, and an error queued at the end of a hold would
-  otherwise fail at once, without a chance to reach the root once the
-  node is grounded again; so do all the messages of a node never grounded
+  submissions) count their 2 periods from their own hold: they are no
+  hand-over, and one submitted late in a hold would otherwise fail at
+  once, without a chance to reach the root once the node is grounded
+  again; so do all the messages of a node never grounded
   since boot (no loss of grounding to count from; floating, it is no
   candidate parent and receives no hand-over).
 - **The hold is not renewed** at a hand-over nor at a rejoin: a message
@@ -1951,21 +1954,40 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   period, the relay's presence goes once): with at most one of those
   frames lost per Node, two distinct sequences, 2 G + 2 periods; one more
   G per further frame lost.
-- **Errors are class 1** (port 4, upward). The root forwards an error about an
-  upward or P2P message to its origin. An error it cannot route (no
+- **Errors are class 1** (port 4). An error about a message failed on a
+  source route goes upward to the root (downward failure above, §10); the
+  error of an upward message stays with the relay that failed it (below).
+  The root forwards an error about a P2P message to its origin. An error
+  it cannot route (no
   downward route to the origin: until downward routing exists, §10, any
   origin that is not its neighbour, direct error below) is dropped and
   counted at once, not held: with no route to wait for, holding it only
   delayed the same outcome and kept it 2 periods in the root's queue. An
   error about an error is never generated, only counted.
-- **Direct error**: when the origin of the failed message is a neighbour
-  (heard within the silence limit), the error goes to it directly,
-  link-local (mode 0, link destination the origin), whatever the node's
-  route or grounding: one hop, no path to the root needed. Its attempts
-  follow the class 1 rules; once they are exhausted it gets fresh
-  attempts, after a retry delay, while the origin is still heard, for at
-  most the holding (2 presence periods) from the first exhaustion; then
-  it goes upward as any error (the same error, once). The root sends its
+- **Error of an upward message** (failed by a relay without route, end of
+  holding, reason 3): it never goes upward. It goes to the origin
+  directly, link-local (mode 0, link destination the origin), whatever the
+  relay's route or grounding, when the origin is heard within the silence
+  limit: one hop, no path to the root needed (the **direct error**).
+  Otherwise the relay holds it, and re-tests while it holds it: it goes
+  direct as soon as the origin is heard, and is dropped and counted at the
+  end of its holding (2 presence periods from the failure, the re-test
+  done once more then). A direct error's attempts follow the class 1
+  rules; once they are exhausted it gets fresh attempts, after a retry
+  delay, while the origin is still heard, for at most the holding from
+  the first exhaustion; then it is dropped and counted. Why not upward:
+  an upward error needs the route whose lack failed the message, so it
+  was held in turn and dropped at the end of its own holding, or arrived
+  once the route was back, when the message itself would have passed; and
+  at the root, without downward routing (§10), an error for an origin that
+  is not its neighbour is dropped (above): in simulation no upward error
+  of a relay reached its origin (none of the 144 that reached the root in
+  15 overloaded 64-node star runs). Why the re-test: a path decided once, at the failure, sent the
+  error upward when the origin, a neighbour, was quiet at that instant
+  (detached, or its frames lost on a busy channel); the error expired at
+  the relay, still without route, after the origin had been heard again
+  (a silent loss in the overloaded 64-node star; TLA+
+  `DODAG_line_erronce_MP5`, held by `DODAG_line_errlocal_MP5`). The root sends its
   errors (forwarded, or about its own messages) to a neighbour origin
   the same way; once their fresh attempts end, they take the downward
   route as any error of the root, dropped without one (above). Without
@@ -1986,22 +2008,24 @@ sequences lost at a sender reboot are declared *gone*. Figures come from section
   message reboots before forwarding it: the message is then lost silently
   (accepted: custody records in RTC memory would cost writes per message
   and still not survive a power loss); and when a relay without route
-  fails a held message (end of holding) whose origin is not its neighbour
-  (or does not answer its direct error): a relay knows no downward route,
-  so the error can only go upward; it is held in turn while the relay
-  stays without route and dropped at the end of its own holding, about 4
-  presence periods without route in all, whether the origin is cut off
-  too (TLA+ `DODAG_line_partition_MP5Live`) or has a route through
-  another branch (`DODAG_diamond_errretest_cutrelay`). Accepted: with no
-  link at all nobody can communicate, not even a failure; and in
-  simulation, relays holding other nodes' messages on deep lossy
-  topologies were back on a route within 3.4 periods, while a relay
-  drowned by hidden terminals for longer (the overloaded single-relay
-  star) has its origins among its neighbours. The return path of an
-  error to an origin that is not the relay's neighbour is an open point
-  of downward routing (§10); until it exists, such an error reaching the
-  root is dropped there (above): the failure is explicit at the root, not
-  at the origin. Applications that cannot accept
+  fails a held message (end of holding) whose origin is not its
+  neighbour, stays unheard by the relay over the error's holding (dead,
+  cut off from it, or its frames lost), or does not answer its direct
+  error: the error stays with the relay, which knows no downward route,
+  and is dropped and counted there, about 4 presence periods after the
+  relay lost its route, whether the origin is cut off too or has a route
+  through another branch (TLA+ `DODAG_line_errlocal_*`,
+  `DODAG_diamond_errlocal_cutrelay`: no silent loss outside this
+  exception). Accepted: with no link at all nobody can communicate, not
+  even a failure; and in simulation, relays holding other nodes' messages
+  on deep lossy topologies were back on a route within 3.4 periods, while
+  a relay drowned by hidden terminals for longer (the overloaded
+  single-relay star) has its origins among its neighbours. The return
+  path of an error to an origin that is not the relay's neighbour is an
+  open point of downward routing (§10; candidate: each node keeps the
+  neighbour that first handed it each message, and the error goes back
+  hop by hop through them); until it exists the failure is explicit at
+  the relay (counted), not at the origin. Applications that cannot accept
   these risks use class 2, whose end-to-end recovery covers them.
 - A frame holding a refused message is not acknowledged at all (one entry
   per frame): its other, delivered messages may then be retried (duplicates,
