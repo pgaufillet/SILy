@@ -16,6 +16,9 @@ lines of one boot number, in order):
   detaches (events of the 1 Hz poll), the failures of own messages;
 - per link of the minute records' neighbour rows: the margin (dB) min,
   mean and max, the last RSSI mean and frames;
+- the frames dropped on purpose per source (the box file's ``drop``,
+  ``sily.drop``: ``drp`` of the last minute record), with their share of
+  the source's frames (dropped and received) when it is a link above;
 - the counters since boot (totals of the last minute record, the non-zero
   ones), the battery (first, last, lowest mV) and the journal's own
   costs: longest write and sync (ms), items lost, errors; the display's
@@ -119,6 +122,7 @@ def summarise(run):
                 if value:
                     totals[group + "." + key] = value
     s["counters"] = totals
+    s["drops"] = minutes[-1].get("drp") if minutes else None
     battery = [m["bat"] for m in minutes if m.get("bat") is not None]
     s["battery"] = (battery[0], battery[-1], min(battery)) if battery else None
     s["jw"] = max([m.get("jw", 0) for m in minutes] or [0])
@@ -244,6 +248,17 @@ def _traffic_lines(t):
     return lines
 
 
+def _drops(rows, links):
+    items = []
+    for address, dropped in rows:
+        item = "from %s %d" % (address, dropped)
+        link = links.get(address)
+        if link is not None and dropped + link["frames"]:
+            item += " (%.1f %%)" % (100 * dropped / (dropped + link["frames"]))
+        items.append(item)
+    return ", ".join(items)
+
+
 def _duration(seconds):
     seconds = int(seconds)
     return "%d:%02d:%02d" % (seconds // 3600, seconds // 60 % 60, seconds % 60)
@@ -308,6 +323,8 @@ def report(s):
             "  link %s: %s, RSSI %s dBm, %d frames"
             % (address, margin, link["rssi"], link["frames"])
         )
+    if s["drops"]:
+        lines.append("  dropped on purpose: " + _drops(s["drops"], s["links"]))
     if s["counters"]:
         items = ["%s %s" % (k, s["counters"][k]) for k in sorted(s["counters"])]
         lines.append("  counters since boot: " + ", ".join(items))

@@ -4,7 +4,7 @@ import json
 import unittest
 
 from mesh import kdf
-from sily.config import NETWORK_FIELDS, board_config, check, load
+from sily.config import DROP_MAX, NETWORK_FIELDS, board_config, check, drop_rates, load
 
 KEY = "00112233445566778899aabbccddeeff"
 FINGERPRINT = "a1b2c3d4"
@@ -45,6 +45,8 @@ class Defaults(unittest.TestCase):
         self.assertEqual((cfg["tx_power"], cfg["antenna_gain"]), (22, 0))
         self.assertIsNone(cfg["presence_s"])
         self.assertIsNone(cfg["allow"])
+        self.assertIsNone(cfg["drop"])
+        self.assertIsNone(drop_rates(cfg["drop"]))
         self.assertTrue(cfg["led"])
         self.assertEqual(cfg["display"], {"mode": "always", "window_min": 10})
         self.assertEqual(cfg["wifi"], {"ap": None, "known": []})
@@ -70,6 +72,7 @@ class Defaults(unittest.TestCase):
                 name="arena",
                 presence_s=30,
                 allow=[1, 2],
+                drop={"1": 0, "2": 100},
                 led=False,
                 wifi={
                     "ap": {"prefix": "SILy", "password": "12345678"},
@@ -80,6 +83,8 @@ class Defaults(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(cfg["presence_s"], 30)
         self.assertEqual(cfg["allow"], [1, 2])
+        self.assertEqual(cfg["drop"], {"1": 0, "2": 100})  # the file's shape: it is written back
+        self.assertEqual(drop_rates(cfg["drop"]), {1: 0, 2: 100})
         self.assertEqual(cfg["wifi"]["ap"]["prefix"], "SILy")
 
 
@@ -139,6 +144,39 @@ class Errors(unittest.TestCase):
 
     def test_allow_item(self):
         self.assertEqual(_errors(allow=[1, 70000]), ["allow[1]: out of range 0 to 65534"])
+
+    def test_drop_not_an_object(self):
+        self.assertEqual(_errors(drop=[[0, 30]]), ["drop: an object expected"])
+        self.assertEqual(_errors(drop=30), ["drop: an object expected"])
+
+    def test_drop_keys_decimal_addresses(self):
+        for key in ("x", "", "01", "+1", "-1", " 1", "1.0", "0x10", "65535", "99999999"):
+            self.assertEqual(
+                _errors(drop={key: 30}),
+                ["drop.%s: an address 0 to 65534 in decimal expected" % key],
+            )
+        errors = _errors(drop={1: 30, "2": 5})  # decoded elsewhere than from JSON
+        self.assertEqual(errors, ["drop.1: an address 0 to 65534 in decimal expected"])
+
+    def test_drop_percent(self):
+        self.assertEqual(_errors(drop={"1": 101}), ["drop.1: out of range 0 to 100"])
+        self.assertEqual(_errors(drop={"1": -1}), ["drop.1: out of range 0 to 100"])
+        for value in ("30", 30.0, True, None):
+            self.assertEqual(_errors(drop={"1": value}), ["drop.1: an integer expected"])
+
+    def test_drop_sources_bounded(self):
+        rates = {str(a): 10 for a in range(DROP_MAX)}
+        self.assertEqual(_errors(drop=rates), [])
+        rates[str(DROP_MAX)] = 10
+        self.assertEqual(_errors(drop=rates), ["drop: at most %d sources expected" % DROP_MAX])
+
+    def test_drop_outside_allow(self):
+        self.assertEqual(
+            _errors(allow=[0, 1], drop={"0": 30, "2": 50, "7": 10}),
+            ["drop.2: not in allow (never heard)", "drop.7: not in allow (never heard)"],
+        )
+        self.assertEqual(_errors(allow=[0, 2], drop={"0": 30, "2": 50}), [])
+        self.assertEqual(_errors(allow=None, drop={"7": 10}), [])  # every neighbour heard
 
     def test_display_mode(self):
         self.assertOne(_errors(display={"mode": "blink"}), "display.mode: one of off")

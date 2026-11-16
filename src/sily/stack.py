@@ -4,9 +4,10 @@ Shared by the application (``sily.app``) and the bench console
 (``sily.bench``), so that the bench measures the stack the boxes run. The
 chain: radio settings checked against the regional profile, SX1262 adapter
 (from the injected factory) started, bound to the mesh radio contract
-(``sily.radio.MeshRadio``), neighbour filter, link engine on the platform
-objects (``mesh.link.open_link``), mesh routing (``mesh.routing.Routing``,
-or static routes: every destination a neighbour), asyncio runner. The
+(``sily.radio.MeshRadio``), neighbour filter, drop rates (``sily.drop``,
+when set), link engine on the platform objects (``mesh.link.open_link``),
+mesh routing (``mesh.routing.Routing``, or static routes: every
+destination a neighbour), asyncio runner. The
 hardware comes in as arguments (adapter factory, storage, retained memory,
 random source, MAC address: a bundle such as ``sily.hw``), so that the
 assembly runs on the unix port with fakes.
@@ -22,6 +23,7 @@ from mesh.radio import NeighbourFilter
 from mesh.reports import NodeInfo
 from mesh.routing import Routing
 from mesh.runner import Runner
+from sily.drop import Drop
 from sily.radio import MeshRadio, link_source, lora_config
 
 
@@ -48,18 +50,21 @@ class Stack:
     counter in the NVS namespace ``mesh``), ``mac()`` the 6-byte MAC
     address of the node information. address, key (16 B frame key), sf;
     name: node information. profile: regional profile identifier; power (dBm), gain
-    (antenna, dBi); allow: the addresses heard (None: every one); routing:
-    the mesh routing (False: static routes); presence_s: presence period of
-    the DODAG information (root only; topology period 6 times longer);
+    (antenna, dBi); allow: the addresses heard (None: every one); drop:
+    address -> percent of its frames dropped (``sily.drop``, after the
+    neighbour filter; None or empty: none); routing: the mesh routing
+    (False: static routes); presence_s: presence period of the DODAG
+    information (root only; topology period 6 times longer);
     extension, on_report: as ``mesh.routing.Routing``; wrap(stack, radio):
-    returns a radio wrapper placed between the neighbour filter and the
-    runner; clock: the runner's.
+    returns a radio wrapper placed between the neighbour filter (or the
+    drop wrapper) and the runner; clock: the runner's.
 
     Raises ValueError for radio settings outside the profile, before the
-    adapter is made. Attributes: ``adapter``, ``filter``, ``engine``,
-    ``routing`` (None with static routes), ``runner``, ``profile`` (the
-    object), ``sf``; ``heap_radio`` and ``heap_node``: free heap after a
-    collection once the radio is bound, and once the node is complete.
+    adapter is made. Attributes: ``adapter``, ``filter``, ``drop`` (the
+    `sily.drop.Drop`, None without drop rates), ``engine``, ``routing``
+    (None with static routes), ``runner``, ``profile`` (the object),
+    ``sf``; ``heap_radio`` and ``heap_node``: free heap after a collection
+    once the radio is bound, and once the node is complete.
     """
 
     def __init__(
@@ -73,6 +78,7 @@ class Stack:
         power=22,
         gain=0,
         allow=None,
+        drop=None,
         routing=True,
         presence_s=None,
         extension=None,
@@ -121,6 +127,9 @@ class Stack:
             self.routing = Routing(self.engine, profile, info, node_info=node, extension=extension)
             self.routing.on_report = on_report
         radio = self.filter
+        self.drop = None
+        if drop:
+            radio = self.drop = Drop(radio, drop, link_source)
         if wrap is not None:
             radio = wrap(self, radio)
         self.runner = Runner(self.engine, radio, clock)

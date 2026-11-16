@@ -227,6 +227,7 @@ class App:
             power=cfg["tx_power"],
             gain=cfg["antenna_gain"],
             allow=cfg["allow"],
+            drop=config.drop_rates(cfg["drop"]),
             presence_s=cfg["presence_s"],
             extension=self._extension,
             on_report=self._on_report if gateway else None,
@@ -553,6 +554,8 @@ class App:
             out["traffic"] = self.traffic.status()
         if self.turn is not None:
             out["turnaround"] = self.turn.figures()
+        if stack.drop is not None:
+            out["dropped"] = stack.drop.dropped
         if self._serving():
             out["web"] = self.web.figures()
         return out

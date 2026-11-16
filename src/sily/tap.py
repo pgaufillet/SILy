@@ -1,8 +1,9 @@
 """Radio wrapper recording the link measurements of every source heard.
 
-`Tap` sits between the neighbour filter and the runner (``sily.stack``'s
-``wrap``): it passes every event on unchanged and, for each frame received
-(``RX``), counts it under its link source, read from the header before any
+`Tap` sits between the neighbour filter (and the drop rates, ``sily.drop``,
+whose frames do not reach it) and the runner (``sily.stack``'s ``wrap``):
+it passes every event on unchanged and, for each frame received (``RX``),
+counts it under its link source, read from the header before any
 authentication (``sily.radio.link_source``): foreign networks and frames
 that later fail authentication count too. Per source: frames since boot,
 last RSSI (dBm) and SNR, and their sums since the last `Tap.restart` (the

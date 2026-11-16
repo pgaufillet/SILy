@@ -39,6 +39,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     - `record.py` — what the journal records (boot, minute, events,
       gateway reports) and the presence extension (battery, mode);
     - `tap.py` — link measurements (frames, RSSI, SNR) per source heard;
+    - `drop.py` — drop rates: a share of chosen sources' frames dropped on
+      purpose, for losses on a bench (*Application*);
     - `traffic.py` — test traffic: numbered messages from the nodes,
       delivery and latency per node at the gateway (*Application*);
     - `display.py` — the OLED status display: rotating pages of the box's
@@ -373,6 +375,17 @@ NETWORK BOX...` checks a whole network: each box, unique addresses and
 access point names, one gateway (without `--network`, each box on its own
 fields).
 
+Boxes on one bench all hear each other; two box file fields give them a
+test topology. `allow`, the link sources a box hears (the neighbour filter;
+null: every one), forces hops: a chain gateway 0, relay 2, node 1 with
+`[2]`, `[0, 1]` and `[2]`. `drop`, `{"source": percent}` (null: none),
+drops that share of a source's frames on purpose after the filter
+(`src/sily/drop.py`), for the losses a bench lacks: retransmissions,
+repairs and, with `"drop": {"0": 30}` on the relay, the gateway's
+immediate replies to its retransmissions. Carrier sense still hears every
+board: no hidden terminal. The `min` record counts the frames dropped per
+source (`drp`).
+
 At boot the board prints `SILY <version>`; then:
 
 - without a valid `/config.json`, or after 3 crashes without 10 minutes of
@@ -424,7 +437,8 @@ boot record and at stop or crash: a power cut loses at most the last 5
 minutes. `make journal PORT=... OUT=...` stops the application, copies
 the journal into `OUT/journal`, resets the board and prints a summary per
 boot (`tools/journal_summary.py`: span and end, attach time, parent
-changes, margins per link, counters, battery, write and sync stalls;
+changes, margins per link, frames dropped on purpose, counters, battery,
+write and sync stalls;
 display, access point and web server; reply turnaround; test traffic).
 Times are per boot (ms since the board started): no absolute time on the
 boxes.

@@ -428,8 +428,8 @@ class Assembly(unittest.TestCase):
 
 
 class Reception(unittest.TestCase):
-    def _received(self, allow=None, wrap=None):
-        s = Stack(FakeHw(), 3, KEY, 7, routing=False, allow=allow, wrap=wrap)
+    def _received(self, allow=None, wrap=None, drop=None):
+        s = Stack(FakeHw(), 3, KEY, 7, routing=False, allow=allow, wrap=wrap, drop=drop)
         inbox = Inbox()
         s.engine.bind(PORT, inbox)
         frame = peer_frame(1, 3, b"punch")
@@ -460,3 +460,39 @@ class Reception(unittest.TestCase):
         self.assertIs(s.runner.radio, made[0])
         self.assertEqual(made[0].kinds, [RX])
         self.assertEqual(inbox.messages, [(1, b"punch")])
+
+    def test_no_drop_wrapper_without_rates(self):
+        for drop in (None, {}):
+            s, inbox = self._received(drop=drop)
+            self.assertIsNone(s.drop)
+            self.assertIs(s.runner.radio, s.filter)
+            self.assertEqual(inbox.messages, [(1, b"punch")])
+
+    def test_drop_between_filter_and_wrapper(self):
+        made = []
+
+        def wrap(stack, radio):
+            made.append(Recorder(radio))
+            return made[0]
+
+        s, inbox = self._received(wrap=wrap, drop={1: 100, 4: 100})
+        self.assertIs(s.drop.radio, s.filter)
+        self.assertIs(made[0].radio, s.drop)
+        self.assertIs(s.runner.radio, made[0])
+        self.assertEqual(made[0].kinds, [])  # the frame of 1 dropped before it
+        self.assertEqual(s.drop.dropped, {1: 1, 4: 0})
+        self.assertEqual(inbox.messages, [])
+        self.assertEqual(s.engine.counters.rx_frames, 0)
+        self.assertIsNone(s.engine.neighbours.get(1))
+
+    def test_other_sources_pass_the_drop(self):
+        s, inbox = self._received(drop={2: 100})
+        self.assertEqual(inbox.messages, [(1, b"punch")])
+        self.assertEqual(s.drop.dropped, {2: 0})
+
+    def test_filter_before_the_drop(self):
+        # A source outside allow: filtered, never counted as dropped.
+        s, inbox = self._received(allow=(2,), drop={1: 100})
+        self.assertEqual(s.filter.filtered, 1)
+        self.assertEqual(s.drop.dropped, {1: 0})
+        self.assertEqual(inbox.messages, [])

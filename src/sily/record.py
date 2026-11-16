@@ -337,16 +337,18 @@ def neighbours(table, now, tap=None):
 def minute(stack, now, tap=None):
     """Yield the pieces (dicts) of the minute record of stack at now.
 
-    stack: has ``engine``, ``routing`` (None: static routes), ``filter``
-    and ``adapter`` (None: absent). The caller may yield to other tasks
-    between pieces (each one is short); `Tap.restart` follows the last.
+    stack: has ``engine``, ``routing`` (None: static routes), ``filter``,
+    ``drop`` and ``adapter`` (None: absent). The caller may yield to other
+    tasks between pieces (each one is short); `Tap.restart` follows the
+    last.
 
     Keys: ``att``, ``par``, ``rank``, ``gnd`` (`state`), ``ver`` (DODAG
     version), ``mem`` (parent set), ``q`` (transmit queue length), ``dc``
     (ms on air in the duty-cycle window), ``fil`` (frames of the neighbour
-    filter); counter totals ``link`` (`LINK`), ``rt`` (`ROUTING`, `DODAG`,
-    `PARENTS`, `REPORTER`, ``nev`` and ``nex`` the neighbour table's
-    evictions and expiries), ``radio`` (`RADIO`) with ``noise`` (the
+    filter), ``drp`` with drop rates ([[source, frames dropped], ...],
+    ``sily.drop``); counter totals ``link`` (`LINK`), ``rt`` (`ROUTING`,
+    `DODAG`, `PARENTS`, `REPORTER`, ``nev`` and ``nex`` the neighbour
+    table's evictions and expiries), ``radio`` (`RADIO`) with ``noise`` (the
     adapter's noise floor, dBm); ``nb`` (`neighbours`), ``foreign``
     ([sources, frames] heard outside the table), ``tov`` (frames of sources
     beyond the tap's bound).
@@ -366,6 +368,8 @@ def minute(stack, now, tap=None):
     }
     if stack.filter is not None:
         head["fil"] = stack.filter.filtered
+    if stack.drop is not None:
+        head["drp"] = stack.drop.minute()
     yield head
     yield {"link": counters(engine.counters, LINK)}
     if routing is not None:

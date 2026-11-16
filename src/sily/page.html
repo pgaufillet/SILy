@@ -128,7 +128,8 @@ function box(b) {
     out.push("<p>" + esc("Test traffic: " + t.nodes.length + " nodes, malformed " + t.malformed +
       ", items lost " + t.items_lost + ", nodes beyond " + t.nodes_beyond) + "</p>");
   }
-  for (const [h, v] of [["Reply turnaround, last minute", b.turnaround], ["Web", b.web]])
+  for (const [h, v] of [["Reply turnaround, last minute", b.turnaround], ["Web", b.web],
+    ["Frames dropped on purpose, by source", b.dropped]])
     if (v) out.push("<p>" + esc(h + ": " + Object.keys(v).map(k => k + " " + dash(v[k])).join(", ")) + "</p>");
   return out.join("");
 }

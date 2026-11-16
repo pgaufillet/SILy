@@ -29,6 +29,12 @@ not pass silently), defaults filled in. Fields:
   adopt it), gateway only, default null (the profile's own at that SF);
 - ``allow``: null or the list of addresses heard (neighbour filter, to
   force hops at home), default null (every neighbour);
+- ``drop``: null or an object ``{"address": percent}`` (keys in decimal,
+  JSON keys being strings; percent 0 to 100, at most `DROP_MAX`
+  sources): the share of each source's frames dropped on purpose after
+  the neighbour filter (``sily.drop``, to get losses on a bench), a
+  source outside a set ``allow`` refused (never heard), default null
+  (none);
 - ``led``: the user LED shows the state, default true;
 - ``display``: ``mode`` ``off``, ``always`` or ``window`` (on for
   ``window_min`` minutes after start);
@@ -65,6 +71,7 @@ from sily import traffic
 VERSION = 1
 ADDRESS_MAX = 65534  # 0xFFFF is the broadcast address
 NAME_MAX = 16  # bytes (mesh.reports.NAME_MAX)
+DROP_MAX = 8  # sources with a drop rate (the minute record within a 4 KB segment)
 SSID_MAX = 32  # bytes
 GATEWAY = "gateway"
 NODE = "node"
@@ -76,6 +83,7 @@ _DERIVED = ("version", "key", "fingerprint")
 
 _REQUIRED = "required"  # default of a required field
 _HEX = "0123456789abcdefABCDEF"
+_DIGITS = "0123456789"
 
 
 # --- Checks ------------------------------------------------------------------------
@@ -218,6 +226,42 @@ def _fields(schema, obj, prefix, errors):
     return out
 
 
+def drop_address(key):
+    """Return the address of a ``drop`` key (decimal, no sign, no leading
+    zero), None if it is not one."""
+    if type(key) is not str or not key or any(c not in _DIGITS for c in key):
+        return None
+    if key[0] == "0" and len(key) > 1:
+        return None
+    address = int(key)
+    return address if address <= ADDRESS_MAX else None
+
+
+def drop_rates(drop):
+    """Return the ``drop`` field of a checked configuration as {address:
+    percent} (``sily.stack.Stack``'s ``drop``), None for null."""
+    if drop is None:
+        return None
+    return {int(key): percent for key, percent in drop.items()}
+
+
+_percent = _int(0, 100)
+
+
+def _drop(value, field, errors):
+    if type(value) is not dict:
+        errors.append(field + ": an object expected")
+        return value
+    if len(value) > DROP_MAX:
+        errors.append(field + ": at most %d sources expected" % DROP_MAX)
+    for key in sorted(value, key=str):
+        name = "%s.%s" % (field, key)
+        if drop_address(key) is None:
+            errors.append(name + ": an address 0 to %d in decimal expected" % ADDRESS_MAX)
+        _percent(value[key], name, errors)
+    return value
+
+
 def _wpa_password_test(value):
     if type(value) is not str or not 8 <= len(value) <= 63:
         return "8 to 63 characters expected"
@@ -272,6 +316,7 @@ _BOARD = (
     ("antenna_gain", 0, _number(-10, 30)),
     ("presence_s", None, _optional(_int(1, 65535))),
     ("allow", None, _optional(_list(_int(0, ADDRESS_MAX), 64))),
+    ("drop", None, _optional(_drop)),
     ("led", True, _leaf(_bool_test)),
     ("display", {}, _section(_DISPLAY)),
     ("wifi", {}, _section(_WIFI)),
@@ -333,6 +378,13 @@ def _cross(cfg, errors):
         ssid = ap_ssid(ap["prefix"], name)
         if len(ssid.encode()) > SSID_MAX:
             errors.append("wifi.ap.prefix: SSID %s longer than %d bytes" % (ssid, SSID_MAX))
+    allow = cfg.get("allow")
+    drop = cfg.get("drop")
+    if type(allow) is list and all(type(a) is int for a in allow) and type(drop) is dict:
+        for key in sorted(drop, key=str):
+            address = drop_address(key)
+            if address is not None and address not in allow:
+                errors.append("drop.%s: not in allow (never heard)" % key)
     journal = cfg.get("journal")
     if type(journal) is dict:
         segment = journal.get("segment_kb")

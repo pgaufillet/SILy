@@ -163,6 +163,20 @@ class Summary(unittest.TestCase):
             lines,
         )
 
+    def test_drops(self):
+        s = journal_summary.summarise(self.runs[0])  # no drop rates
+        self.assertIsNone(s["drops"])
+        self.assertFalse(any("dropped" in line for line in journal_summary.report(s)))
+        run = [{"b": 7, "t": 0, "k": "boot", "role": "node"}]
+        for t, received, drp in ((60000, 70, [[0, 25], [9, 0]]), (120000, 140, [[0, 60], [9, 2]])):
+            row = [0, 8, 85, 85, 140, 94, 3, 1, received, -98, -97, 61]
+            run.append({"b": 7, "t": t, "k": "min", "nb": [row], "drp": drp})
+        s = journal_summary.summarise(run)
+        self.assertEqual(s["drops"], [[0, 60], [9, 2]])  # totals of the last record
+        lines = journal_summary.report(s)
+        # 60 dropped of 200 frames of 0 (140 received); 9 is no link.
+        self.assertTrue("  dropped on purpose: from 0 60 (30.0 %), from 9 2" in lines, lines)
+
     def test_power_cut_boot(self):
         s = journal_summary.summarise(self.runs[1])
         self.assertEqual((s["boot"], s["end"], s["attach_s"]), (2, None, 5.0))

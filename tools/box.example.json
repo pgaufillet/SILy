@@ -5,6 +5,7 @@
   "tx_power": 14,
   "antenna_gain": 2,
   "allow": null,
+  "drop": null,
   "led": true,
   "display": {"mode": "window", "window_min": 10},
   "wifi": {"ap": {"prefix": "SILy", "password": "replace with the access point password"}, "known": []},

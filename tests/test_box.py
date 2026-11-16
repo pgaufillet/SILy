@@ -1,5 +1,6 @@
 """Host configuration of the boxes (tools/box.py): network checks and templates."""
 
+import json
 import unittest
 
 from sily import config
@@ -67,6 +68,34 @@ class Network(unittest.TestCase):
             ["net.json: %s: set by the network file, not by a box" % f for f in fields]
             + ["x.json: role: missing", "x.json: colour: unknown key"],
         )
+
+    def test_chain_with_drop_rates(self):
+        # Three boards in range of each other forced into a chain 0 - 2 - 1,
+        # the relay losing 30 % of the gateway's frames.
+        boxes = [
+            ("g.json", _box(0, "gateway", allow=[2])),
+            ("r.json", _box(2, allow=[0, 1], drop={"0": 30})),
+            ("n.json", _box(1, allow=[2])),
+        ]
+        for network in (None, NETWORK):
+            self.assertEqual(box.check_boxes(boxes, network, "net.json"), [])
+        boxes[1] = ("r.json", _box(2, allow=[0, 1], drop={"0": 130, "3": 10, "01": 5}))
+        for network in (None, NETWORK):
+            self.assertEqual(
+                box.check_boxes(boxes, network, "net.json"),
+                [
+                    "r.json: drop.0: out of range 0 to 100",
+                    "r.json: drop.01: an address 0 to 65534 in decimal expected",
+                    "r.json: drop.3: not in allow (never heard)",
+                ],
+            )
+
+    def test_board_file_keeps_the_drop_rates(self):
+        cfg, errors = box.merge(NETWORK, _box(2, drop={"0": 30, "1": 0}))
+        self.assertEqual(errors, [])
+        board, errors = config.load(json.dumps(cfg))  # as written to /config.json
+        self.assertEqual(errors, [])
+        self.assertEqual(config.drop_rates(board["drop"]), {0: 30, 1: 0})
 
     def test_network_problem_reported_once(self):
         network = dict(NETWORK)

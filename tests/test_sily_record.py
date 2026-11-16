@@ -16,6 +16,9 @@ from mesh.radio import RX
 from mesh.reports import NodeInfo, Presence
 from mesh.routing import Routing
 from sily import record
+from sily.config import ADDRESS_MAX, DROP_MAX
+from sily.drop import Drop
+from sily.radio import link_source
 from sily.tap import Tap
 from sim.net import Network
 
@@ -26,12 +29,14 @@ OFF = 10**9  # switched off for the rest of the run
 
 
 class Node:
-    """The parts of a ``sily.stack.Stack`` the records read (no filter, no adapter)."""
+    """The parts of a ``sily.stack.Stack`` the records read (no filter, no
+    drop rates, no adapter)."""
 
     def __init__(self, board):
         self.engine = board.engine
         self.routing = board.routing
         self.filter = None
+        self.drop = None
         self.adapter = None
 
 
@@ -118,6 +123,17 @@ class Minute(unittest.TestCase):
         rec = _minute(Node(self.board), self.net.now)
         self.assertEqual(json.loads(json.dumps(rec)), rec)
 
+    def test_drop_counts_of_the_sources_with_a_rate(self):
+        node = Node(self.board)
+        self.assertFalse("drp" in _minute(node, self.net.now))  # no rates: no field
+        node.drop = Drop(Sink(), {9: 100, ROOT: 100, 4: 0}, link_source, lambda: 0)
+        node.drop.sink = lambda event: None
+        for source in (9, 9, 4, 3, ROOT, 9):
+            node.drop._on_event((RX, bytes((0, 0, 0, source, 0)), -90, 1.0))
+        rec = _minute(node, self.net.now)
+        self.assertEqual(rec["drp"], [[ROOT, 1], [4, 0], [9, 3]])
+        self.assertEqual(json.loads(json.dumps(rec)), rec)
+
 
 class Neighbours(unittest.TestCase):
     def _table(self, n):
@@ -148,14 +164,16 @@ class Neighbours(unittest.TestCase):
         rows, _ = record.neighbours(table, 99000, tap)  # ages of 99 s
         self.assertEqual(len(rows), 64)
         # A whole minute record (the node of the simulator, radio and
-        # application figures added) fits the smallest segment
-        # (journal.segment_kb 4): no record needs a segment of its own.
+        # application figures and the most drop rates added) fits the
+        # smallest segment (journal.segment_kb 4): no record needs a segment
+        # of its own.
         net, _, board = _attached()
         rec = _minute(Node(board), net.now)
         rec["nb"] = rows
         rec["radio"] = {key: 999999 for key, _ in record.RADIO}
         rec.update(noise=-110.5, bat=4200, heap=8000000, jw=999, js=999, jq=999, je=999)
         rec.update(b=99999, t=86400000, k="min", fil=99999, tov=99999)
+        rec["drp"] = [[ADDRESS_MAX - a, 9999999] for a in range(DROP_MAX)]
         line = json.dumps(rec, separators=(",", ":"))
         self.assertTrue(len(line) < 4096, len(line))
 

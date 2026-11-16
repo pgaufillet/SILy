@@ -590,10 +590,12 @@ class Traffic(Console):
         self.assertFalse("traffic" in status)
 
 
-class Turnaround(Console):
-    """The gateway's reply turnaround in the application (``sily.turn``)."""
+class OneMinute(Console):
+    """Runs of 1.5 s with a minute record every second."""
 
     def _run(self, hw, tasks=(), **fields):
+        """Run the application with tasks; return it, its minute record and
+        its status just before the stop."""
         fields.setdefault("journal", {"minute_s": 1})
         a = _app(hw, **fields)
         for factory in tasks:
@@ -606,6 +608,10 @@ class Turnaround(Console):
         minutes = [r for r in records if r["k"] == "min"]
         self.assertEqual(len(minutes), 1)
         return a, minutes[0], out[0]
+
+
+class Turnaround(OneMinute):
+    """The gateway's reply turnaround in the application (``sily.turn``)."""
 
     def test_gateway_times_its_immediate_reply(self):
         frame = probe_frame(1, bytes.fromhex(KEY))
@@ -659,6 +665,35 @@ class Turnaround(Console):
         self.assertIs(a.stack.runner.radio, a.tap)
         self.assertFalse("tr" in minute)
         self.assertFalse("turnaround" in status)
+
+
+class Drops(OneMinute):
+    """Drop rates of the box file (``sily.drop``): chain, minute record, status."""
+
+    def test_frames_of_a_source_dropped_and_counted(self):
+        key = bytes.fromhex(KEY)
+        frames = [probe_frame(1, key), peer_frame(2, 0, b"punch", key)]
+
+        def deliver(a):
+            for f in frames:
+                a.stack.adapter.on_receive(f, -70, 6.5)
+
+        a, minute, status = self._run(FakeHw(), (_after(50, deliver),), drop={"1": 100, "5": 0})
+        self.assertIs(a.stack.drop.radio, a.stack.filter)
+        self.assertIs(a.tap.radio, a.stack.drop)  # before the tap and the turnaround
+        self.assertEqual(minute["drp"], [[1, 1], [5, 0]])
+        self.assertEqual(status["dropped"], {1: 1, 5: 0})
+        self.assertEqual(minute["link"]["rf"], 1)  # the frame of 2 only
+        self.assertEqual(minute["link"]["rep"], 0)  # the probe of 1 never answered
+        self.assertEqual(a.tap.sources[2][0], 1)
+        self.assertFalse(1 in a.tap.sources)
+
+    def test_no_drop_rates(self):
+        a, minute, status = self._run(FakeHw())
+        self.assertIsNone(a.stack.drop)
+        self.assertIs(a.tap.radio, a.stack.filter)
+        self.assertFalse("drp" in minute)
+        self.assertFalse("dropped" in status)
 
 
 class Display(Console):
