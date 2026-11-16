@@ -55,7 +55,7 @@ chain at once, before the node notices).
 
 from mesh.airtime import snr_limit_x10
 from mesh.dodag import DESYNC_SLOTS, HOLD_IMIN, WINDOW_SLOTS
-from mesh.frame import BROADCAST, FIRST_HOP, RANK_INFINITE, ROOT, UPWARD
+from mesh.frame import BROADCAST, FIRST_HOP, LINK_LOCAL, RANK_INFINITE, ROOT, UPWARD
 from mesh.link import SENDERS
 from mesh.neighbours import CAPACITY, MARGIN_LOW, silence_ms
 from mesh.parents import SIZE as PARENT_SET
@@ -67,6 +67,7 @@ from mesh.reliable import (
     DUPLICATES,
     LAZY_BATCH,
     ROOT_DUPLICATES,
+    UNREACHABLE,
     decode_error,
     identity,
 )
@@ -629,15 +630,35 @@ class Delivery(Check):
     their origin is cut off too (no usable path to the root from either
     when the relay fails it: the error cannot travel, the partition
     counterexample of the TLA+ `DODAG_line_partition_MP5Live`), counted
-    ``partition``.
+    ``partition`` (when no drop of their error is recorded, below).
 
-    Until downward routing exists (§10), the root forwards an error about a
-    message failed by a relay (port 4) only to an origin among its
-    neighbours (§12 direct error): any other it drops at once, without
-    route. Such a message, whose error reached the root and not its
-    sender, is counted apart (``at_root``), not as a violation: the
-    failure is explicit, and reaching the sender is the downward step's to
-    check.
+    A relay that fails a forwarded message keeps its error (§12 error of an
+    upward message): direct to the origin when it hears it, else held and
+    dropped at the end of its holding unless the origin is heard meanwhile;
+    a direct error the origin never acknowledges is dropped once its fresh
+    attempts end. Each such drop of an error about a message on port is
+    recorded (``dropped``: (origin, sequence) -> [(time, relay, path,
+    heard, routed)]): path ``held`` (end of the holding) or ``unanswered``
+    (direct, its fresh attempts ended); heard, the relay heard the origin
+    since it failed the message (its neighbour entry); routed, the origin
+    had a route at the drop (finite rank and grounded, its own view). A
+    message whose error was dropped this way, unheard over the holding or
+    unanswered, is counted apart (``at_relay``), not as a violation: the
+    MP5 exception of §2 and §12 (the failure is explicit at the relay,
+    which knows no downward route). Sub-counts: ``at_relay_unanswered``,
+    and ``at_relay_routed`` (held, the origin routed at the drop: the far
+    origin with a route of the accepted limit). An error held to the end
+    although the relay heard the origin since the failure is a silent
+    loss (``lost``), whatever the partition: that origin could have had
+    its error, one hop away.
+
+    The root forwards an error it receives about a message to its origin,
+    only to one among its neighbours until downward routing exists (§10):
+    any other it drops at once, without route. Such a message, whose error
+    reached the root and not its sender, is counted apart (``at_root``),
+    not as a violation. No node running this code sends the root such an
+    error (a relay's error stays local), so ``at_root`` stays 0; kept for
+    records and for the errors of downward routing.
 
     Copies delivered more than once (§2 MP5 exceptions, §12 duplicates: a
     copy arriving after the root's duplicate window) are counted
@@ -649,9 +670,8 @@ class Delivery(Check):
 
     For the diagnosis of a violation, the failures of forwarded messages
     by relays are recorded (``relayed``: payload -> (time, relay, reason,
-    cut off)),
-    by wrapping each board's ``Reliable.fail`` (the wrapper calls it
-    unchanged).
+    cut off)), by wrapping each board's ``Reliable.fail`` (the wrapper
+    calls it unchanged), which records the drops of errors above too.
 
     The failures reported to the senders (``Board._failed``, wrapped the
     same way) are split by the state of their origin (``failures``):
@@ -673,6 +693,8 @@ class Delivery(Check):
         self.off = set()
         self.counts = {}
         self.relayed = {}
+        self.dropped = {}  # (origin, sequence) -> [(time, relay, path, heard, routed)]
+        self._failed_at = {}  # (relay, origin, sequence) -> time the relay failed it
         self.outcomes = []  # (submission time, outcome key of ``counts``), at the end
         self.failures = {"connected": 0, "detached": 0, "cut_off": 0}
         self._detaches = {}  # (board name, sequence) -> its detaches at submission, None: detached
@@ -706,9 +728,38 @@ class Delivery(Check):
                 hops = self.checker.hops()
                 cut = board.name not in hops and msg.origin not in hops
                 self.relayed[bytes(msg.payload)] = (now, board.name, reason, cut)
+                self._failed_at[(board.name, msg.origin, msg.seq)] = now
+            elif msg.port == ERROR and msg.mode == LINK_LOCAL:
+                self._drop(board, msg, reason, now)  # a relay's error: dropped
             return fail(slot, msg, reason, hop, now)
 
         reliable.fail = watched
+
+    def _drop(self, board, msg, reason, now):
+        # Record board dropping its error msg, if about a message on port.
+        try:
+            _, _, origin, _, port, seq = decode_error(bytes(msg.payload))
+        except ValueError:
+            return
+        if port != self.port:
+            return
+        since = self._failed_at.get((board.name, origin, seq))
+        n = board.engine.neighbours.get(origin)
+        heard = since is not None and n is not None and n.heard is not None and n.heard >= since
+        path = "unanswered" if reason == UNREACHABLE else "held"
+        record = (now, board.name, path, heard, self._routed(origin))
+        self.dropped.setdefault((origin, seq), []).append(record)
+
+    def _routed(self, address):
+        # address has a route, its own view: finite rank and grounded.
+        for b in self.checker.alive():
+            if b.address == address:
+                routing = b.routing
+                if routing is None:
+                    return False
+                p = routing.parents
+                return p.rank != RANK_INFINITE and p.grounded
+        return False
 
     def _watch_failures(self, board):
         failed = board._failed
@@ -796,6 +847,9 @@ class Delivery(Check):
             "refused": 0,
             "failed": 0,
             "at_root": 0,
+            "at_relay": 0,
+            "at_relay_routed": 0,
+            "at_relay_unanswered": 0,
             "exempt": 0,
             "partition": 0,
             "late": 0,
@@ -816,12 +870,21 @@ class Delivery(Check):
                 key = "failed"
             elif (name, seq) in self.root_errors:
                 key = "at_root"
-            elif name in self.off or payload in self.lost_with:
-                key = "exempt"
-            elif payload in self.relayed and self.relayed[payload][3]:
-                key = "partition"
             else:
-                key = "lost"
+                drops = self.dropped.get((name, seq), ())
+                silent = [d for d in drops if d[2] == "held" and d[3]]
+                if drops and not silent:
+                    key = "at_relay"
+                    if any(d[2] == "unanswered" for d in drops):
+                        counts["at_relay_unanswered"] += 1
+                    elif any(d[4] for d in drops):
+                        counts["at_relay_routed"] += 1
+                elif name in self.off or payload in self.lost_with:
+                    key = "exempt"
+                elif not drops and payload in self.relayed and self.relayed[payload][3]:
+                    key = "partition"
+                else:
+                    key = "lost"
             counts[key] += 1
             self.outcomes.append((t, key))
             if key == "lost":
@@ -835,6 +898,12 @@ class Delivery(Check):
                         relayed[0] / 1000,
                         relayed[2],
                     )
+                for d in self.dropped.get((name, seq), ()):
+                    if d[2] == "held" and d[3]:
+                        where += (
+                            "; its error dropped by %04x at %.1f s at the end of its "
+                            "holding, the origin heard since the failure" % (d[1], d[0] / 1000)
+                        )
                 self.violate(
                     now,
                     (name,),
@@ -856,6 +925,8 @@ class Delivery(Check):
             "class 1: %(submitted)d submitted, %(delivered)d delivered, %(failed)d failed" % k
             + split
             + ", %(refused)d refused, %(at_root)d failed at a relay (error at the root), "
+            "%(at_relay)d failed at a relay (error dropped there: origin routed "
+            "%(at_relay_routed)d, unanswered %(at_relay_unanswered)d), "
             "%(exempt)d exempt, %(partition)d failed in a partition, %(lost)d silent; "
             "%(duplicates)d duplicates delivered" % k
         )
@@ -1038,10 +1109,10 @@ class Recovery(Check):
     before its planned end, then goes on, still without submissions, while
     anything is queued, for at most 5 more periods: the error of a message
     failed late outlives the drain (the message's holding of 2 periods,
-    MP15; its direct error's attempts and fresh ones, up to 2 more; its
-    holding upward, 2 more; their retries). ``deadline`` is known from the
-    first sample at or after after_ms; a run ending before it is judged at
-    its end.
+    MP15; its error's holding while the origin is unheard, 2 more; then its
+    direct error's attempts and fresh ones, up to 2 more; their retries).
+    ``deadline`` is known from the first sample at or after after_ms; a run
+    ending before it is judged at its end.
     """
 
     name = "recovery"
@@ -1459,7 +1530,8 @@ def _classed(msg):
 
 
 ACCEPTED = ("MP10",)  # liveness checks whose misses an overload case accepts in its window
-FAILED = ("failed", "at_root", "partition")  # outcomes of `Delivery`: failed with an error
+# Outcomes of `Delivery`: failed with an error.
+FAILED = ("failed", "at_root", "at_relay", "partition")
 
 
 def overload(violations, start_ms, end_ms, outcomes=()):

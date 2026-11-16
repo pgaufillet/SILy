@@ -364,11 +364,64 @@ class Holding(unittest.TestCase):
         for engine in (n, r, root):
             self.assertEqual(len(engine.queue), 0)
 
-    def test_error_about_a_farther_origin_goes_through_the_root(self):
+    def test_origin_quiet_at_the_failure_gets_its_error_once_heard(self):
+        # N — X — R — root, and N — R: N is R's neighbour, but its message
+        # goes through X, which holds it 0.7 period (no route), so that R,
+        # without route throughout, fails it more than a silence limit after
+        # it last heard N. N is heard again (a class 0 frame) during the
+        # error's holding: the error goes to it then, direct, never upward.
+        net = Network(23, _KEY)
+        x_up = {"hop": None}
+        root = net.add(ROOT, next_hop=lambda m: R)
+        relay = net.add(R, next_hop=lambda m: None)
+        middle = net.add(X, next_hop=lambda m: N if destination(m) == N else x_up["hop"])
+        node = net.add(N, next_hop=lambda m: X)
+        for a, b in ((N, X), (X, R), (R, ROOT), (N, R)):
+            net.link_both(a, b)
+        eve = net.sniffer(E)
+        for name in (N, X, R, ROOT):
+            net.medium.link(name, E)
+        r = relay.engine
+        period = r.neighbours.period_ms
+        failed = []
+        fail = r.reliable.fail
+
+        def watched(slot, msg, reason, hop, now):
+            failed.append((now, msg.port, msg.mode, reason))
+            return fail(slot, msg, reason, hop, now)
+
+        r.reliable.fail = watched
+        net.at(1000, node.submit, 20, 1, ROOT, b"quiet")
+        net.at(1000 + 7 * period // 10, x_up.__setitem__, "hop", R)
+        again = 1000 + 7 * period // 10 + 2 * period + period // 2
+        net.at(again, node.submit, 20, 0, ROOT, b"heard")
+        net.run(again + 3 * period)
+        # R failed the message (reason 3) with N quiet (beyond the silence
+        # limit), then heard N within the error's holding.
+        t_fail, port, _, reason = failed[0]
+        self.assertEqual((port, reason), (20, NO_ROUTE))
+        self.assertTrue(t_fail - 1000 > 5 * period // 2, t_fail)
+        self.assertTrue(t_fail < again < t_fail + 2 * period, (t_fail, again))
+        # N gets the error, direct, after it is heard again.
+        self.assertEqual([(f[1], f[2], f[4]) for f in node.failures], [(ROOT, 20, NO_ROUTE)])
+        self.assertTrue(node.failures[0][0] > again, node.failures[0][0])
+        errors = []
+        for _, f in eve.frames:
+            h, msgs = _open(f)
+            if h.source == R:
+                errors.extend((h.dest, m.mode) for m in msgs if m.port == ports.ERROR)
+        self.assertEqual(errors, [(N, LINK_LOCAL)])
+        self.assertEqual(r.counters.errors_direct, 1)
+        self.assertEqual(root.received(), [])
+        for b in (node, middle, relay, root):
+            self.assertEqual(len(b.engine.queue), 0)
+
+    def test_error_about_a_farther_origin_stays_with_the_relay(self):
         # N — X — R — root: R holds N's message without route; N is no
-        # neighbour of R, so the error goes upward once R's route is back
-        # (after the message's holding, within the error's), and the root
-        # forwards it down to N.
+        # neighbour of R, so R holds the error in turn, 2 periods from the
+        # failure. R's route comes back within that holding: the error
+        # still never goes upward (the root has no downward route, §10);
+        # N never heard by R, it is dropped and counted at R.
         net = Network(23, _KEY)
         up = {"R": None}
 
@@ -382,15 +435,34 @@ class Holding(unittest.TestCase):
         net.link_both(N, X)
         net.link_both(X, R)
         net.link_both(R, ROOT)
-        net.at(1000, node.submit, 20, 1, ROOT, b"far")
-        r_hold = relay.engine.reliable.hold_ms()
-        net.at(1000 + r_hold + 10000, up.__setitem__, "R", ROOT)
-        net.run(1000 + r_hold + 30000)
+        eve = net.sniffer(E)
+        for name in (N, X, R, ROOT):
+            net.medium.link(name, E)
         r = relay.engine
-        self.assertEqual((r.counters.hold_expired, r.counters.errors_sent), (1, 1))
-        self.assertEqual(r.counters.errors_direct, 0)
-        self.assertEqual(root.engine.counters.errors_forwarded, 1)
-        self.assertEqual([(f[1], f[2], f[4]) for f in node.failures], [(ROOT, 20, NO_ROUTE)])
+        failed = []
+        fail = r.reliable.fail
+
+        def watched(slot, msg, reason, hop, now):
+            failed.append((now, msg.port, msg.mode, reason))
+            return fail(slot, msg, reason, hop, now)
+
+        r.reliable.fail = watched
+        net.at(1000, node.submit, 20, 1, ROOT, b"far")
+        r_hold = r.reliable.hold_ms()
+        net.at(1000 + r_hold + 10000, up.__setitem__, "R", ROOT)
+        net.run(1000 + 2 * r_hold + 30000)
+        (t_fail, port, _, reason), (t_drop, e_port, e_mode, e_reason) = failed
+        self.assertEqual((port, reason), (20, NO_ROUTE))
+        self.assertTrue(t_fail < 1000 + r_hold + 10000, t_fail)  # before the route returns
+        self.assertEqual((t_drop - t_fail, e_port, e_mode, e_reason), (r_hold, 4, LINK_LOCAL, 3))
+        c = r.counters
+        self.assertEqual((c.hold_expired, c.errors_sent, c.errors_dropped), (2, 1, 1))
+        self.assertEqual(c.errors_direct, 0)
+        for _, f in eve.frames:
+            _, msgs = _open(f)
+            self.assertEqual([m for m in msgs if m.port == ports.ERROR], [])
+        self.assertEqual(root.engine.counters.errors_forwarded, 0)
+        self.assertEqual((node.failures, root.received()), ([], []))
         for b in (node, middle, relay, root):
             self.assertEqual(len(b.engine.queue), 0)
 

@@ -132,7 +132,14 @@ class AggregateTest(unittest.TestCase):
                 status="FAIL",
                 strict=False,
                 violations={"MP5": 2},
-                delivery={"failed": 3, "lost": 2, "duplicates": 1},
+                delivery={
+                    "failed": 3,
+                    "lost": 2,
+                    "duplicates": 1,
+                    "at_relay": 3,
+                    "at_relay_routed": 1,
+                    "at_relay_unanswered": 2,
+                },
                 failures={"connected": 1, "detached": 2, "cut_off": 0},
                 acks={"passive": 20, "late": 9, "duplicates": 4, "spurious": 3},
             )
@@ -167,6 +174,10 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual(totals["leaf_detaches"], (5, 9))
         self.assertEqual(totals["failed_detached"], (2, 9))
         self.assertEqual(totals["lost"], (2, 9))
+        # Records without the field (written before it existed): not counted.
+        self.assertEqual(totals["at_relay"], (3, 1))
+        self.assertEqual(totals["at_relay_routed"], (1, 1))
+        self.assertEqual(totals["at_relay_unanswered"], (2, 1))
         self.assertEqual(totals["delivered"], (8 * 100, 9))  # absent from seed 8: 0
         self.assertEqual(totals["dup_acks"], (8 * 1 + 4, 9))
         self.assertEqual(totals["mp10_accepted"], (0, 9))  # no overload run

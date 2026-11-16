@@ -257,9 +257,13 @@ class Counters:
         self.errors_sent = 0  # port 4 errors about forwarded messages
         self.errors_received = 0  # errors about own messages (failure callback)
         self.errors_forwarded = 0  # root: errors forwarded to the origin
-        self.errors_direct = 0  # errors sent to their origin, a neighbour (link-local)
-        # Errors failed (never an error about an error), refused, or at the
-        # root without route to their origin (dropped at once, not held).
+        # Errors sent to their origin, a neighbour heard (link-local): at
+        # once, or once the origin of a held one is heard.
+        self.errors_direct = 0
+        # Errors failed (never an error about an error: a direct one never
+        # acknowledged, a held one at the end of its holding), refused, or
+        # at the root without route to their origin (dropped at once, not
+        # held).
         self.errors_dropped = 0
         self.errors_misrouted = 0
         self.errors_malformed = 0

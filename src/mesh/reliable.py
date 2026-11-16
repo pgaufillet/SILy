@@ -103,21 +103,29 @@ hold at every holder. Grounding again resumes the held messages
 
 **Failure** of a message: an own message is reported to the application
 (``engine.failed``: destination, port, sequence, reason); for a forwarded
-one an error (port 4, class 1) goes to the root, which forwards it to the
-message's origin (the root sends it directly); an error about an error is
-never generated, only counted (``errors_dropped``). **Direct error** (§12):
-when the origin is a neighbour heard within the silence limit, the error
-goes to it link-local instead (``errors_direct``), whatever the route or
-the grounding (a link-local message is never held); once its attempts are
-exhausted it gets fresh ones, after a retry delay, while the origin is
-heard, for at most the holding from the first exhaustion (``_since``),
-then goes upward as any error (the same error, not a new one). The root
-sends its errors to a neighbour origin the same way. An error the root
-cannot route (``engine.next_hop`` gives none: downward routing, §10, comes
-later, so any origin it does not reach directly) is dropped and counted at
-once (``errors_dropped``), not held: so is the root's direct error once
-its fresh attempts end. An error takes the entry of the message it
-reports, whatever the node's quota (`mesh.txqueue`).
+one an error (port 4, class 1) goes to the message's origin; an error
+about an error is never generated, only counted (``errors_dropped``).
+**Direct error** (§12): when the origin is a neighbour heard within the
+silence limit, the error goes to it link-local (``errors_direct``),
+whatever the route or the grounding (a direct error is never held); once
+its attempts are exhausted it gets fresh ones, after a retry delay, while
+the origin is heard, for at most the holding from the first exhaustion
+(``_since``), then it is dropped and counted. **Error of an upward
+message** (§12): a node's error never goes upward (it would need the
+route whose lack failed the message, and the root has no downward route,
+§10). When its origin is not heard at the failure, the node holds it
+(link-local, no link destination yet) for the holding, counted from the
+failure, and tests the origin again at every poll (Imin), at every
+`route_changed` and once more at the end: the error goes direct as soon
+as the origin is heard (``errors_direct``; its fresh attempts as above),
+and is dropped and counted at the end of its holding (``hold_expired``,
+``errors_dropped``: the MP5 exception of §2 and §12). The root sends its
+errors to a neighbour origin the same way, otherwise downward. An error
+the root cannot route (``engine.next_hop`` gives none: downward routing,
+§10, comes later, so any origin it does not reach directly) is dropped
+and counted at once (``errors_dropped``), not held: so is the root's
+direct error once its fresh attempts end. An error takes the entry of the
+message it reports, whatever the node's quota (`mesh.txqueue`).
 
 **Receiver** (`mesh.link.LinkEngine._receive`): every class 1/2 message
 received is looked up in the duplicate cache (`DUPLICATES` = 128 entries,
@@ -168,19 +176,18 @@ end differently (acknowledged if any was: the frame was received; a
 message removed from the queue while pending, by a redirect or a hold,
 leaves the frame to its other messages); the identity of a link-local message
 (`identity`), no explicit acknowledgement for a frame with a refused
-message (above), errors of a relay without route held like any class 1
-message (`Reliable.fail`), a held message's holding counted from the first
-time it is held, across resumptions, unless it is a received upward
-message held while the node is ungrounded since a known loss of grounding
-(above); the node's own upward messages (its submissions and its errors,
-first-hop mode) keep that per-message count: they are no hand-over, and
-an error created at the end of a hold would otherwise fail at once,
-without a chance to reach the root once the node is grounded again; a
-node ungrounded since boot (never grounded) counts every message from its
-first hold (no loss of grounding to count from; being floating, it is no
-candidate parent, so it receives no hand-over). Class 1 alone cannot
-survive a relay reboot after the relay acknowledged (explicitly, or by
-forwarding a frame then lost): class 2 recovers it (§12).
+message (above), a held message's holding counted from the first time it
+is held, across resumptions, unless it is a received upward message held
+while the node is ungrounded since a known loss of grounding (above); the
+node's own upward messages (its submissions, first-hop mode) keep that
+per-message count: they are no hand-over; so does a held error
+(link-local, held at the failure that creates it: counted from the loss
+of grounding, it would fail at once); a node ungrounded since boot (never
+grounded) counts every message from its first hold (no loss of grounding
+to count from; being floating, it is no candidate parent, so it receives
+no hand-over). Class 1 alone cannot survive a relay reboot after the
+relay acknowledged (explicitly, or by forwarding a frame then lost):
+class 2 recovers it (§12).
 
 Bounded memory: per-slot state arrays of the queue size (`ATTEMPTS`
 counters per slot towards the root), a queue-size table of pending root
@@ -734,8 +741,8 @@ class Reliable:
         if msg.mode == LINK_LOCAL and msg.port == ERROR:
             # A direct error: fresh attempts while its origin is heard, for
             # at most the holding from the first exhaustion (`_since`);
-            # then failed, which sends it upward (`fail`; the root's,
-            # without downward route, is dropped).
+            # then failed (`fail`): a node's is dropped and counted, the
+            # root's goes downward (dropped without route).
             if self._since[slot] is None:
                 self._since[slot] = now
             if self._near(hop, now) and now < self._since[slot] + self.hold_ms():
@@ -932,6 +939,23 @@ class Reliable:
             if self._since[slot] is None:
                 self._since[slot] = now
             end = self.deadline(slot)
+            if msg.mode == LINK_LOCAL and msg.port == ERROR:
+                # A node's error held (its origin not heard at the failure):
+                # direct as soon as the origin is heard, re-tested at every
+                # poll and once more at the end of its holding.
+                origin = decode_error(msg.payload)[2]
+                if self._near(origin, now):
+                    self._state[slot] = _IDLE
+                    self._since[slot] = None  # fresh attempts: from the first exhaustion
+                    self.queue.retry(slot, msg, origin, True)
+                    self.counters.errors_direct += 1
+                    engine.access_at(now)
+                elif now >= end:
+                    self.counters.hold_expired += 1
+                    self.fail(slot, msg, NO_ROUTE, NO_HOP, now)  # dropped and counted
+                else:
+                    self._poll_at(min(now + self.poll_ms, end))
+                continue
             if now >= end:
                 self.counters.hold_expired += 1
                 self.fail(slot, msg, NO_ROUTE, NO_HOP, now)
@@ -950,28 +974,31 @@ class Reliable:
         """msg (in slot) failed: tell its origin (MP5).
 
         An own message fails to the application; a forwarded one makes an
-        error (port 4) to the root, or from the root to the origin. Reading:
-        §12 makes errors go "to the root"; a relay without route therefore
-        holds its error like any class 1 message, so the origin learns of a
-        failure only if a path to the root returns within that holding. The
-        root, without a route to the origin, drops its error at once
-        (`_send_error`). The error takes the entry the message leaves:
-        admitted whatever the node's quota (`mesh.txqueue`), it occupies no
-        more room than the message did (refused, it would be a silent loss,
-        MP5).
+        error (port 4) to its origin (`_send_error`, §12): direct when this
+        node hears the origin, else held and tested again while held
+        (`_resume_held`), never upward; the root's goes downward, dropped
+        without route. A node's error that fails in turn (direct and never
+        acknowledged, or held to the end of its holding) is dropped and
+        counted, never reported by another error. The error takes the
+        entry the message leaves: admitted whatever the node's quota
+        (`mesh.txqueue`), it occupies no more room than the message did
+        (refused, it would be a silent loss, MP5).
         """
         engine = self.engine
         self.queue.remove(slot, msg)
         self._clear(slot)
         origin, dest, port, seq = identity(msg, engine.address, hop)
         if port == ERROR:
-            if msg.mode == LINK_LOCAL:
-                # A direct error its origin did not acknowledge: to the root
-                # instead, as any error (the same error, not a new one).
+            if msg.mode == LINK_LOCAL and engine.is_root:
+                # The root's direct error its origin did not acknowledge:
+                # downward instead (the same error, not a new one; dropped
+                # without route).
                 payload = bytes(msg.payload)
                 self._send_error(payload, decode_error(payload)[2], now, True, False)
                 return
-            self.counters.errors_dropped += 1  # never an error about an error
+            # Never an error about an error: a node's error, direct or held,
+            # ends here (dropped and counted).
+            self.counters.errors_dropped += 1
             return
         if origin == engine.address:
             engine.failed(dest, port, seq, reason)
@@ -981,28 +1008,32 @@ class Reliable:
         self._send_error(payload, origin, now, True)
 
     def _send_error(self, payload, origin, now, exempt=False, direct=True):
-        # To origin itself when it is a neighbour (direct), else upward (or
-        # from the root, downward; dropped without route). exempt: as
-        # `send_own`.
+        # To origin itself, link-local, when it is a neighbour heard within
+        # the silence limit (direct). Otherwise a node keeps its error: held
+        # (link destination `BROADCAST` until it goes direct), re-tested
+        # while held (`_resume_held`), dropped at the end of its holding;
+        # it never goes upward. The root's goes downward instead (dropped
+        # without route); direct False: the root's direct error whose
+        # fresh attempts ended. exempt: as `send_own`.
         engine = self.engine
         seq = engine.next_seq()
-        if direct and self._near(origin, now):
+        near = direct and self._near(origin, now)
+        if near or not engine.is_root:
             msg = Message(LINK_LOCAL, 1, ERROR, payload, seq=seq)
-            if accepted(engine.send(msg, origin, exempt=exempt)):
+            if not accepted(engine.send(msg, origin if near else BROADCAST, exempt=exempt)):
+                self.counters.errors_dropped += 1
+            elif near:
                 self.counters.errors_direct += 1
             else:
-                self.counters.errors_dropped += 1
+                self.hold(self.queue.slot, msg, now)  # its holding from the failure
             return
-        if engine.is_root:
-            msg = Message(DOWNWARD, 1, ERROR, payload, dest=origin, seq=seq)
-            if engine.next_hop is None or engine.next_hop(msg) is None:
-                # No route to the origin (downward routing, §10, comes
-                # later): dropped and counted at once, not held; holding
-                # it would end the same way, the root's queue busy meanwhile.
-                self.counters.errors_dropped += 1
-                return
-        else:
-            msg = Message(FIRST_HOP, 1, ERROR, payload, seq=seq)
+        msg = Message(DOWNWARD, 1, ERROR, payload, dest=origin, seq=seq)
+        if engine.next_hop is None or engine.next_hop(msg) is None:
+            # No route to the origin (downward routing, §10, comes later):
+            # dropped and counted at once, not held; holding it would end
+            # the same way, the root's queue busy meanwhile.
+            self.counters.errors_dropped += 1
+            return
         self.send_own(msg, now, exempt)
 
     def _near(self, address, now):
@@ -1032,7 +1063,15 @@ class Reliable:
         return True
 
     def on_error(self, origin, msg, header):
-        """Port 4 handler: an error about a message (§12)."""
+        """Port 4 handler: an error about a message (§12).
+
+        An error about an own message is reported to the application. The
+        root forwards an error about another origin's message to that
+        origin (`_send_error`): no node running this code sends it one (a
+        node's errors stay local, `fail`); the path of the errors of
+        downward and P2P messages is designed with downward routing (§10).
+        Any other node only counts it (``errors_misrouted``).
+        """
         try:
             reason, hop, failed_origin, dest, port, seq = decode_error(msg.payload)
         except ValueError:
@@ -1043,8 +1082,7 @@ class Reliable:
             self.counters.errors_received += 1
             engine.failed(dest, port, seq, reason)
         elif engine.is_root:
-            # The root forwards an error about an upward or P2P message to
-            # its origin (§12).
+            # The root forwards it to the failed message's origin (§12).
             self.counters.errors_forwarded += 1
             self._send_error(bytes(msg.payload), failed_origin, engine.now)
         else:

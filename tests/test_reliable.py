@@ -1405,8 +1405,8 @@ class Rules(unittest.TestCase):
     def test_never_an_error_about_an_error(self):
         # R forwards N's message to a root that never answers: R's error
         # goes to N, a neighbour, directly; N never answers either: kept
-        # while N is heard, for at most the holding, it goes to the root
-        # instead, fails in turn and is only counted.
+        # while N is heard, for at most the holding, then dropped and only
+        # counted, neither sent upward nor reported by another error.
         n = _engine(N, R)
         r = _engine(R, ROOT, seed=2)
         failures = []
@@ -1421,12 +1421,12 @@ class Rules(unittest.TestCase):
             sent.append((h.dest, [(m.mode, m.port) for m in msgs]))
         data = (ROOT, [(UPWARD, 20)])
         direct = (N, [(LINK_LOCAL, ports.ERROR)])
-        upward = (ROOT, [(FIRST_HOP, ports.ERROR)])
         k = sent.count(direct)
-        self.assertEqual(sent, [data] * ATTEMPTS + [direct] * k + [upward] * ATTEMPTS)
+        self.assertEqual(sent, [data] * ATTEMPTS + [direct] * k)
         self.assertTrue(k > ATTEMPTS and k % ATTEMPTS == 0, k)
         c = r.counters
         self.assertEqual((c.errors_sent, c.errors_direct, c.errors_dropped), (1, 1, 1))
+        self.assertEqual((c.unreachable, c.held), (2, 0))
         self.assertEqual((failures, len(r.queue)), ([], 0))
 
     def test_error_takes_the_entry_of_the_failed_message_whatever_the_quota(self):
@@ -1482,7 +1482,10 @@ class Rules(unittest.TestCase):
 
 class RootErrors(unittest.TestCase):
     """§12: the root forwards an error to its origin; without a downward route
-    (§10, a later step) it drops the error at once instead of holding it."""
+    (§10, a later step) it drops the error at once instead of holding it.
+
+    No node running this code sends the root such an error (a node's errors
+    stay local): the path is kept for the errors of downward routing."""
 
     def _error_from_r(self, root, origin):
         # The root receives relay R's error about origin's message to the root.
@@ -1633,10 +1636,11 @@ class Ungrounded(unittest.TestCase):
         self.assertEqual(failures, [(ROOT, 20, seq, 3)])
         self.assertEqual((r.counters.errors_sent, r.counters.errors_direct), (1, 1))
 
-    def test_error_about_a_farther_origin_held_from_its_own_hold(self):
-        # The message comes from N through X: N is no neighbour of R, so the
-        # error goes upward; R being ungrounded, it is held 2 periods from
-        # its own hold, then dropped (no path: never an error about an error).
+    def test_error_about_a_farther_origin_held_from_the_failure_then_dropped(self):
+        # The message comes from N through X: N is no neighbour of R, so R
+        # keeps the error: held (link-local, no next hop yet), never upward,
+        # 2 periods from the failure, not from the loss of grounding (it
+        # would fail at once); N never heard, it is dropped and counted.
         x, _ = self._node(X, R)
         r, _ = self._node(R, ROOT, seed=2)
         rr = r.reliable
@@ -1652,11 +1656,16 @@ class Ungrounded(unittest.TestCase):
         x.send(Message(UPWARD, 1, 20, b"x", origin=N, seq=5), R)
         (f,), now = _run(x, period)
         actions = _rx(r, now, f)
-        _, now = _run(r, now, lost + 4 * period, actions)
-        self.assertEqual(failed[0], (lost + 2 * period, 20, UPWARD, 3))
-        self.assertEqual(failed[1], (lost + 4 * period, ports.ERROR, FIRST_HOP, 3))
+        frames, now = _run(r, now, lost + 3 * period, actions)
+        self.assertEqual(failed, [(lost + 2 * period, 20, UPWARD, 3)])
+        self.assertEqual((rr.held(), len(r.queue)), (1, 1))  # the error, held
+        more, now = _run(r, now, lost + 4 * period)
+        self.assertEqual(failed[1:], [(lost + 4 * period, ports.ERROR, LINK_LOCAL, 3)])
+        ports_sent = [m.port for g in frames + more for m in _messages(_KEY, g)[1]]
+        self.assertEqual(ports_sent, [ports.ACK])  # the message's acknowledgement only
         c = r.counters
         self.assertEqual((c.errors_sent, c.errors_direct, c.errors_dropped), (1, 0, 1))
+        self.assertEqual((c.hold_expired, rr.held(), len(r.queue)), (2, 0, 0))
 
     def test_own_message_held_two_periods_from_its_hold(self):
         e, _ = self._node(N, R)

@@ -15,7 +15,9 @@ held past its sender's relay timeout is a late passive acknowledgement,
 held past the sender's retry a duplicate before the copy went on air, an
 attempt of a message queued before a parent switch an attempt to a hop
 other than the next hop (`Acknowledgements`); a failure reported to its
-sender is split by the origin's state (`Delivery.failures`).
+sender is split by the origin's state (`Delivery.failures`). A relay's
+error dropped is counted apart when its origin was unheard over the
+holding or never answered, a silent loss when the relay heard it.
 """
 
 import unittest
@@ -322,6 +324,105 @@ class DeliveryTest(unittest.TestCase):
         b.engine.failed(ROOT, APP, seq, 1)
         self.assertEqual(check.failures["detached"], 3)
         self.assertEqual(len(b.failures), 4)  # the board's own record, unchanged
+
+
+def no_route_for(net, name, port):
+    """Make name find no next hop for the messages on port (its routing kept)."""
+    engine = net.boards[name].engine
+    next_hop = engine.next_hop
+    engine.next_hop = lambda msg: None if msg.port == port else next_hop(msg)
+
+
+class RelayErrorTest(unittest.TestCase):
+    """MP5: a relay that fails B's message (no route for it at A) keeps its error.
+
+    Dropped there, unheard over its holding or unanswered, the message is
+    counted apart (``at_relay``), not a violation; an error held to the end
+    although A heard B since the failure is a silent loss.
+    """
+
+    def run_net(self, names, links, cut=(), defect=False):
+        # A holds B's message 2 periods, then fails it; the run ends after
+        # the error's holding. cut: links cut both ways 5 s after the
+        # submission (one way: (src, dst, True)).
+        net = build(names, links)
+        net.boards[ROOT].listen(APP)
+        check = Delivery(APP, 20000)
+        checker = Checker(net, [check])
+        checker.start()
+        net.run(FORMED)
+        no_route_for(net, A, APP)
+        if defect:
+            # A never sends its error direct: decided at the failure and
+            # never tested again, as if B were always quiet.
+            net.boards[A].engine.reliable._near = lambda address, now: False
+        check.submit(net.boards[B])
+        for link in cut:
+            net.at(FORMED + 5000, net.medium.cut, link[0], link[1])
+            if len(link) == 2:
+                net.at(FORMED + 5000, net.medium.cut, link[1], link[0])
+        net.at(FORMED + 5000, checker.links_changed)
+        net.run(FORMED + 60000)
+        checker.finish()
+        return violations(checker, "MP5"), check
+
+    def test_far_origin_with_a_route_counted_apart(self):
+        # Root - A - C - B: B is no neighbour of A; it keeps its route
+        # through C, A's own routing unchanged.
+        found, check = self.run_net((ROOT, A, C, B), line(A, C, B))
+        k = check.counts
+        self.assertEqual(found, [])
+        self.assertEqual((k["submitted"], k["at_relay"], k["at_relay_routed"]), (1, 1, 1))
+        self.assertEqual((k["lost"], k["failed"], k["at_relay_unanswered"]), (0, 0, 0))
+        ((t, relay, path, heard, routed),) = list(check.dropped.values())[0]
+        self.assertEqual((relay, path, heard, routed), (A, "held", False, True))
+        self.assertTrue(t > FORMED + 2 * 2 * 10000, t)  # the message's holding, then the error's
+        self.assertEqual(check.outcomes[0][1], "at_relay")
+
+    def test_far_origin_without_route_counted_apart(self):
+        # The same, B cut off from C after its message passed: no route at the drop.
+        found, check = self.run_net((ROOT, A, C, B), line(A, C, B), cut=((B, C),))
+        k = check.counts
+        self.assertEqual(found, [])
+        self.assertEqual((k["at_relay"], k["at_relay_routed"], k["lost"]), (1, 0, 0))
+        ((_, _, path, heard, routed),) = list(check.dropped.values())[0]
+        self.assertEqual((path, heard, routed), ("held", False, False))
+
+    def test_direct_error_unanswered_counted_apart(self):
+        # Root - A - B, A's frames no longer reach B: A hears B and sends its
+        # error direct, never acknowledged; dropped once its fresh attempts end.
+        found, check = self.run_net((ROOT, A, B), line(A, B), cut=((A, B, True),))
+        k = check.counts
+        self.assertEqual(found, [])
+        self.assertEqual((k["at_relay"], k["at_relay_unanswered"], k["lost"]), (1, 1, 0))
+        ((_, relay, path, _, _),) = list(check.dropped.values())[0]
+        self.assertEqual((relay, path), (A, "unanswered"))
+        self.assertEqual(net_failures(check, B), [])
+
+    def test_neighbour_origin_gets_its_error(self):
+        # Root - A - B, healthy: B, heard by A, gets the error direct.
+        found, check = self.run_net((ROOT, A, B), line(A, B))
+        k = check.counts
+        self.assertEqual(found, [])
+        self.assertEqual((k["failed"], k["at_relay"], k["lost"]), (1, 0, 0))
+        self.assertEqual(check.dropped, {})
+
+    def test_error_held_although_the_origin_was_heard_reported(self):
+        # Root - A - B, A never sending its error direct: held to the end of
+        # its holding although A keeps hearing B (its presence).
+        found, check = self.run_net((ROOT, A, B), line(A, B), defect=True)
+        k = check.counts
+        self.assertEqual([v.nodes for v in found], [(B,)])
+        self.assertTrue("the origin heard since the failure" in found[0].detail, found[0].detail)
+        self.assertEqual((k["lost"], k["at_relay"], k["failed"]), (1, 0, 0))
+        ((_, relay, path, heard, _),) = list(check.dropped.values())[0]
+        self.assertEqual((relay, path, heard), (A, "held", True))
+
+
+def net_failures(check, name):
+    """Return the failures on the check's port reported to board name."""
+    board = check.checker.net.boards[name]
+    return [f for f in board.failures if f[2] == check.port]
 
 
 def detach(net, name):
@@ -697,6 +798,7 @@ class OverloadTest(unittest.TestCase):
             (4000, "refused"),
             (4000, "failed"),
             (5000, "at_root"),
+            (5500, "at_relay"),
             (6000, "partition"),
             (6000, "delivered"),
             (6000, "exempt"),
@@ -714,7 +816,7 @@ class OverloadTest(unittest.TestCase):
                 "not recovered",
             ],
         )
-        self.assertEqual((refused, failed), (1, 3))
+        self.assertEqual((refused, failed), (1, 4))
 
 
 if __name__ == "__main__":
