@@ -75,16 +75,18 @@ stopped by `MAXSECS=N`. It is tracked: commit it after a run worth
 keeping. `run.sh quick` runs the configurations recorded at most
 `QUICK_SECS` seconds, and says how many it leaves out for want of a
 record: a configuration never timed belongs to the full tier only, so the
-quick tier holds only configurations timed before. Every configuration
-now has a duration from a full run on a 32-vCPU instance with `JOBS` = 8
-(label `32cpu-63G-j8`, 4 workers each). `make spec-calibrate` runs
+quick tier holds only configurations timed before. The configurations
+have a duration from a full run on a 32-vCPU instance with `JOBS` = 8
+(label `32cpu-63G-j8`, 4 workers each), those added since from an 8-core
+laptop (`8cpu-8G`, `8cpu-8G-j2`), except `DODAG_diamond_errlocal_probe`,
+not timed yet. `make spec-calibrate` runs
 every configuration with `MAXSECS=QUICK_SECS` (at most the number of
 configurations × `QUICK_SECS` / `JOBS`) and records each one's duration or `>QUICK_SECS`. The durations depend on
 `JOBS`: with several configurations at a time each gets fewer workers.
 Configurations without a record run first, then the others, longest
 first.
 
-A full run took 54 minutes, with 211 configurations (230 now), on a
+A full run took 54 minutes, with 211 configurations (239 now), on a
 32-vCPU instance (AMD EPYC 9555P) with `JOBS` = 8, 7 h 9 of
 configuration time in all;
 its end is set by the longest configuration, `DODAG_line_low_live`
@@ -555,26 +557,51 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   otherwise upward. An upward error is received as under `"arrive"`;
   while its relay has no route it is held, and its own holding (2
   periods) may end: it is dropped (never an error about an error).
-  `"retest"` (the remedy): the relay also re-tests the direct path while
-  it holds an upward error and at its expiry. A dropped error is MP5's
+  `"retest"` (a remedy considered): the relay also re-tests the direct
+  path while it holds an upward error and at its expiry. `"local"` (the
+  design to implement: the error stays local, never upward): to an
+  origin heard within the silence limit, direct at the failure;
+  otherwise the relay holds the error, with a route or without, sends it
+  direct as soon as the origin is heard, and drops it at the end of its
+  holding (2 periods); a direct error not answered is dropped after its
+  fresh attempts, not sent upward. A dropped error is MP5's
   accepted exception when the origin is cut off from the root (no route)
   and cannot be told directly (dead, not a neighbour of the relay, over a
   dead link, unheard beyond the silence limit, or its direct error not
-  answered); otherwise a silent loss. What the abstraction keeps of the
+  answered); otherwise a silent loss. Under `"local"` the exception is
+  the failing relay's alone, whatever the origin's route: the origin is
+  not its neighbour, or the relay does not hear it at the drop (dead,
+  over a dead link either way, or beyond the silence limit), the re-test
+  as soon as the origin is heard making such an origin unheard since the
+  failure, over the error's whole holding. What the abstraction keeps of the
   timers: "heard within the silence limit" (2.5 presence periods) is
   fewer than `QUIET` = 2 of the neighbour's last frames lost in a row by
   the relay, any frame counted, not only presences; an error held without
   route expires at any moment, except just after `QUIET` frames of its
   origin, alive over a live link, were lost by the relay (the error's
   holding outlasts a presence period: the origin's next frame comes
-  first, heard or lost). Also abstracted: a direct error to a live origin
+  first, heard or lost). `"local"`: the re-test is the next step once the
+  origin is heard (the relay re-tests while it holds the error, and the
+  origin stays heard within the silence limit, 2.5 periods after its
+  frame, beyond the error's remaining holding of at most 2 periods, so
+  nothing in between changes the outcome); the exception is read at the
+  drop, and this immediate re-test is what makes "unheard at the drop"
+  mean "unheard over the holding" (a run where the origin is heard and
+  the relay does not re-test before losing it again is excluded: the
+  design re-tests within that time). Also abstracted: a direct error to a live origin
   over a live link always arrives (losing all its attempts, and the fresh
   ones while the origin is heard, would only send it upward as one not
-  answered); one error per message (a relay failing a copy while an error
-  of the message is received or under way adds none); the error's custody
-  beyond its relay (the relays above it, the root's forwarding to the
-  origin) is not modelled, as under `"arrive"`. A relay holding an error
-  does not die (as with a message, below).
+  answered; under `"local"` it would be dropped, which takes at least
+  `ATTEMPTS` + `QUIET` = 5 losses, beyond the bounds of the `"local"`
+  configurations: a run where the origin keeps being heard but never
+  hears the relay is not checked); one error per message (a relay failing
+  a copy while an error of the message is received or under way adds
+  none: under `"local"`, a second relay that hears the origin while the
+  first one holds an error it will drop is not checked); the error's
+  custody beyond its relay (the relays above it, the root's forwarding to
+  the origin) is not modelled, as under `"arrive"`. A relay holding an
+  error does not die (as with a message, below): its reboot, MP5's other
+  exception, is left out, as is the origin's reboot.
 - **Root sequence** (`Seq`, `MaxSeq`): the root increments a sequence at
   each beacon (`NewSeq`, `MaxSeq` times, no wrap-around: the code compares
   in serial arithmetic and forgets a sequence that has not advanced for 50
@@ -638,8 +665,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   or a live node holds a copy.
 - **MP5Live**: every submitted message is delivered or its origin receives
   an error (weak fairness, bounded losses). **MP5Exempt** (`Errors`
-  `"once"`, `"retest"`): delivered, its origin receives an error, or its
-  error is dropped within MP5's exception.
+  `"once"`, `"retest"`, `"local"`): delivered, its origin receives an
+  error, or its error is dropped within MP5's exception.
 - **NoCycle**: no cycle of preferred parents; **NoRejoinLoop**: no rejoin
   (attachment from rank 255) closes a cycle; **AtMostOneLoop**: loops form at
   most once (ghost counter).
@@ -694,7 +721,8 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   one-way dead uplink it still hears).
 - Witnesses: loops form (`NoCycle` violated), messages are delivered
   (`NeverDelivered`), errors reach origins (`NeverError`), an error is
-  dropped within MP5's exception (`NeverDropped`), data-path
+  dropped within MP5's exception (`NeverDropped`), an error held by its
+  relay goes direct after a re-test (`NeverRetested`), data-path
   validation fires (`NoRankError`); a node keeps its parent heard at a rank
   not below its own (`NoFollow`), a node detaches on the bound
   (`NoBoundDetach`), a node stays attached through a parent of a newer
@@ -813,12 +841,15 @@ Configurations `cfg/DODAG_<graph>_<variant>_<check>.cfg`.
   across a detach; ungrounded nodes (detached, or floating) hold their
   upward messages. `"none"`: the code before remedy C, L restarting at
   each rejoin.
-- **Error re-tested** (`Errors = "retest"`, the remedy, not yet in the
-  code): the relay holding an upward error without route sends it direct
-  once its origin is heard within the silence limit, while the error is
-  held and at its expiry. `"once"` (the code): the direct path chosen
-  once, at the failure. `"arrive"`: the earlier model, the error
-  abstracted.
+- **Error kept local** (`Errors = "local"`, the design to implement, not
+  yet in the code): a relay failing a message never sends the error
+  upward; direct to an origin heard within the silence limit, otherwise
+  held, route or not, and sent direct as soon as the origin is heard, or
+  dropped at the end of its holding. `"retest"` (a remedy considered):
+  the relay holding an upward error without route sends it direct once
+  its origin is heard within the silence limit, while the error is held
+  and at its expiry. `"once"` (the code): the direct path chosen once,
+  at the failure. `"arrive"`: the earlier model, the error abstracted.
 
 ## Results
 
@@ -949,8 +980,9 @@ Presence probe (`Probe = "presence"`), on the code of A (`Exhaust =
 
 Error of a relay (`Errors`), on the code of A extended to relays
 (`Exhaust = "keepboth"`, `Elig = "reachall"`, `LateAck = "accept"`;
-`Seq = "none"`, `Probe = "none"`), times on an 8-core laptop with 4
-workers:
+`Seq = "none"`, `Probe = "none"` unless stated), times on an 8-core
+laptop with 4 workers (`"local"`: 8 workers alone, or 4 workers with two
+configurations at a time, the time of a suspended laptop left out):
 
 | Item | Result | Configurations |
 |---|---|---|
@@ -959,6 +991,12 @@ workers:
 | Partition, the direct error (`"once"`) | the partition configuration above (both fixes, atomic acknowledgements, no loss): 2's direct error reaches 3, its neighbour: `MP5Live` holds (511 states, 3 s) | `DODAG_line_partitiononce_MP5Live` |
 | Relay cut off, origin with a route (`"retest"`, accepted limit) | silent loss without any frame lost: diamond, no death, the link 0 – 1 dies both ways, a message of 4: 1 detaches, 3 hands it the message before hearing its poison, and 1, without route in its detach hold, fails it; its error goes upward (4, two hops away, is not its neighbour) and is held; 3 falls back on 2, 4 has a route again, and the error's holding ends: dropped although 4 is not cut off, a silent loss for `NoSilentLoss`, which exempts only an origin cut off too (201 states, 3 s); MESH_DESIGN §12 accepts it (a relay without route until its error's holding ends, an origin not its neighbour). A relay without route cannot send an error to an origin that is not its neighbour; the untimed model lets the relay's holdings expire inside its detach hold (2 Imin, against 2 presence periods for a holding in the code). The return path of such an error is an open point of downward routing | `DODAG_diamond_errretest_cutrelay` |
 | Non-vacuity | an error dropped within MP5's exception: line, no death, the link 0 – 1 dies both ways, ≤ 1 loss: 1, cut off, fails the message of 3, not its neighbour and cut off with it (900 states, 3 s); line, relay 1 dies, ≤ 3 losses: 2 fails it while 3, cut off with it, is unheard beyond the silence limit (3 frames lost in a row; 33 218 states, 45 s) | `DODAG_line_errretest_witness_drop`, `DODAG_line_errretest_witness_quiet` |
+| Error kept local (`"local"`, the design to implement) | the line of `"once"`, relay 1 dies, a message of 3: no silent loss with ≤ 2 losses in any pattern, the pattern that loses the message under `"once"` included (83 290 states, 36 s), and with ≤ 3 (418 321 states, 6 min 47 s); `MP5Live` with ≤ 2: the message delivered or 3 told, no error ever dropped (at most 2 of its frames lost in a row: never unheard beyond the silence limit; 83 290 states, 3 min 50 s) | `DODAG_line_errlocal_MP5`, `DODAG_line_errlocal_loss3`, `DODAG_line_errlocal_live` |
+| Partition, a neighbour origin (`"local"`) | line, no death, the link 0 – 1 dies both ways, a message of 2, ≤ 2 losses in any pattern: 1, 2 and 3 cut off; 1 fails the message and its error reaches 2, at once or after a re-test: no silent loss and no error dropped (466 791 states, 9 min) | `DODAG_line_errlocal_partition` |
+| Relay cut off, far origin (`"local"`) | the diamond of the accepted limit above (link 0 – 1 dead both ways, a message of 4, no loss): 1's error, held, is dropped at the end of its holding while 4 has a route through 3 and 2; within the exception of `"local"` (4 is not 1's neighbour): no silent loss (1 384 states, 6 s) | `DODAG_diamond_errlocal_cutrelay` |
+| Root sequence, presence probe (`"local"`) | remedy C (`Seq = "babel"`, one root sequence increment), the line of `"once"`, relay 1 dies, a message of 3, ≤ 2 losses in any pattern (a relay failing the message while ungrounded, detached or floating): no silent loss (955 349 states, 9 min 39 s with 7 workers); the presence probe (`Probe = "presence"`), diamond, no death, the link 1 → 0 dies, a message of 4, ≤ 1 loss (1 leaves the dead uplink after its failed samples, presences included; its error about the message of 4, not its neighbour, is dropped within the exception): not run on the laptop, sized at 250 000 to 400 000 states, 15 to 25 minutes with 8 workers (stopped after 4 min 37 s at 87 514 states, 14 084 left on the queue at depth 24), left to the full tier | `DODAG_line_errlocal_babel`, `DODAG_diamond_errlocal_probe` |
+| Non-vacuity (`"local"`) | the far-origin drop: on the same diamond, 1 detaches, 3 hands it the message of 4, 1 fails it, holds the error and drops it (164 states, 3 s); the re-test: line, relay 1 dies, 2 detaches and takes the message of 3, loses 3's next two frames, fails the message (3 unheard: the error held), hears 3 again and sends the error direct (9 973 states, 7 s) | `DODAG_diamond_errlocal_witness_far`, `DODAG_line_errlocal_witness_retest` |
+| Earlier configurations (`"local"` added) | outcomes and state counts unchanged: the 9 `"once"` and `"retest"` configurations (holding: `DODAG_line_errretest_MP5` 83 348, `DODAG_line_errretest_loss3` 419 923, `DODAG_line_errretest_live` 83 348, `DODAG_line_partitiononce_MP5Live` 511; violated, the model before and after with one worker: `DODAG_line_erronce_MP5` 13 951, `DODAG_line_errretest_witness_drop` 1 214, `DODAG_line_errretest_witness_quiet` 30 628, `DODAG_diamond_errretest_cutrelay` 156; `DODAG_line_erronce_live` still violates `MP5Exempt`, its state space, checked without the property, 83 500 states before and after); given `"arrive"`: `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413, `DODAG_line_reachall_MP5` 51 114, `DODAG_line_reachall_live` 1 178, `DODAG_diamond_current_live` 1 247, `DODAG_line_partition_MP5Live` (state space 431), with one worker `DODAG_subtree_current_MP5` 9 145, `DODAG_subtree_frame_witness_error` 124, `DODAG_star_babel_witness_floathold` 35 | the 153 earlier `DODAG_*` |
 | Earlier configurations | given `Errors = "arrive"`, the earlier model: outcomes and state counts unchanged where compared (with 4 workers: `DODAG_line_lateack_MP5` 6 307, `DODAG_line_lateack_live` 413, `DODAG_line_reachall_MP5` 51 114, `DODAG_line_reachall_live` 1 178, `DODAG_diamond_current_live` 1 247, `DODAG_line_partition_MP5Live` 431, `DODAG_line_keepboth_relaycut` 40, `DODAG_diamond_reach_cutup_idle` 202, its state space checked without its property, whose violation is found at a moment that varies; with one worker: `DODAG_subtree_current_MP5` 9 145, `DODAG_subtree_frame_witness_error` 124, `DODAG_line_reach_witness_run` 7 017, `DODAG_rejoin_window_witness_rejoin` 237, `DODAG_star_babel_witness_floathold` 35) | the 144 other `DODAG_*` |
 
 **Why L.** Every rank a node puts on air since it attached is at least
@@ -1379,14 +1417,19 @@ How each fix is implemented, what it costs, and the limits accepted.
   loop with up to 3 (line) or 2 (`star`) losses in any pattern; in the
   code since remedy C (`parents.py`).
 - **Error of a relay** (`Errors`): the code chooses the direct path of
-  a relay's error once, at the failure (`DODAG_line_erronce_MP5`); the
-  remedy re-tests it while the error is held and at its expiry
-  (`"retest"`), not yet in the code. With it, one silent loss remains
-  (`DODAG_diamond_errretest_cutrelay`): a relay without route drops the
-  error of an origin that is not its neighbour while that origin has a
-  route through another branch. MP5's exception states this limit
-  (MESH_DESIGN §2, §12); the return path of such an error is decided with
-  downward routing (§10).
+  a relay's error once, at the failure (`DODAG_line_erronce_MP5`). The
+  design to implement keeps the error local (`"local"`): never upward,
+  direct to the origin when heard, held and re-tested otherwise, dropped
+  at the end of its holding; checked without silent loss within its
+  exception (an origin not the relay's neighbour, or unheard by it over
+  the error's holding, whatever the origin's route), the pattern lost
+  under `"once"` included; not yet in the code. The far origin with a
+  route through another branch (`DODAG_diamond_errlocal_cutrelay`, a
+  silent loss under `"retest"`) is within that exception; telling it
+  needs a return path, decided with downward routing (§10). Not yet
+  checked: `DODAG_diamond_errlocal_probe` (the presence probe under
+  `"local"`, about 15 to 25 minutes on an 8-core laptop), left to the
+  full tier.
 - **Global repair wave**: a solicitation of finite rank (only a node behind
   a newer version sends one) answered by newer neighbours only, so that the
   node's own children no longer answer it in the window of its parent's

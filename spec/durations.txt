@@ -32,6 +32,8 @@ DODAG_chain_minair_loop 2 32cpu-63G-j8
 DODAG_diamond_babel_MP5 474 32cpu-63G-j8
 DODAG_diamond_babel_cutuplive 843 32cpu-63G-j8
 DODAG_diamond_current_live 27 32cpu-63G-j8
+DODAG_diamond_errlocal_cutrelay 8 8cpu-8G-j2
+DODAG_diamond_errlocal_witness_far 3 8cpu-8G-j2
 DODAG_diamond_errretest_cutrelay 3 8cpu-8G
 DODAG_diamond_fixed_live 32 32cpu-63G-j8
 DODAG_diamond_frame_refined_MP5 255 32cpu-63G-j8
@@ -76,6 +78,12 @@ DODAG_line_current_cycling 3 32cpu-63G-j8
 DODAG_line_current_loop 1 32cpu-63G-j8
 DODAG_line_custody_MP5 14 32cpu-63G-j8
 DODAG_line_drop_rootloss 4 32cpu-63G-j8
+DODAG_line_errlocal_MP5 56 8cpu-8G-j2
+DODAG_line_errlocal_babel 579 8cpu-8G
+DODAG_line_errlocal_live 230 8cpu-8G-j2
+DODAG_line_errlocal_loss3 407 8cpu-8G-j2
+DODAG_line_errlocal_partition 542 8cpu-8G-j2
+DODAG_line_errlocal_witness_retest 12 8cpu-8G-j2
 DODAG_line_erronce_MP5 13 8cpu-8G
 DODAG_line_erronce_live 186 8cpu-8G
 DODAG_line_errretest_MP5 79 8cpu-8G
