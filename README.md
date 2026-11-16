@@ -359,14 +359,15 @@ key come from `/config.json`, which `make deploy` keeps. The configuration
 is made on the host from two files kept outside this repository, since
 they hold passwords: one network file shared by every box (password,
 network name, spreading factor, presence period, test traffic) and one
-file per box (role, address, name, power, LED, display, journal; a WiFi
-section for a later part), as in the templates `tools/network.example.json`
-and `tools/box.example.json`. `make configure` merges them, checks the result
+file per box (role, address, name, power, LED, display, WiFi access point,
+journal), as in the templates `tools/network.example.json` and
+`tools/box.example.json`. `make configure` merges them, checks the result
 (every problem reported as `field: problem`), derives the frame key and its
 fingerprint on the host (no password on the boxes), writes `/config.json`,
 clears the start guard and resets the board. `tools/box.py check --network
-NETWORK BOX...` checks a whole network: each box, unique addresses, one
-gateway.
+NETWORK BOX...` checks a whole network: each box, unique addresses and
+access point names, one gateway (without `--network`, each box on its own
+fields).
 
 At boot the board prints `SILY <version>`; then:
 
@@ -400,8 +401,8 @@ last 5 minutes. `make journal PORT=... OUT=...` stops the application,
 copies the journal into `OUT/journal`, resets the board and prints a
 summary per boot (`tools/journal_summary.py`: span and end, attach time,
 parent changes, margins per link, counters, battery, write and sync
-stalls; test traffic). Times are per boot (ms since the board started):
-no absolute time on the boxes.
+stalls; display, access point and web server; test traffic). Times are
+per boot (ms since the board started): no absolute time on the boxes.
 
 Test traffic (`src/sily/traffic.py`) measures the mesh in the field before
 punches exist. With `traffic.enabled` in the network file, every node
@@ -447,6 +448,33 @@ between rows; the minute records keep the longest row write and page
 refresh (`ow`, `or`, ms; in the summary of `make journal`). A display
 absent at start or failing later is journaled (`ev` `display`) and the
 application goes on without it.
+
+Each box can serve a status page to a phone over its own WiFi access point
+(`src/sily/web.py`, the page `src/sily/page.html`). The box file's `wifi.ap`
+sets it: SSID `<prefix>-<name>` (`SILy-relay1` with the template), WPA2 with
+the box file's password (8 to 63 characters; the template's is refused). The
+access point starts after the display and stays on while the application
+runs. A phone joins it (Android may warn that the network has no internet:
+stay connected) and opens http://192.168.4.1/: the page asks the box for
+`/status.json` every 5 s (none while hidden) and says how old its data is.
+Every box shows its own view: state (attached, parent, rank), duty cycle,
+queue, heap, journal, frames; its neighbours (margin, ETX, d_in, age, RSSI,
+SNR; parents first); its test traffic and the web server's counters. The
+gateway adds the view of the mesh from the reports it receives: the parent
+tree in text (each node with its state when not ok, battery, uplink margin
+and delivery, parent changes; nodes whose chain does not reach the gateway
+under `?`), then one row per node: state (`late` after 2.5 presence periods
+without a presence, `silent` after 4.5), last heard, parent, hops, rank (the
+gateway's neighbours), battery, mode, report flags, links, test traffic
+received and its latency, presences and restarts, parent changes, firmware.
+The page is read-only and carries no key, fingerprint nor password. The
+server shares the loop with the mesh: the JSON is sent in 512-byte pieces,
+at most 3 connections at once, every request and response bounded in time;
+the minute records keep its requests, errors, longest synchronous stretch
+and the stations joined (`web`). To switch the access point off, set
+`"ap": null` in the box file and run `make configure` again. An access point
+or server failing at start is journaled (`ev` `wifi`) and the application
+goes on without them.
 
 ## Bench
 

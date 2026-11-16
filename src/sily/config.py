@@ -46,8 +46,9 @@ not pass silently), defaults filled in. Fields:
   within half its duty-cycle budget at that SF and size) is refused.
 
 The journal section sets the field journal (``sily.app``), the display
-section the OLED display (``sily.display``); the WiFi section is checked
-now, used by a later part of the application.
+section the OLED display (``sily.display``), the WiFi section's ``ap`` the
+access point of the web page (``sily.app``, ``sily.web``); its ``known``
+networks are checked, not used yet.
 
 Host merge (`board_config`): one network file for every box (password,
 network name, derivation count, profile, SF, presence period, test

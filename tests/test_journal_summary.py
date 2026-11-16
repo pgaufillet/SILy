@@ -108,6 +108,34 @@ class Summary(unittest.TestCase):
         self.assertTrue("  display: longest row write 4 ms, refresh 25 ms" in lines, lines)
         self.assertTrue("  display failed: OSError(5,)" in lines, lines)
 
+    def test_web(self):
+        s = journal_summary.summarise(self.runs[0])  # no access point
+        self.assertEqual((s["ap"], s["web"], s["wifi_errors"]), (None, None, []))
+        self.assertFalse(any("access point" in line for line in journal_summary.report(s)))
+        boot = {"b": 3, "t": 0, "k": "boot", "role": "gateway", "ap": "SILy-base"}
+        run = [boot]
+        for t, web in ((60000, [3, 0, 1, 0, 2, 7, 1]), (120000, [9, 1, 1, 0, 5, 4, 2])):
+            run.append({"b": 3, "t": t, "k": "min", "web": web})
+        run.append({"b": 3, "t": 150000, "k": "min"})  # the server down
+        s = journal_summary.summarise(run)
+        self.assertEqual((s["ap"], s["web"]), ("SILy-base", (9, 1, 7, 2)))
+        lines = journal_summary.report(s)
+        self.assertTrue(
+            "  access point SILy-base: 9 requests, 1 errors, longest stretch 7 ms,"
+            " at most 2 stations" in lines,
+            lines,
+        )
+
+    def test_wifi_failure(self):
+        boot = {"b": 4, "t": 0, "k": "boot", "role": "node", "ap": "SILy-box3"}
+        failed = {"b": 4, "t": 40, "k": "ev", "e": "wifi", "err": "OSError(5,)"}
+        s = journal_summary.summarise([boot, failed, {"b": 4, "t": 60000, "k": "min"}])
+        self.assertEqual((s["web"], s["wifi_errors"]), (None, ["OSError(5,)"]))
+        lines = journal_summary.report(s)
+        self.assertEqual(
+            lines[-2:], ["  access point SILy-box3: no web figures", "  wifi failed: OSError(5,)"]
+        )
+
     def test_power_cut_boot(self):
         s = journal_summary.summarise(self.runs[1])
         self.assertEqual((s["boot"], s["end"], s["attach_s"]), (2, None, 5.0))

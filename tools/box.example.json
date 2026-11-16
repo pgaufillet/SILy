@@ -7,6 +7,6 @@
   "allow": null,
   "led": true,
   "display": {"mode": "window", "window_min": 10},
-  "wifi": {"ap": null, "known": []},
+  "wifi": {"ap": {"prefix": "SILy", "password": "replace with the access point password"}, "known": []},
   "journal": {"minute_s": 60, "sync_s": 300, "max_kb": 1024, "segment_kb": 64}
 }

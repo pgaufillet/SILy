@@ -14,6 +14,8 @@ A thin bundle over ``board.t3s3``, ``board.platform`` and
 - `power_on()`: this boot follows a power-on (a brownout reads as one);
 - `reset_cause()`: the cause of this boot, a word (`RESET_CAUSES`);
 - `battery_mv()`: the battery voltage in mV (``board.t3s3``);
+- `access_point(ssid, password)`: the WiFi access point started (WPA2),
+  an `AccessPoint` (its address, the stations joined, off);
 - `reset()`, `sleep_ms(ms)`, `kbd_intr(char)`: ``machine.reset``,
   ``time.sleep_ms``, ``micropython.kbd_intr``;
 - `blink(period_ms)`: the LED toggled by a hardware timer every period_ms,
@@ -101,6 +103,37 @@ def battery_mv():
 
 def reset():
     machine.reset()
+
+
+class AccessPoint:
+    """The WiFi access point as the application takes it (``network.WLAN``)."""
+
+    def __init__(self, wlan):
+        self.wlan = wlan
+
+    def address(self):
+        """Return its IPv4 address, ``0.0.0.0`` when it has none."""
+        return self.wlan.ipconfig("addr4")[0]
+
+    def stations(self):
+        """Return the number of stations joined."""
+        return len(self.wlan.status("stations"))
+
+    def off(self):
+        self.wlan.active(False)
+
+
+def access_point(ssid, password):
+    """Start the access point ssid, WPA2 with password; return its `AccessPoint`.
+
+    Activated first, then configured (the order measured on the board).
+    """
+    import network
+
+    wlan = network.WLAN(network.WLAN.IF_AP)
+    wlan.active(True)
+    wlan.config(ssid=ssid, key=password, security=network.WLAN.SEC_WPA2)
+    return AccessPoint(wlan)
 
 
 def blink(period_ms):

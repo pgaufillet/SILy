@@ -3,17 +3,20 @@
 The configuration is a real file under build/; the hardware is the
 `FakeHw` of ``test_sily_stack`` (scripted radio adapter, simulator platform
 fakes, LED and board controls recorded). Runs last a few hundred ms of
-real time on the unix port's asyncio.
+real time on the unix port's asyncio. The web server listens for real, on
+a free high port, and is fetched over loopback (as in ``test_sily_web``).
 """
 
 import asyncio
 import io
 import json
 import os
+import socket
 import struct
 import unittest
 
 from test_sily_stack import FakeHw, peer_frame
+from test_sily_web import _get, _request, _split
 
 from mesh.frame import ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
@@ -25,6 +28,10 @@ DIR = "build/test_sily_app"  # relative to the repository root, where the tests 
 PATH = DIR + "/config.json"
 JOURNAL = DIR + "/journal"
 KEY = "00112233445566778899aabbccddeeff"
+FINGERPRINT = "a1b2c3d4"
+AP = {"prefix": "SILy", "password": "ap-words-7731"}
+FIRST_PORT = 18740  # the web server's (test_sily_web counts from 18640)
+_ports = [FIRST_PORT]
 
 
 def _mkdirs(path):
@@ -43,7 +50,7 @@ def _write(**fields):
         "role": "gateway",
         "address": 0,
         "key": KEY,
-        "fingerprint": "a1b2c3d4",
+        "fingerprint": FINGERPRINT,
         "sf": 7,
     }
     cfg.update(fields)
@@ -64,6 +71,31 @@ def _remove():
         return
     for name in names:
         os.remove(JOURNAL + "/" + name)
+
+
+def _bind(port):
+    """Return a socket bound to port on every address (OSError: taken)."""
+    s = socket.socket()
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(socket.getaddrinfo("0.0.0.0", port)[0][-1])
+    except OSError:
+        s.close()
+        raise
+    return s
+
+
+def _free_port():
+    """Return the next port nothing listens on."""
+    for _ in range(50):
+        port = _ports[0]
+        _ports[0] += 1
+        try:
+            _bind(port).close()
+            return port
+        except OSError:
+            continue
+    raise OSError("no free port")
 
 
 def _guard(hw):
@@ -596,4 +628,190 @@ class Display(Console):
         self.assertTrue(events[0]["err"].startswith("OSError(5"), events)
         self.assertFalse(a.display.lit)
         self.assertTrue(a.stack.runner.steps > 0)
+        self.assertEqual(_guard(hw).crashes, 0)
+
+
+def _fetch(ms, path, out, stop=True):
+    """A task factory: GET path from the app's web server after ms, the
+    response (`_split`) appended to out; then the app stopped."""
+
+    async def task(a):
+        await asyncio.sleep_ms(ms)
+        data, reset = await _get(a.web_port, _request(path))
+        out.append(_split(data))
+        if stop:
+            a.stop()
+
+    return task
+
+
+def _secrets(cfg):
+    """Return the forms of the configuration's secrets that must stay off the page."""
+    forms = [AP["password"]]
+    for text in (cfg["key"], cfg["fingerprint"]):
+        raw = repr(bytes.fromhex(text))
+        forms += [text, text.upper(), raw, json.dumps(raw)[1:-1]]
+    return forms
+
+
+class Wifi(Console):
+    """The access point and the web server in the application (``sily.web``)."""
+
+    def _app(self, hw, tasks=(), **fields):
+        fields.setdefault("journal", {"minute_s": 1})
+        a = _app(hw, **fields)
+        a.web_port = _free_port()
+        for factory in tasks:
+            a.add_task(factory)
+        return a
+
+    def _records(self):
+        records, bad = journal.read(JOURNAL)
+        self.assertEqual(bad, 0)
+        return records
+
+    def _events(self):
+        return [r["err"] for r in self._records() if r["k"] == "ev" and r["e"] == "wifi"]
+
+    def test_gateway_access_point_and_server(self):
+        hw = FakeHw()
+        seen = []
+
+        def look(a):
+            seen.append((a.web.running, a.ap.on, a.status()))
+
+        a = self._app(
+            hw, (_after(100, look), _after(150, lambda a: a.stop())), name="base", wifi={"ap": AP}
+        )
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(len(hw.aps), 1)
+        ap = hw.aps[0]
+        self.assertEqual((ap.ssid, ap.password), ("SILy-base", AP["password"]))
+        running, on, status = seen[0]
+        self.assertEqual((running, on, a.web.port), (True, True, a.web_port))
+        self.assertEqual(status["web"]["requests"], 0)
+        self.assertEqual((a.web.running, ap.on, ap.offs), (False, False, 1))  # off at stop
+        records = self._records()
+        self.assertEqual(records[0]["ap"], "SILy-base")
+        self.assertEqual(self._events(), [])
+
+    def test_access_point_failure(self):
+        hw = FakeHw()
+        hw.ap_error = OSError(5)
+        a = self._app(hw, (_after(1500, lambda a: a.stop()),), wifi={"ap": AP})
+        self.assertEqual(app.start(a), app.STOPPED)
+        errors = self._events()
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("OSError(5"), errors)
+        self.assertEqual((a.web, a.ap, hw.aps), (None, None, []))
+        self.assertTrue(a.stack.runner.steps > 0)  # the application runs on
+        minutes = [r for r in self._records() if r["k"] == "min"]
+        self.assertEqual(len(minutes), 1)
+        self.assertFalse("web" in minutes[0])
+        self.assertEqual(_guard(hw).crashes, 0)
+
+    def test_access_point_without_address(self):
+        hw = FakeHw()
+        hw.ap_address = "0.0.0.0"
+        a = self._app(hw, (_after(100, lambda a: a.stop()),), wifi={"ap": AP})
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(self._events(), ["no address"])
+        self.assertEqual((a.web, a.ap, hw.aps[0].on), (None, None, False))
+
+    def test_port_taken(self):
+        hw = FakeHw()
+        a = self._app(hw, (_after(100, lambda a: a.stop()),), wifi={"ap": AP})
+        taken = _bind(a.web_port)
+        taken.listen(1)
+        try:
+            self.assertEqual(app.start(a), app.STOPPED)
+        finally:
+            taken.close()
+        errors = self._events()
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("OSError("), errors)
+        self.assertEqual((a.web, a.ap, hw.aps[0].on), (None, None, False))
+        self.assertTrue(a.stack.runner.steps > 0)
+
+    def test_no_access_point(self):
+        hw = FakeHw()
+        out = []
+        a = self._app(
+            hw, (_after(1400, lambda a: out.append(a.status())), _after(1500, lambda a: a.stop()))
+        )
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual((hw.aps, a.ap, a.web), ([], None, None))
+        records = self._records()
+        self.assertIsNone(records[0]["ap"])
+        minutes = [r for r in records if r["k"] == "min"]
+        self.assertEqual(len(minutes), 1)
+        self.assertFalse("web" in minutes[0])
+        self.assertFalse("web" in out[0])
+        self.assertEqual(self._events(), [])
+
+    def test_crash_switches_the_access_point_off(self):
+        hw = FakeHw()
+        a = self._app(hw, (_after(100, _raise(ValueError("task"))),), wifi={"ap": AP})
+        self.assertEqual(app.start(a), app.RESET)
+        self.assertEqual((hw.aps[0].on, a.web.running), (False, False))
+
+    def test_status_json_carries_the_mesh_and_no_secret(self):
+        hw = FakeHw()
+        ext = record.encode_extension(3920, 1)
+        out = []
+
+        def deliver(a):
+            on_report = a.stack.routing.on_report
+            on_report(PRESENCE, 9, Presence(FIRST_REPORT, ext, parent=0), None)
+            on_report(PRESENCE, 12, Presence(0, b"", parent=9), None)
+            on_report(NODE_INFO, 9, NodeInfo(b"\x00" * 6, 0x0003, "relay"), None)
+
+        a = self._app(
+            hw,
+            (_after(50, deliver), _fetch(450, b"/status.json", out)),
+            name="base",
+            wifi={"ap": AP},
+        )
+        self.assertEqual(app.start(a), app.STOPPED)
+        code, headers, body = out[0]
+        self.assertEqual((code, headers["content-type"]), (200, "application/json"))
+        j = json.loads(body)
+        self.assertEqual((j["box"]["name"], j["box"]["web"]["requests"]), ("base", 0))
+        nodes = j["mesh"]["nodes"]
+        self.assertEqual([n["address"] for n in nodes], [9, 12])
+        self.assertEqual((nodes[0]["name"], nodes[0]["battery"]), ("relay", 3920))
+        self.assertEqual((nodes[1]["parent"], nodes[1]["hops"]), (9, 2))
+        text = body.decode()
+        for secret in _secrets(a.cfg):
+            self.assertFalse(secret in text, secret)
+
+    def test_minute_record_counts_the_requests(self):
+        hw = FakeHw()
+        out = []
+
+        def stations(a):
+            a.ap.joined = 2
+
+        def unreadable(a):
+            a.ap.stations_error = OSError(5)
+
+        a = self._app(
+            hw,
+            (
+                _after(50, stations),
+                _fetch(200, b"/status.json", out, stop=False),
+                _after(1100, unreadable),
+                _after(2500, lambda a: a.stop()),
+            ),
+            wifi={"ap": AP},
+        )
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(out[0][0], 200)
+        minutes = [r["web"] for r in self._records() if r["k"] == "min"]
+        self.assertEqual(len(minutes), 2)
+        first, second = minutes
+        self.assertEqual(len(first), 7)
+        self.assertEqual((first[0], first[1], first[6]), (1, 0, 2))  # requests, errors, stations
+        self.assertTrue(type(first[5]) is int and first[5] >= 1, first)  # longest stretch, ms
+        self.assertEqual((second[0], second[6]), (1, None))  # stations unreadable
         self.assertEqual(_guard(hw).crashes, 0)

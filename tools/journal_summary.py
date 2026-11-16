@@ -20,6 +20,9 @@ lines of one boot number, in order):
   costs: longest write and sync (ms), items lost, errors; the display's
   longest row write and page refresh (ms, ``sily.display``) and its
   failures;
+- the access point's SSID (``boot`` record) and the web server's figures
+  (``web`` of the minute records, ``sily.web``): requests, errors, longest
+  stretch (ms), most stations joined; its failures at start (``ev wifi``);
 - on the gateway, per origin of the reports received: presences,
   topologies, last battery;
 - the test traffic (``sily.traffic``, the ``tt`` field of the minute
@@ -121,6 +124,9 @@ def summarise(run):
     shown = [m for m in minutes if "ow" in m]
     s["display"] = (max(m["ow"] for m in shown), max(m["or"] for m in shown)) if shown else None
     s["display_errors"] = [r.get("err") for r in run if _event(r, "display")]
+    s["ap"] = None if boot is None else boot.get("ap")
+    s["web"] = web(minutes)
+    s["wifi_errors"] = [r.get("err") for r in run if _event(r, "wifi")]
     origins = {}
     for r in run:
         if r["k"] in ("rp", "rt", "ri"):
@@ -131,6 +137,21 @@ def summarise(run):
     s["origins"] = origins
     s["traffic"] = traffic(minutes)
     return s
+
+
+def web(minutes):
+    """Return (requests, errors, longest stretch ms, most stations) of the
+    minute records' ``web``, None without one."""
+    rows = [m["web"] for m in minutes if m.get("web")]
+    if not rows:
+        return None
+    stations = [row[6] for row in rows if len(row) > 6 and row[6] is not None]
+    return (
+        rows[-1][0],
+        rows[-1][1],
+        max(row[5] for row in rows),
+        max(stations) if stations else None,
+    )
 
 
 def _median(values):
@@ -280,6 +301,15 @@ def report(s):
         lines.append("  display: longest row write %s ms, refresh %s ms" % s["display"])
     for error in s["display_errors"]:
         lines.append("  display failed: %s" % error)
+    if s["ap"] is not None or s["web"] is not None:
+        figures = "no web figures"
+        if s["web"] is not None:
+            figures = (
+                "%s requests, %s errors, longest stretch %s ms, at most %s stations" % s["web"]
+            )
+        lines.append("  access point %s: %s" % (s["ap"], figures))
+    for error in s["wifi_errors"]:
+        lines.append("  wifi failed: %s" % error)
     for origin in sorted(s["origins"]):
         o = s["origins"][origin]
         lines.append(

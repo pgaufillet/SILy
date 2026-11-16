@@ -6,7 +6,9 @@
 
 Two kinds of JSON files, kept outside the repository (they hold the
 network password, and a box may hold WiFi passwords); the templates
-``tools/network.example.json`` and ``tools/box.example.json`` show them:
+``tools/network.example.json`` and ``tools/box.example.json`` show them
+(their placeholder passwords, the network's and the access point's, are
+refused by ``config`` and ``check``):
 
 - the network file: what every box of the network shares (``password``,
   ``network`` name, ``iterations`` of the key derivation, ``profile``,
@@ -22,9 +24,11 @@ guard (crash count, skip flag) and resets the board, which starts the
 application. ``make configure PORT=... NETWORK=... BOX=...`` runs it.
 
 ``check`` reads a set of box files (a whole network): each must merge with
-the network file if one is given; the addresses must be unique and
-exactly one box must be the gateway. Exit status 1 with one line per
-problem, ``FILE: field: problem``.
+the network file or, without one, with `STAND_IN` in its place (a box's
+own fields checked all the same: unknown keys, a missing role or address,
+a network field set by a box); the addresses and the access points' SSIDs
+must be unique and exactly one box must be the gateway. Exit status 1
+with one line per problem, ``FILE: field: problem``.
 """
 
 import json
@@ -41,6 +45,22 @@ from sily import config  # noqa: E402
 
 # The template's password: a network file must replace it.
 EXAMPLE_PASSWORD = "replace with the network passphrase"
+# The box template's access point password: a box file must replace it.
+EXAMPLE_AP_PASSWORD = "replace with the access point password"
+
+# The network's fields when ``check`` has no network file: a box's own
+# fields checked against them, no key derived.
+STAND_IN = {"password": "stand-in", "sf": 7}
+
+
+class _StandInKeys:
+    frame_key = bytes(16)
+    fingerprint = bytes(4)
+
+
+def _stand_in_derive(password, name, iterations):
+    return _StandInKeys
+
 
 USAGE = (
     "usage: box.py config NETWORK BOX --port PORT [--mpremote PATH]\n"
@@ -67,11 +87,22 @@ def _template(network, network_path):
     return []
 
 
+def _ap_template(box):
+    """Return the problem of a decoded box file whose access point password
+    is still the template's (unlocated), or none."""
+    wifi = box.get("wifi") if type(box) is dict else None
+    ap = wifi.get("ap") if type(wifi) is dict else None
+    if type(ap) is dict and ap.get("password") == EXAMPLE_AP_PASSWORD:
+        return ["wifi.ap.password: still the template's"]
+    return []
+
+
 def _located(errors, network_path, box_path):
-    """Prefix each error of a merge with the file it is about."""
+    """Prefix each error of a merge with the file it is about (network_path
+    None: no network file, every error is the box's)."""
     out = []
     for e in errors:
-        if e.startswith(network_path + ": "):
+        if network_path is not None and e.startswith(network_path + ": "):
             out.append(e)
         elif e.startswith("network file: "):
             out.append(network_path + e[len("network file") :])
@@ -82,7 +113,7 @@ def _located(errors, network_path, box_path):
 
 def merge(network, box, network_path="network", derive=None):
     """Return (board configuration, errors) of decoded network and box files."""
-    errors = _template(network, network_path)
+    errors = _template(network, network_path) + _ap_template(box)
     if errors:
         return None, errors
     return config.board_config(network, box, derive)
@@ -91,8 +122,9 @@ def merge(network, box, network_path="network", derive=None):
 def check_boxes(boxes, network=None, network_path="network"):
     """Return the problems of a network's boxes, [(path, decoded box file)].
 
-    Unique addresses, exactly one gateway; with network (decoded), each box
-    merged with it (one key derivation for all).
+    Unique addresses and SSIDs, exactly one gateway, no template password;
+    each box merged with network (decoded; one key derivation for all), or
+    with `STAND_IN` when None.
     """
     errors = []
     addresses = {}
@@ -101,6 +133,7 @@ def check_boxes(boxes, network=None, network_path="network"):
         if type(box) is not dict:
             errors.append("%s: a JSON object expected" % path)
             continue
+        errors.extend("%s: %s" % (path, e) for e in _ap_template(box))
         address = box.get("address")
         if type(address) is int:
             addresses.setdefault(address, []).append(path)
@@ -115,7 +148,10 @@ def check_boxes(boxes, network=None, network_path="network"):
             "gateway: %d boxes (%s), exactly one expected"
             % (len(gateways), ", ".join(gateways) if gateways else "none")
         )
-    if network is not None:
+    if network is None:
+        network, network_path = STAND_IN, None
+        derive = _stand_in_derive
+    else:
         template = _template(network, network_path)
         if template:
             return errors + template
@@ -129,11 +165,21 @@ def check_boxes(boxes, network=None, network_path="network"):
                 cache[k] = kdf.derive(password, name, iterations)
             return cache[k]
 
-        for path, box in boxes:
-            _, problems = config.board_config(network, box, derive)
-            for e in _located(problems, network_path, path):
-                if e not in errors:  # a network file's problem, once
-                    errors.append(e)
+    ssids = {}
+    for path, box in boxes:
+        if type(box) is not dict:
+            continue
+        cfg, problems = config.board_config(network, box, derive)
+        for e in _located(problems, network_path, path):
+            if e not in errors:  # a network file's problem, once
+                errors.append(e)
+        ap = None if cfg is None else cfg["wifi"]["ap"]
+        if ap is not None:
+            ssids.setdefault(config.ap_ssid(ap["prefix"], cfg["name"]), []).append(path)
+    for ssid in sorted(ssids):
+        paths = ssids[ssid]
+        if len(paths) > 1:
+            errors.append("SSID %s: in %s" % (ssid, ", ".join(paths)))
     return errors
 
 

@@ -136,7 +136,9 @@ The box closed, its switch on (battery connected), its USB to the host
    `/config.json` (key derived on the host from the network file), clears
    the start guard and resets the board, which prints `SILY <version>` and
    starts the application: the LED lights once the box is attached to the
-   mesh (at once on the gateway).
+   mesh (at once on the gateway). With the box file's access point (on in
+   the template, its password replaced), a phone sees `<prefix>-<name>`
+   and the box's page at http://192.168.4.1/ (README *Application*).
 5. After a run, `make journal PORT=... OUT=build/<box>`: stops the
    application, copies the box's journal (`/journal/`) into
    `OUT/journal`, resets the board and prints its summary per boot

@@ -32,9 +32,15 @@ what the nodes send on its port; on a node whose configuration enables
 it, the sender (its failures passed on by the journal writer); the OLED
 display (``sily.display``) unless its mode is ``off``, started after the
 boot record (no device, or a failure later: an ``ev`` ``display`` line and
-the application goes on without it; powered off at stop and crash). Later
-parts add their tasks with `App.add_task` before the start, and their
-failure callbacks to ``failure_listeners``.
+the application goes on without it; powered off at stop and crash). With
+``wifi.ap`` in the configuration, the WiFi access point ``<prefix>-<name>``
+(WPA2) starts after the display, before the mesh's tasks, then the web
+server (``sily.web``: the page and its JSON, `App.status` and, on the
+gateway, `App.mesh`); both stay on until the stop or crash. A failure at
+their start (an exception, no address, the port taken) is an ``ev``
+``wifi`` line: the access point is switched off and the application goes
+on without them. Later parts add their tasks with `App.add_task` before
+the start, and their failure callbacks to ``failure_listeners``.
 
 The field journal (``sily.journal``, records of ``sily.record``) starts a
 new segment at each boot (boot number counted in the NVS namespace
@@ -45,8 +51,9 @@ messages and, on the gateway, the reports received; a ``stop`` or
 ``fatal`` line ends it. On the gateway, the writer also keeps the reports
 in the view of the mesh (``sily.nodes``, `App.mesh`, for the web page).
 The minute record carries the test traffic's figures (``tt``) when there
-are some, and the display's longest row write and refresh (``ow``,
-``or``) when it wrote. The journal is synced after the boot record, every
+are some, the display's longest row write and refresh (``ow``, ``or``)
+when it wrote, and the web server's figures with the stations joined
+(``web``) while it runs. The journal is synced after the boot record, every
 ``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
 handler, failure callback, presence extension) run inside its step, on the
 root's reply path: they only queue an item or return cached bytes; a task
@@ -60,7 +67,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, display, guard, journal, nodes, record, traffic
+from sily import config, display, guard, journal, nodes, record, traffic, web
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -118,7 +125,8 @@ class App:
     hw: ``sily.hw`` on the board. start_guard: the `guard.Guard` whose crash
     count `stable_ms` of running clears (None: no stability timer);
     monitor_ms: period of the monitor; journal_dir, fs: the journal's
-    directory and file system (``sily.journal``).
+    directory and file system (``sily.journal``); web_port: the web
+    server's port (``sily.web``).
     """
 
     def __init__(
@@ -130,6 +138,7 @@ class App:
         monitor_ms=MONITOR_MS,
         journal_dir=journal.DIR,
         fs=None,
+        web_port=web.PORT,
     ):
         self.cfg = cfg
         self.hw = hw
@@ -138,6 +147,7 @@ class App:
         self.monitor_ms = monitor_ms
         self.journal_dir = journal_dir
         self.fs = fs
+        self.web_port = web_port
         self.clock = Clock()
         self.stack = None
         self.tap = None
@@ -154,6 +164,8 @@ class App:
         self.traffic = None  # traffic.Receiver (gateway), traffic.Sender or None
         self.display = None  # display.Display, or None (mode off, absent)
         self.nodes = None  # nodes.Nodes on the gateway: the reports received
+        self.ap = None  # the access point (sily.hw.access_point), or None
+        self.web = None  # web.Web once started, or None
         self.failure_listeners = []  # fn(dest, port, seq, reason), outside the step
         self._factories = []
         self._closed = False
@@ -262,6 +274,50 @@ class App:
     def _display_failed(self, error):
         self.journal.write(self.clock.now(), "ev", {"e": "display", "err": error})
 
+    async def _wifi(self):
+        """Start the access point, then the web server (module documentation)."""
+        ap = self.cfg["wifi"]["ap"]
+        if ap is None:
+            return
+        ssid = config.ap_ssid(ap["prefix"], self.cfg["name"])
+        mesh = self.mesh if self.nodes is not None else None  # the gateway's view
+        try:
+            self.ap = self.hw.access_point(ssid, ap["password"])
+            address = self.ap.address()
+            if address and address != "0.0.0.0":
+                server = web.Web(self.status, mesh, port=self.web_port)
+                await server.start()
+                self.web = server
+                return
+            error = "no address"
+        except Exception as e:  # the application goes on without WiFi
+            error = repr(e)
+        self.journal.write(self.clock.now(), "ev", {"e": "wifi", "err": error})
+        self._wifi_off()
+        self.ap = None
+
+    def _serving(self):
+        return self.web is not None and self.web.running
+
+    def _stations(self):
+        try:
+            return self.ap.stations()
+        except Exception:  # the count only: the minute record goes on
+            return None
+
+    def _wifi_off(self):
+        """Stop the web server, switch the access point off (never raises)."""
+        if self.web is not None:
+            try:
+                self.web.stop()
+            except Exception:  # nothing more to do
+                pass
+        if self.ap is not None:
+            try:
+                self.ap.off()
+            except Exception:  # nothing more to do
+                pass
+
     def submit(self, port, cls, dest, payload):
         """Submit an application message (``LinkEngine.submit``), then wake the runner."""
         result = self.stack.engine.submit(port, cls, dest, payload)
@@ -286,6 +342,7 @@ class App:
             self.journal.write(self.clock.now(), "boot", fields)
             self.journal.sync()
             self.display = self._display()
+            await self._wifi()
             asyncio.create_task(stack.adapter.run())
             asyncio.create_task(self._monitor())
             asyncio.create_task(self._minutes())
@@ -360,6 +417,8 @@ class App:
             tt = self.traffic.minute()
             if tt is not None:
                 fields["tt"] = tt
+        if self._serving():
+            fields["web"] = self.web.minute() + [self._stations()]
         j.write(now, "min", fields)
 
     async def _minutes(self):
@@ -454,6 +513,8 @@ class App:
         )
         if self.traffic is not None:
             out["traffic"] = self.traffic.status()
+        if self._serving():
+            out["web"] = self.web.figures()
         return out
 
     def mesh(self):
@@ -476,7 +537,8 @@ class App:
     def close(self, kind="stop", fields=None):
         """Stop the node: pending items and a last line of kind (None: none)
         journaled, the journal synced and closed, runner stopped, radio in
-        standby, LED and display off. Idempotent."""
+        standby, LED and display off, web server stopped, access point off.
+        Idempotent."""
         if self._closed:
             return
         self._closed = True
@@ -498,6 +560,7 @@ class App:
                 self.led.value(0)
             if self.display is not None:
                 self.display.off()
+            self._wifi_off()
 
 
 def _read(path):

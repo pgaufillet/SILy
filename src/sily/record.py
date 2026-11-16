@@ -5,7 +5,8 @@ since the board's boot) and ``k``, its kind:
 
 - ``boot``: `boot` (version, reset cause, crash count, role, address,
   name, SF, power, gain, key fingerprint, presence period, next frame
-  counter, ``random_restart``, noise floor, free heap);
+  counter, ``random_restart``, noise floor, free heap, ``ap`` the SSID of
+  the access point configured or null);
 - ``min``, every ``journal.minute_s``: the pieces of `minute` and the
   application's figures (``bat`` battery mV, ``heap`` free bytes, ``jw``
   and ``js`` the longest journal write and sync in ms since the last
@@ -13,14 +14,19 @@ since the board's boot) and ``k``, its kind:
   errors; all totals since boot; ``tt`` the test traffic's figures when
   there are some, ``sily.traffic``; ``ow`` and ``or`` the display's
   longest row write and page refresh in ms since the last record, when it
-  wrote, ``sily.display``);
+  wrote, ``sily.display``; ``web`` while the web server runs
+  (``sily.web``): [requests, errors, idle, refused, kB sent: totals since
+  its start; its longest stretch in ms since the last record; the
+  stations joined to the access point, null when unreadable]);
 - ``ev``: ``e`` names the event: ``attach``, ``detach``, ``parent``,
   ``rank``, ``grounded``, ``ungrounded`` (`transitions`, from the state
   polled once a second; each with the parent set's counters ``sw``,
   ``det``, ``flt``, so that a change undone between two polls shows),
   ``fail`` (a failure of an own message: ``dst``, ``port``, ``seq``,
   ``why`` the reason), ``display`` (the display absent at start or
-  failing: ``err``; the application goes on without it);
+  failing: ``err``; the application goes on without it), ``wifi`` (the
+  access point or the web server failing at start: ``err``; the
+  application goes on without them);
 - ``stop`` (Ctrl-C), ``fatal`` (``err`` and ``tb``, the traceback);
 - on the gateway, the reports received (`report`): ``rp`` presence, ``rt``
   topology, ``ri`` node information, each with ``o`` its origin.
@@ -36,6 +42,7 @@ and the operating mode (`MODES`, bits 6-7).
 from mesh.frame import RANK_INFINITE
 from mesh.neighbours import EXPIRY_PERIODS
 from mesh.ports import PRESENCE, TOPOLOGY
+from sily.config import ap_ssid
 
 # Operating modes (MESH_DESIGN §17), the extension's bits 6-7.
 MODES = ("configuration", "deployment", "competition", "retrieval")
@@ -259,6 +266,7 @@ def boot(cfg, stack, reset, crashes, version):
     counter = engine.security.counter
     routing = stack.routing
     _, noise = _noise(stack.adapter)
+    ap = cfg["wifi"]["ap"]
     return {
         "version": version,
         "reset": reset,
@@ -275,6 +283,7 @@ def boot(cfg, stack, reset, crashes, version):
         "random_restart": 1 if counter.random_restart else 0,
         "noise": noise,
         "heap": stack.heap_node,
+        "ap": None if ap is None else ap_ssid(ap["prefix"], cfg["name"]),
     }
 
 

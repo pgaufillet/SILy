@@ -134,13 +134,41 @@ class FakeOled(framebuf.FrameBuffer):
         self.powered = False
 
 
+class FakeAp:
+    """An access point of `FakeHw.access_point`: on until `off`; stations joined
+    (stations_error: raised by `stations`)."""
+
+    def __init__(self, ssid, password, address):
+        self.ssid = ssid
+        self.password = password
+        self.addr = address
+        self.joined = 0
+        self.stations_error = None
+        self.on = True
+        self.offs = 0  # calls of off
+
+    def address(self):
+        return self.addr
+
+    def stations(self):
+        if self.stations_error is not None:
+            raise self.stations_error
+        return self.joined
+
+    def off(self):
+        self.on = False
+        self.offs += 1
+
+
 class FakeHw:
     """The ``sily.hw`` bundle on fakes; records what the application does.
 
     fail: as `Adapter`; adapter_error: raised by `adapter` (a silent radio);
     interrupt_sleep: `sleep_ms` raises KeyboardInterrupt (Ctrl-C);
     battery: the reading of `battery_mv` (mV); oled: what `display`
-    returns (None: no device); display_error: raised by `display`.
+    returns (None: no device); display_error: raised by `display`;
+    ap_error: raised by `access_point`; ap_address: the address of the
+    access points it makes (`FakeAp`, kept in aps).
     """
 
     def __init__(self, power_on=False, fail=None, adapter_error=None, seed=1):
@@ -159,6 +187,9 @@ class FakeHw:
         self.oled = FakeOled()
         self.display_error = None
         self.displays = 0  # calls of display
+        self.ap_error = None
+        self.ap_address = "192.168.4.1"
+        self.aps = []
 
     def adapter(self, lora_cfg):
         if self.adapter_error is not None:
@@ -189,6 +220,13 @@ class FakeHw:
         if self.display_error is not None:
             raise self.display_error
         return self.oled
+
+    def access_point(self, ssid, password):
+        if self.ap_error is not None:
+            raise self.ap_error
+        ap = FakeAp(ssid, password, self.ap_address)
+        self.aps.append(ap)
+        return ap
 
     def power_on(self):
         return self.on
