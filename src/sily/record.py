@@ -11,13 +11,16 @@ since the board's boot) and ``k``, its kind:
   and ``js`` the longest journal write and sync in ms since the last
   record, ``jq`` callback items lost to a full queue, ``je`` journal
   errors; all totals since boot; ``tt`` the test traffic's figures when
-  there are some, ``sily.traffic``);
+  there are some, ``sily.traffic``; ``ow`` and ``or`` the display's
+  longest row write and page refresh in ms since the last record, when it
+  wrote, ``sily.display``);
 - ``ev``: ``e`` names the event: ``attach``, ``detach``, ``parent``,
   ``rank``, ``grounded``, ``ungrounded`` (`transitions`, from the state
   polled once a second; each with the parent set's counters ``sw``,
   ``det``, ``flt``, so that a change undone between two polls shows),
   ``fail`` (a failure of an own message: ``dst``, ``port``, ``seq``,
-  ``why`` the reason);
+  ``why`` the reason), ``display`` (the display absent at start or
+  failing: ``err``; the application goes on without it);
 - ``stop`` (Ctrl-C), ``fatal`` (``err`` and ``tb``, the traceback);
 - on the gateway, the reports received (`report`): ``rp`` presence, ``rt``
   topology, ``ri`` node information, each with ``o`` its origin.

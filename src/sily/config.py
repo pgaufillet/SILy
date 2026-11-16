@@ -45,8 +45,9 @@ not pass silently), defaults filled in. Fields:
   ``sily.traffic.min_period_s`` (5 nodes' messages through one relay
   within half its duty-cycle budget at that SF and size) is refused.
 
-The journal section sets the field journal (``sily.app``); the display
-and WiFi sections are checked now, used by later parts of the application.
+The journal section sets the field journal (``sily.app``), the display
+section the OLED display (``sily.display``); the WiFi section is checked
+now, used by a later part of the application.
 
 Host merge (`board_config`): one network file for every box (password,
 network name, derivation count, profile, SF, presence period, test

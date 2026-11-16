@@ -83,6 +83,18 @@ TX GPIO39 (pin 10), set in `board/t3s3.py`.
   SMA cable (under 10 cm, at most 2 dB loss), or the factory antenna
   directly. Never transmit without an antenna (LilyGo).
 
+## Display
+
+The SSD1306 (128 × 64 pixels, 8 pages of 8 pixel rows) is on I2C0 at
+400 kHz, address 0x3C, driven by micropython-lib's `ssd1306` driver, frozen
+in the firmware (`board.t3s3.make_oled`). Measured on a T3S3: a whole frame
+(the driver's `show`, 1 KB) takes about 25 ms, one page row (128 bytes)
+about 3 ms. The application (`src/sily/display.py`) therefore writes one
+text line (one page row, 16 characters of the 8×8 font) at a time and only
+the lines that changed, the asyncio loop free between two rows. The
+controller keeps its image while powered: the application powers it off at
+its stop and crash; a power-on starts it off.
+
 ## Per-box procedure
 
 The box closed, its switch on (battery connected), its USB to the host

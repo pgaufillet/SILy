@@ -94,6 +94,20 @@ class Summary(unittest.TestCase):
         self.assertEqual(s["battery"], (4010, 3990, 3990))
         self.assertEqual((s["jw"], s["js"], s["minutes"]), (5, 61, 2))
 
+    def test_display(self):
+        self.assertIsNone(journal_summary.summarise(self.runs[0])["display"])
+        run = list(self.runs[0])
+        stop = run.pop()
+        for t, ow, o_r in ((181000, 3, 25), (241000, 4, 21)):
+            run.append({"b": 1, "t": t, "k": "min", "ow": ow, "or": o_r})
+        run.append({"b": 1, "t": 250000, "k": "ev", "e": "display", "err": "OSError(5,)"})
+        run.append(stop)
+        s = journal_summary.summarise(run)
+        self.assertEqual((s["display"], s["display_errors"]), ((4, 25), ["OSError(5,)"]))
+        lines = journal_summary.report(s)
+        self.assertTrue("  display: longest row write 4 ms, refresh 25 ms" in lines, lines)
+        self.assertTrue("  display failed: OSError(5,)" in lines, lines)
+
     def test_power_cut_boot(self):
         s = journal_summary.summarise(self.runs[1])
         self.assertEqual((s["boot"], s["end"], s["attach_s"]), (2, None, 5.0))

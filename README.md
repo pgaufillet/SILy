@@ -37,6 +37,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     - `tap.py` — link measurements (frames, RSSI, SNR) per source heard;
     - `traffic.py` — test traffic: numbered messages from the nodes,
       delivery and latency per node at the gateway (*Application*);
+    - `display.py` — the OLED status display: rotating pages of the box's
+      status, written row by row (*Application*);
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
     on the unix port and can be extracted later; its core is event-driven
@@ -357,8 +359,8 @@ key come from `/config.json`, which `make deploy` keeps. The configuration
 is made on the host from two files kept outside this repository, since
 they hold passwords: one network file shared by every box (password,
 network name, spreading factor, presence period, test traffic) and one
-file per box (role, address, name, power, LED, journal; display and WiFi
-sections for later parts), as in the templates `tools/network.example.json`
+file per box (role, address, name, power, LED, display, journal; a WiFi
+section for a later part), as in the templates `tools/network.example.json`
 and `tools/box.example.json`. `make configure` merges them, checks the result
 (every problem reported as `field: problem`), derives the frame key and its
 fingerprint on the host (no password on the boxes), writes `/config.json`,
@@ -425,6 +427,26 @@ accepted, refused at submission and failed afterwards, per reason. The
 figures go into the `tt` field of the minute records and into
 `App.status()` (`traffic`); the summary of `make journal` gives them over
 the run.
+
+The OLED display (`src/sily/display.py`), seen through the box's window,
+shows four pages of `App.status()` in turn, 5 s each, refreshed every
+second, each headed by the box (`GW0 base`, `N3 box3`) and the page
+number: state (attached, parent, rank, battery, operating mode);
+neighbours (address, margin in dB, ETX; `*` the preferred parent, `+`
+another member of the parent set; parents first, as many as fit); test
+traffic (on the gateway, per node, delivery % and median latency above the
+best case in ms; on a node, its messages sent, accepted, refused, failed);
+health (boot number, uptime, free heap, duty cycle used in % of the
+budget, transmit queue, journal lines, frames sent and received). The box
+file's `display.mode`: `always`, `window` (on for `window_min` minutes
+after the application starts, then powered off) or `off` (never touched,
+nor in safe mode). The display shares the asyncio loop with the mesh: it
+never sends a whole frame (about 25 ms on I2C) but only the text lines
+that changed, one 8-pixel row (about 3 ms) at a time, the loop free
+between rows; the minute records keep the longest row write and page
+refresh (`ow`, `or`, ms; in the summary of `make journal`). A display
+absent at start or failing later is journaled (`ev` `display`) and the
+application goes on without it.
 
 ## Bench
 

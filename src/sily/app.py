@@ -29,9 +29,12 @@ code inside the mesh's step) and driving the LED (on while attached, the
 gateway always), the stability timer clearing the crash count, and the
 test traffic (``sily.traffic``): on the gateway, always, the accounting of
 what the nodes send on its port; on a node whose configuration enables
-it, the sender (its failures passed on by the journal writer). Later parts
-add their tasks with `App.add_task` before the start, and their failure
-callbacks to ``failure_listeners``.
+it, the sender (its failures passed on by the journal writer); the OLED
+display (``sily.display``) unless its mode is ``off``, started after the
+boot record (no device, or a failure later: an ``ev`` ``display`` line and
+the application goes on without it; powered off at stop and crash). Later
+parts add their tasks with `App.add_task` before the start, and their
+failure callbacks to ``failure_listeners``.
 
 The field journal (``sily.journal``, records of ``sily.record``) starts a
 new segment at each boot (boot number counted in the NVS namespace
@@ -40,7 +43,8 @@ new segment at each boot (boot number counted in the NVS namespace
 extension), the ``ev`` events of the monitor's polls, the failures of own
 messages and, on the gateway, the reports received; a ``stop`` or
 ``fatal`` line ends it. The minute record carries the test traffic's
-figures (``tt``) when there are some. The journal is synced after the boot
+figures (``tt``) when there are some, and the display's longest row write
+and refresh (``ow``, ``or``) when it wrote. The journal is synced after the boot
 record, every ``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
 handler, failure callback, presence extension) run inside its step, on the
 root's reply path: they only queue an item or return cached bytes; a task
@@ -54,7 +58,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, guard, journal, record, traffic
+from sily import config, display, guard, journal, record, traffic
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -146,6 +150,7 @@ class App:
         self.attached = False
         self.error = None  # the first exception of a task
         self.traffic = None  # traffic.Receiver (gateway), traffic.Sender or None
+        self.display = None  # display.Display, or None (mode off, absent)
         self.failure_listeners = []  # fn(dest, port, seq, reason), outside the step
         self._factories = []
         self._closed = False
@@ -224,6 +229,34 @@ class App:
         self.add_task(lambda app: traffic.send(sender, app.clock.now, lambda: app.attached))
         return sender
 
+    def _display(self):
+        """Start the display (module documentation); return it or None."""
+        d = self.cfg["display"]
+        if d["mode"] == display.OFF:
+            return None
+        error = "no device"
+        try:
+            oled = self.hw.display()
+        except Exception as e:  # an I2C error: the application goes on without display
+            oled = None
+            error = repr(e)
+        if oled is None:
+            self._display_failed(error)
+            return None
+        shown = display.Display(
+            display.Screen(oled),
+            self.status,
+            self.clock.now,
+            d["mode"],
+            d["window_min"] * 60000,
+            on_error=lambda e: self._display_failed(repr(e)),
+        )
+        self.add_task(lambda app: shown.run())
+        return shown
+
+    def _display_failed(self, error):
+        self.journal.write(self.clock.now(), "ev", {"e": "display", "err": error})
+
     def submit(self, port, cls, dest, payload):
         """Submit an application message (``LinkEngine.submit``), then wake the runner."""
         result = self.stack.engine.submit(port, cls, dest, payload)
@@ -247,6 +280,7 @@ class App:
             fields = record.boot(self.cfg, stack, self.hw.reset_cause(), crashes, sily.__version__)
             self.journal.write(self.clock.now(), "boot", fields)
             self.journal.sync()
+            self.display = self._display()
             asyncio.create_task(stack.adapter.run())
             asyncio.create_task(self._monitor())
             asyncio.create_task(self._minutes())
@@ -310,6 +344,10 @@ class App:
         fields["jw"], fields["js"] = j.stalls()
         fields["jq"] = self.queue.overflow
         fields["je"] = j.errors
+        if self.display is not None:
+            stalls = self.display.screen.stalls()
+            if stalls is not None:
+                fields["ow"], fields["or"] = stalls
         if self.traffic is not None:
             await asyncio.sleep_ms(0)
             tt = self.traffic.minute()
@@ -370,6 +408,7 @@ class App:
             "battery": self.battery,
             "mode": record.MODES[self.mode],
             "attached": False,
+            "heap": gc.mem_free(),
         }
         stack = self.stack
         if stack is None:
@@ -399,6 +438,7 @@ class App:
                     "unreachable": c.unreachable,
                     "queue": len(e.queue),
                     "duty_ms": e.dutycycle.used(now),
+                    "duty_budget_ms": e.dutycycle.budget_ms,
                     "journal_lines": 0 if j is None else j.lines,
                     "journal_errors": 0 if j is None else j.errors,
                     "items_lost": self.queue.overflow,
@@ -412,7 +452,7 @@ class App:
     def close(self, kind="stop", fields=None):
         """Stop the node: pending items and a last line of kind (None: none)
         journaled, the journal synced and closed, runner stopped, radio in
-        standby, LED off. Idempotent."""
+        standby, LED and display off. Idempotent."""
         if self._closed:
             return
         self._closed = True
@@ -432,6 +472,8 @@ class App:
                 self.stack.close()
             if self.led is not None:
                 self.led.value(0)
+            if self.display is not None:
+                self.display.off()
 
 
 def _read(path):

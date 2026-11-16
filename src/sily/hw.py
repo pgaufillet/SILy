@@ -9,6 +9,8 @@ A thin bundle over ``board.t3s3``, ``board.platform`` and
   namespace ``mesh`` for the frame counter; ``sily`` for the start guard);
 - `mac()`: the 6-byte MAC address (node information);
 - `led()`: the user LED (one Pin, made once);
+- `display()`: the OLED display (``ssd1306`` driver, cleared and on), None
+  when no device answers on its I2C bus;
 - `power_on()`: this boot follows a power-on (a brownout reads as one);
 - `reset_cause()`: the cause of this boot, a word (`RESET_CAUSES`);
 - `battery_mv()`: the battery voltage in mV (``board.t3s3``);
@@ -77,6 +79,11 @@ def led():
     if _led is None:
         _led = t3s3.make_led()
     return _led
+
+
+def display():
+    """Return the OLED display, None if absent (``board.t3s3.make_oled``)."""
+    return t3s3.make_oled()
 
 
 def power_on():

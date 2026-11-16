@@ -17,7 +17,9 @@ lines of one boot number, in order):
   mean and max, the last RSSI mean and frames;
 - the counters since boot (totals of the last minute record, the non-zero
   ones), the battery (first, last, lowest mV) and the journal's own
-  costs: longest write and sync (ms), items lost, errors;
+  costs: longest write and sync (ms), items lost, errors; the display's
+  longest row write and page refresh (ms, ``sily.display``) and its
+  failures;
 - on the gateway, per origin of the reports received: presences,
   topologies, last battery;
 - the test traffic (``sily.traffic``, the ``tt`` field of the minute
@@ -116,6 +118,9 @@ def summarise(run):
     s["js"] = max([m.get("js", 0) for m in minutes] or [0])
     s["jq"] = minutes[-1].get("jq", 0) if minutes else 0
     s["je"] = minutes[-1].get("je", 0) if minutes else 0
+    shown = [m for m in minutes if "ow" in m]
+    s["display"] = (max(m["ow"] for m in shown), max(m["or"] for m in shown)) if shown else None
+    s["display_errors"] = [r.get("err") for r in run if _event(r, "display")]
     origins = {}
     for r in run:
         if r["k"] in ("rp", "rt", "ri"):
@@ -271,6 +276,10 @@ def report(s):
         "  journal: longest write %s ms, sync %s ms; %s items lost, %s errors"
         % (s["jw"], s["js"], s["jq"], s["je"])
     )
+    if s["display"] is not None:
+        lines.append("  display: longest row write %s ms, refresh %s ms" % s["display"])
+    for error in s["display_errors"]:
+        lines.append("  display failed: %s" % error)
     for origin in sorted(s["origins"]):
         o = s["origins"][origin]
         lines.append(

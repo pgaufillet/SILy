@@ -2,14 +2,16 @@
 
 `FakeHw` stands for ``sily.hw``: the scripted adapter of
 ``test_sily_radio`` with the rest of the ``board.sx1262.Sx1262`` API, the
-simulator's platform fakes, an LED and the board's control functions. The
-application's tests (``test_sily_app``) use it too.
+simulator's platform fakes, an LED, an OLED display (`FakeOled`) and the
+board's control functions. The application's tests (``test_sily_app``) use
+it too.
 """
 
 import asyncio
 import unittest
 from time import ticks_diff, ticks_ms
 
+import framebuf
 from test_sily_radio import FakeAdapter
 
 import sily
@@ -80,12 +82,65 @@ class Led:
         self.values.append(v)
 
 
+class FakeOled(framebuf.FrameBuffer):
+    """The ``ssd1306`` driver's surface over a frame buffer, its controller
+    simulated: commands recorded, the column and page windows of the data
+    writes (horizontal addressing) applied to `ram`, the controller's
+    memory.
+
+    fail: raised by every ``write_data`` while set (an I2C error).
+    """
+
+    def __init__(self, width=128, height=64):
+        self.width = width
+        self.height = height
+        self.buffer = bytearray(width * height // 8)
+        super().__init__(self.buffer, width, height, framebuf.MONO_VLSB)
+        self.ram = bytearray(128 * height // 8)
+        self.cmds = []
+        self.writes = []  # (first page, last page, bytes) of each write_data
+        self.windows = {0x21: (0, 127), 0x22: (0, height // 8 - 1)}
+        self.powered = True
+        self.fail = None
+        self._args = None  # (command, arguments so far) of a window command
+
+    def write_cmd(self, cmd):
+        self.cmds.append(cmd)
+        if self._args is not None:
+            self._args[1].append(cmd)
+            if len(self._args[1]) == 2:
+                self.windows[self._args[0]] = tuple(self._args[1])
+                self._args = None
+        elif cmd in (0x21, 0x22):
+            self._args = (cmd, [])
+
+    def write_data(self, buf):
+        if self.fail is not None:
+            raise self.fail
+        data = bytes(buf)
+        c0, c1 = self.windows[0x21]
+        p0, p1 = self.windows[0x22]
+        self.writes.append((p0, p1, data))
+        col, page = c0, p0
+        for b in data:
+            self.ram[page * 128 + col] = b
+            col += 1
+            if col > c1:
+                col = c0
+                page = p0 if page == p1 else page + 1
+
+    def poweroff(self):
+        self.cmds.append(0xAE)
+        self.powered = False
+
+
 class FakeHw:
     """The ``sily.hw`` bundle on fakes; records what the application does.
 
     fail: as `Adapter`; adapter_error: raised by `adapter` (a silent radio);
     interrupt_sleep: `sleep_ms` raises KeyboardInterrupt (Ctrl-C);
-    battery: the reading of `battery_mv` (mV).
+    battery: the reading of `battery_mv` (mV); oled: what `display`
+    returns (None: no device); display_error: raised by `display`.
     """
 
     def __init__(self, power_on=False, fail=None, adapter_error=None, seed=1):
@@ -101,6 +156,9 @@ class FakeHw:
         self.kbd = []
         self.blinks = []
         self.battery = 3900
+        self.oled = FakeOled()
+        self.display_error = None
+        self.displays = 0  # calls of display
 
     def adapter(self, lora_cfg):
         if self.adapter_error is not None:
@@ -125,6 +183,12 @@ class FakeHw:
 
     def led(self):
         return self.led_pin
+
+    def display(self):
+        self.displays += 1
+        if self.display_error is not None:
+            raise self.display_error
+        return self.oled
 
     def power_on(self):
         return self.on

@@ -464,3 +464,85 @@ class Traffic(Console):
         self.assertIsNone(a.traffic)
         self.assertFalse("tt" in minute)
         self.assertFalse("traffic" in status)
+
+
+class Display(Console):
+    """The OLED display in the application (``sily.display``) on `FakeOled`."""
+
+    def _run(self, hw, ms, tasks=(), **fields):
+        fields.setdefault("journal", {"minute_s": 1})
+        a = _app(hw, **fields)
+        for factory in tasks:
+            a.add_task(factory)
+        a.add_task(_after(ms, lambda a: a.stop()))
+        result = app.start(a)
+        records, _ = journal.read(JOURNAL)
+        events = [r for r in records if r["k"] == "ev" and r["e"] == "display"]
+        minutes = [r for r in records if r["k"] == "min"]
+        return a, result, events, minutes
+
+    def test_pages_shown_and_timed(self):
+        hw = FakeHw()
+        a, result, events, minutes = self._run(hw, 1500, name="base")
+        self.assertEqual((result, events), (app.STOPPED, []))
+        self.assertEqual(a.display.screen.shown, [None] * 8)  # off at the stop
+        oled = hw.oled
+        self.assertFalse(oled.powered)
+        self.assertEqual(oled.ram, oled.buffer)
+        self.assertTrue(len(oled.writes) >= 8)
+        for first, last, data in oled.writes:
+            self.assertEqual((first == last, len(data)), (True, 128))
+        m = minutes[0]
+        self.assertTrue(type(m["ow"]) is int and type(m["or"]) is int, m)
+        self.assertTrue(m["ow"] <= m["or"], m)
+
+    def test_first_page_from_status(self):
+        hw = FakeHw()
+        seen = []
+        a, _, _, _ = self._run(
+            hw, 300, (_after(250, lambda a: seen.append(list(a.display.screen.shown))),)
+        )
+        self.assertEqual(seen[0][:4], ["GW0 box0     1/4", "attached", "parent -", "rank 0"])
+
+    def test_window_mode(self):
+        a, _, _, _ = self._run(FakeHw(), 50, display={"mode": "window", "window_min": 3})
+        self.assertEqual((a.display.mode, a.display.window_ms), ("window", 180000))
+
+    def test_mode_off_never_touches_the_display(self):
+        hw = FakeHw()
+        a, result, events, minutes = self._run(hw, 1500, display={"mode": "off"})
+        self.assertEqual((result, events, hw.displays, a.display), (app.STOPPED, [], 0, None))
+        self.assertFalse("ow" in minutes[0])
+        self.assertEqual(hw.oled.cmds, [])
+
+    def test_missing_display(self):
+        hw = FakeHw()
+        hw.oled = None
+        a, result, events, minutes = self._run(hw, 1500)
+        self.assertEqual((result, a.display, hw.displays), (app.STOPPED, None, 1))
+        self.assertEqual([e["err"] for e in events], ["no device"])
+        self.assertFalse("ow" in minutes[0])
+        self.assertEqual(_guard(hw).crashes, 0)
+
+    def test_display_error_at_start(self):
+        hw = FakeHw()
+        hw.display_error = OSError(19)
+        a, result, events, _ = self._run(hw, 200)
+        self.assertEqual((result, a.display), (app.STOPPED, None))
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["err"].startswith("OSError(19"), events)
+
+    def test_failure_while_running(self):
+        hw = FakeHw()
+
+        def fail(a):
+            hw.oled.fail = OSError(5)
+            a.display.screen.shown[1] = None  # rewritten at the next refresh
+
+        a, result, events, _ = self._run(hw, 1500, (_after(100, fail),), led=False)
+        self.assertEqual(result, app.STOPPED)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["err"].startswith("OSError(5"), events)
+        self.assertFalse(a.display.lit)
+        self.assertTrue(a.stack.runner.steps > 0)
+        self.assertEqual(_guard(hw).crashes, 0)

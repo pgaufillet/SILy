@@ -85,6 +85,21 @@ def make_i2c():
     return I2C(0, scl=p.OLED_SCL, sda=p.OLED_SDA, freq=_I2C_FREQ)
 
 
+def make_oled(i2c=None):
+    """Return the SSD1306 display (``ssd1306.SSD1306_I2C``: initialised,
+    cleared and on), None when no device answers at `OLED_ADDRESS`.
+
+    i2c: its bus (None: `make_i2c`).
+    """
+    import ssd1306  # frozen in the firmware
+
+    if i2c is None:
+        i2c = make_i2c()
+    if OLED_ADDRESS not in i2c.scan():
+        return None
+    return ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=OLED_ADDRESS)
+
+
 def make_srr_uart():
     """Open the SRR receiver's UART (UART1, 38400 baud 8N1) and return it."""
     return UART(
