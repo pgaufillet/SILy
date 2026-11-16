@@ -17,7 +17,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 
 - `src/` — what goes on the board's filesystem:
   - `main.py` — entry point run at boot;
-  - `sily/` — the application;
+  - `sily/` — the application, and the per-box hardware check
+    (`sily/boxcheck.py`, `make box-check`);
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
     on the unix port and can be extracted later; its core is event-driven
@@ -25,9 +26,11 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     `mesh/core.py`), driven by its asyncio runner on the board
     (`mesh/runner.py`) and by the simulator on the host; its design is
     described in `docs/MESH_DESIGN.md`;
-  - `board/` — board support, the only hardware-specific code: T3S3 wiring,
-    ESP32 platform of the mesh (NVS, RTC memory, random source), SX1262
-    radio adapter (reception, transmission, carrier sense).
+  - `board/` — board support, the only hardware-specific code: T3S3 wiring
+    (radio, battery voltage, LED, display bus, SRR receiver's UART; pin
+    plan, box wiring and per-box procedure in `docs/hardware.md`), ESP32
+    platform of the mesh (NVS, RTC memory, random source), SX1262 radio
+    adapter (reception, transmission, carrier sense).
 - `sim/` — host-only mesh simulator, not deployed: deterministic random
   generator, discrete-event scheduler, platform fakes, scripted radio medium
   (loss, asymmetry, partitions, collisions, half duplex, carrier sense), the
@@ -86,6 +89,7 @@ make trace RUN="forming course 1 14"  # trace of one large run (nominal course)
 make firmware                  # build the SILY_T3S3 firmware
 make flash PORT=/dev/ttyACM0   # flash it
 make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it
+make box-check PORT=/dev/ttyACM0  # per-box hardware check (docs/hardware.md)
 ```
 
 Host tests use micropython-lib's `unittest` from the MicroPython tree (through

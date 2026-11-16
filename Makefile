@@ -56,6 +56,14 @@ SPEC_REMOTE = env TLA_JAR=$(TLA_JAR) REMOTE_DIR=$(SPEC_DIR) FETCH=$(SPEC_FETCH) 
 	JOBS=$(SPEC_JOBS) WORKERS=$(WORKERS) HEAP=$(HEAP) MAXSECS=$(MAXSECS) \
 	QUICK_SECS=$(QUICK_SECS) sh spec/remote.sh
 
+# Per-box hardware check (`make box-check`, src/sily/boxcheck.py,
+# docs/hardware.md) on the board at PORT, its code deployed: BATTERY=0 for a
+# board without battery (its reading reported, not judged), HOLD seconds of
+# LED blinking, test page and WiFi access point. Fails unless the last line
+# is `SUMMARY: PASS`.
+BATTERY ?= 1
+HOLD ?= 15
+
 # Top-level entries of src/ copied to the board's filesystem root, from a
 # staged copy without the host's __pycache__ directories.
 DEPLOY_DIR = build/deploy
@@ -152,7 +160,7 @@ OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
 .PHONY: help check test seeds simbench large sweep sweep-summary campaign-plan \
-	campaign campaign-fetch trace lint push-check firmware flash deploy \
+	campaign campaign-fetch trace lint push-check firmware flash deploy box-check \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -173,6 +181,7 @@ help:
 	@echo "make firmware             build the $(BOARD) firmware"
 	@echo "make flash PORT=<dev>     flash the $(BOARD) firmware"
 	@echo "make deploy PORT=<dev>    copy src/ to the board and reset it"
+	@echo "make box-check PORT=<dev> [BATTERY=0 HOLD=15]  per-box hardware check (docs/hardware.md)"
 	@echo "make spec                 TLC: every model, each against its expected outcome (full tier)"
 	@echo "make spec-quick           TLC: the models recorded at most QUICK_SECS=60 s (quick tier)"
 	@echo "make spec-pass            TLC: the models that must hold"
@@ -258,6 +267,11 @@ deploy:
 	rm -rf $(DEPLOY_DIR) && mkdir -p $(DEPLOY_DIR) && cp -r src/. $(DEPLOY_DIR)/ && \
 		find $(DEPLOY_DIR) -name __pycache__ -prune -exec rm -rf {} +
 	cd $(DEPLOY_DIR) && $(MPREMOTE) connect $(PORT) resume fs cp -r $(DEPLOY_ITEMS) : + reset
+
+box-check:
+	@log=$$(mktemp) && $(MPREMOTE) connect $(PORT) exec \
+		"from sily import boxcheck; boxcheck.run(battery=$(BATTERY), hold_s=$(HOLD))" | tee $$log; \
+	tail -n 1 $$log | grep -q '^SUMMARY: PASS'; status=$$?; rm -f $$log; exit $$status
 
 spec:
 	$(SPEC) all

@@ -1,6 +1,7 @@
 """Board support: the only hardware-specific code.
 
-- `board.t3s3`: LilyGo T3S3 wiring (SX1262 on SPI);
+- `board.t3s3`: LilyGo T3S3 wiring (SX1262 on SPI, battery voltage, LED,
+  display bus, SRR receiver's UART; docs/hardware.md);
 - `board.platform`: the ESP32 platform of the mesh (NVS storage, RTC
   retained memory, hardware random source);
 - `board.sx1262`: the SX1262 radio adapter (continuous reception, transmit,
