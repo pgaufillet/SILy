@@ -16,9 +16,20 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 ## Layout
 
 - `src/` — what goes on the board's filesystem:
-  - `main.py` — entry point run at boot;
-  - `sily/` — the application, and the per-box hardware check
-    (`sily/boxcheck.py`, `make box-check`);
+  - `main.py` — entry point run at boot: starts the application;
+  - `sily/` — the application (below), the bench console (`sily/bench.py`)
+    and the per-box hardware check (`sily/boxcheck.py`, `make box-check`):
+    - `app.py` — boot decision, safe mode, the application's tasks, Ctrl-C
+      stop and crash path (*Application* below);
+    - `config.py` — the box's configuration `/config.json`: checks,
+      defaults, and the host merge of the network and box files (key
+      derived on the host);
+    - `guard.py` — start guard: crash count, one-shot skip flag;
+    - `stack.py` — assembly of the mesh node on injected hardware, shared
+      by the application and the bench;
+    - `hw.py` — the board's hardware as the application takes it (over
+      `board/`);
+    - `radio.py` — binding of the SX1262 adapter to the mesh radio;
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
     on the unix port and can be extracted later; its core is event-driven
@@ -43,6 +54,9 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 - `tests/` — host tests (`run.py` runner, `test_*.py` modules), scenario
   suites on several seeds (`seeds.py`) and the large-network suite
   (`large.py`), both outside `make test`.
+- `tools/box.py` — configuration of the boxes from the host (`config`:
+  one box, `make configure`; `check`: a whole network), with the templates
+  `tools/network.example.json` and `tools/box.example.json`.
 - `tools/bench.py` — two-board bench measurements, run from the host over
   the serial ports; results in `docs/measurements.md`.
 - `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
@@ -88,8 +102,9 @@ make trace TEST=test_dodag_scenario.DetachRejoin  # traces into build/trace
 make trace RUN="forming course 1 14"  # trace of one large run (nominal course)
 make firmware                  # build the SILY_T3S3 firmware
 make flash PORT=/dev/ttyACM0   # flash it
-make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it
+make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it (keeps /config.json)
 make box-check PORT=/dev/ttyACM0  # per-box hardware check (docs/hardware.md)
+make configure PORT=/dev/ttyACM0 NETWORK=<file> BOX=<file>  # the box's /config.json, then reset
 ```
 
 Host tests use micropython-lib's `unittest` from the MicroPython tree (through
@@ -324,11 +339,42 @@ shortcuts.
   names; the *Legend & concepts* tab explains the colours and the mesh
   mechanisms (MESH_DESIGN §8, §9, §11, §12).
 
+## Application
+
+Every box runs the same application (`src/sily/app.py`), started at boot by
+`main.py`; its role (gateway or node), address, name, radio settings and
+key come from `/config.json`, which `make deploy` keeps. The configuration
+is made on the host from two files kept outside this repository, since
+they hold passwords: one network file shared by every box (password,
+network name, spreading factor, presence period) and one file per box
+(role, address, name, power, LED; display, WiFi and journal sections for
+later parts), as in the templates `tools/network.example.json` and
+`tools/box.example.json`. `make configure` merges them, checks the result
+(every problem reported as `field: problem`), derives the frame key and its
+fingerprint on the host (no password on the boxes), writes `/config.json`,
+clears the start guard and resets the board. `tools/box.py check --network
+NETWORK BOX...` checks a whole network: each box, unique addresses, one
+gateway.
+
+At boot the board prints `SILY <version>`; then:
+
+- without a valid `/config.json`, or after 3 crashes without 10 minutes of
+  stable run, it stays in safe mode: one `SILY SAFE field: problem` line per
+  reason, the LED blinking fast, the REPL free (a power-on clears the crash
+  count: switching the box off and on retries);
+- otherwise the application runs: the mesh node and, once a second, the
+  LED showing whether it is attached (the gateway always is). Ctrl-C, as
+  `mpremote` sends when it connects, stops it cleanly (radio in standby,
+  LED off, `SILY STOP`) and leaves the REPL; any other error is a crash:
+  `SILY FATAL` with its traceback, then a reset 5 s later (Ctrl-C in
+  between keeps the REPL).
+
 ## Bench
 
 `sily.bench` runs one link engine on a board with a line console (state
-dump, send, echo, flood, carrier sense survey, neighbour filter), started by
-hand from the REPL, never at boot:
+dump, send, echo, flood, carrier sense survey, neighbour filter), on the
+node assembly of the application (`sily/stack.py`), started by hand from
+the REPL once the application is stopped (Ctrl-C):
 
 ```python
 from sily import bench

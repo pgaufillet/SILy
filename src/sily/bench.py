@@ -80,25 +80,16 @@ import sys
 from array import array
 from time import ticks_add, ticks_diff, ticks_ms, ticks_us
 
-import machine
-
-import sily
-from board.platform import HardwareRandom, NvsStorage, RtcRetained
-from board.sx1262 import Sx1262
-from board.t3s3 import make_modem
 from mesh import kdf
-from mesh import profile as profiles
 from mesh.airtime import time_on_air_us
-from mesh.dodag import DodagInfo, default_info
 from mesh.frame import COUNTER_OFFSET, DEST_OFFSET, FIRST_HOP, HEADER_SIZE, ROOT, UPWARD, Message
-from mesh.link import destination, open_link
 from mesh.ports import NODE_INFO, PRESENCE
-from mesh.radio import CHANNEL, RX, RX_ERROR, TX_DONE, NeighbourFilter, Radio
-from mesh.reports import NodeInfo, Presence, encode_presence
-from mesh.routing import Routing
-from mesh.runner import Runner
+from mesh.radio import CHANNEL, RX, RX_ERROR, TX_DONE, Radio
+from mesh.reports import Presence, encode_presence
 from mesh.txqueue import accepted
-from sily.radio import PREAMBLE, MeshRadio, link_source, lora_config
+from sily import hw
+from sily.radio import PREAMBLE, link_source
+from sily.stack import AllowAll, Stack
 
 TEXT_PORT = 100
 ECHO_PORT = 101
@@ -126,21 +117,8 @@ _RESERVED = 4  # a frame counter block recorded in storage before the reply
 _OTHER_TX = 8  # another frame went on air first
 
 
-class _All:
-    """Allowed set of a disabled neighbour filter."""
-
-    def __contains__(self, item):
-        return True
-
-
 def _out(*items):
     print(*items)
-
-
-def firmware_version():
-    """Return the application version as the 16-bit node information field (major, minor)."""
-    major, minor = sily.__version__.split(".")[:2]
-    return int(major) << 8 | int(minor)
 
 
 def _u16(data, offset):
@@ -355,49 +333,33 @@ class Bench:
         else:
             fingerprint = None
         kdf_ms = ticks_diff(ticks_ms(), t0)
-        profile = profiles.get(profiles.EU_869)
-        problems = profiles.validate(profile, sf, power)
-        if problems:
-            raise ValueError("bad radio settings: %s" % problems)
-        self.adapter = Sx1262(make_modem(lora_config(profile, sf, power)))
-        self.adapter.start()
-        self.filter = NeighbourFilter(MeshRadio(self.adapter), _All(), link_source)
-        if allow is not None:
-            self.filter.allowed = set(allow)
-        gc.collect()
-        free1 = gc.mem_free()
-        self.engine = open_link(
+
+        def wrap(stack, radio):
+            self.timed = _Timed(stack, radio, sf, stack.profile, gc_every)
+            return self.timed
+
+        self.timed = None
+        node = Stack(
+            hw,
             address,
             key,
-            NvsStorage(),
-            RtcRetained(),
-            HardwareRandom(),
-            profile,
             sf,
-            next_hop=None if routing else destination,  # static: every one a neighbour
+            name="bench%d" % address,
+            power=power,
+            allow=allow,
+            routing=routing,
+            presence_s=presence_s,
+            on_report=self._report,
+            wrap=wrap if timed else None,
         )
-        self.routing = None
-        if routing:
-            info = default_info(sf, profiles.EU_869)
-            if presence_s is not None:
-                info = DodagInfo(
-                    info.flags,
-                    presence_s,
-                    6 * presence_s,
-                    info.imin_slots,
-                    info.max_increase,
-                    info.profile,
-                )
-            node = NodeInfo(machine.unique_id(), firmware_version(), "bench%d" % address)
-            self.routing = Routing(self.engine, profiles.EU_869, info, node_info=node)
-            self.routing.on_report = self._report
-        radio = self.filter
-        self.timed = None
-        if timed:
-            radio = self.timed = _Timed(self, self.filter, sf, profile, gc_every)
-        self.runner = Runner(self.engine, radio)
-        gc.collect()
-        free2 = gc.mem_free()
+        self.node = node
+        self.adapter = node.adapter
+        self.filter = node.filter
+        self.engine = node.engine
+        self.routing = node.routing
+        self.runner = node.runner
+        free1 = node.heap_radio
+        free2 = node.heap_node
         self.engine.bind(TEXT_PORT, self._text)
         self.engine.bind(ECHO_PORT, self._echo_request)
         self.engine.bind(REPLY_PORT, self._echo_reply)
@@ -620,7 +582,7 @@ class Bench:
             asyncio.create_task(self._cut(int(args[0]), int(args[1])))
         elif cmd == "filter":
             if args and args[0] == "off":
-                self.filter.allowed = _All()
+                self.filter.allowed = AllowAll()
             else:
                 self.filter.allowed = set(int(a) for a in "".join(args).split(",") if a)
             _out("FILTER", args)
@@ -663,7 +625,7 @@ class Bench:
 
     def close(self):
         """Stop the radio (standby): the node no longer receives."""
-        self.adapter.modem.standby()
+        self.node.close()
 
 
 def run(address, **options):

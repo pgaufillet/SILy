@@ -94,7 +94,10 @@ The box closed, its switch on (battery connected), its USB to the host
    device through too); the board restarts into MicroPython after the
    write. No button is needed, unless the board no longer answers on USB
    (then open the box: BOOT held during reset).
-2. `make deploy PORT=...`: copies `src/` to the board and resets it.
+2. `make deploy PORT=...`: copies `src/` to the board and resets it. A
+   board without configuration then boots into safe mode (`SILY SAFE file:
+   /config.json missing`, the LED blinking fast) and waits at the REPL;
+   `make deploy` keeps an existing `/config.json`.
 3. `make box-check PORT=...` (`src/sily/boxcheck.py`): one line per item,
    `PASS`, `FAIL` or `OBSERVE` (to judge by eye), then a `SUMMARY` line;
    make fails unless it reads `SUMMARY: PASS`. For `HOLD` seconds (15 by
@@ -115,3 +118,10 @@ The box closed, its switch on (battery connected), its USB to the host
 | display | OBSERVE: the test page shows; FAIL if nothing answers at 0x3C |
 | led | OBSERVE: the LED blinks |
 | cleanup | the board is left as at boot: LED, access point and display off, UART closed, radio asleep |
+
+4. `make configure PORT=... NETWORK=<network file> BOX=<box file>`
+   (`tools/box.py`, README *Application*): writes the box's
+   `/config.json` (key derived on the host from the network file), clears
+   the start guard and resets the board, which prints `SILY <version>` and
+   starts the application: the LED lights once the box is attached to the
+   mesh (at once on the gateway).

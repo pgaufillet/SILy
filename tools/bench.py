@@ -129,7 +129,12 @@ class Board:
         self._read(0.3)
 
     def hard_reset(self):
-        """machine.reset(): the USB port goes away and comes back."""
+        """machine.reset(): the USB port goes away and comes back.
+
+        The application, which starts at boot (``sily.app``), skips that boot
+        (``sily.hw.skip_next_boot``): it would rewrite the RTC memory.
+        """
+        self.exec("from sily import hw; hw.skip_next_boot()")
         self.interrupt()
         self.conn.write(b"import machine; machine.reset()\r\n")
         time.sleep(0.5)

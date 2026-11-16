@@ -64,8 +64,18 @@ SPEC_REMOTE = env TLA_JAR=$(TLA_JAR) REMOTE_DIR=$(SPEC_DIR) FETCH=$(SPEC_FETCH) 
 BATTERY ?= 1
 HOLD ?= 15
 
+# Box configuration (`make configure`, tools/box.py): NETWORK, the network
+# file, and BOX, the box's file (both kept outside the repository: they hold
+# passwords; templates in tools/), merged and checked, the key derived on
+# the host, written to the board at PORT as /config.json; then the start
+# guard is cleared and the board reset (the application starts).
+NETWORK ?=
+BOX ?=
+PYTHON ?= $(VENV)/bin/python
+
 # Top-level entries of src/ copied to the board's filesystem root, from a
-# staged copy without the host's __pycache__ directories.
+# staged copy without the host's __pycache__ directories (files of the
+# board's root that src/ lacks, /config.json among them, stay).
 DEPLOY_DIR = build/deploy
 DEPLOY_ITEMS = $(filter-out __pycache__,$(notdir $(wildcard src/*)))
 
@@ -160,7 +170,7 @@ OUT ?= build/trace
 TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) tools/trace.py $(OUT)
 
 .PHONY: help check test seeds simbench large sweep sweep-summary campaign-plan \
-	campaign campaign-fetch trace lint push-check firmware flash deploy box-check \
+	campaign campaign-fetch trace lint push-check firmware flash deploy box-check configure \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -182,6 +192,7 @@ help:
 	@echo "make flash PORT=<dev>     flash the $(BOARD) firmware"
 	@echo "make deploy PORT=<dev>    copy src/ to the board and reset it"
 	@echo "make box-check PORT=<dev> [BATTERY=0 HOLD=15]  per-box hardware check (docs/hardware.md)"
+	@echo "make configure PORT=<dev> NETWORK=<file> BOX=<file>  write the box's /config.json, reset"
 	@echo "make spec                 TLC: every model, each against its expected outcome (full tier)"
 	@echo "make spec-quick           TLC: the models recorded at most QUICK_SECS=60 s (quick tier)"
 	@echo "make spec-pass            TLC: the models that must hold"
@@ -272,6 +283,11 @@ box-check:
 	@log=$$(mktemp) && $(MPREMOTE) connect $(PORT) exec \
 		"from sily import boxcheck; boxcheck.run(battery=$(BATTERY), hold_s=$(HOLD))" | tee $$log; \
 	tail -n 1 $$log | grep -q '^SUMMARY: PASS'; status=$$?; rm -f $$log; exit $$status
+
+configure:
+	@test -n "$(NETWORK)" && test -n "$(BOX)" || \
+		{ echo "make configure PORT=<dev> NETWORK=<file> BOX=<file>"; exit 2; }
+	$(PYTHON) tools/box.py config $(NETWORK) $(BOX) --port $(PORT) --mpremote $(MPREMOTE)
 
 spec:
 	$(SPEC) all

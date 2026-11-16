@@ -1,0 +1,12 @@
+{
+  "role": "node",
+  "address": 1,
+  "name": "relay1",
+  "tx_power": 14,
+  "antenna_gain": 2,
+  "allow": null,
+  "led": true,
+  "display": {"mode": "window", "window_min": 10},
+  "wifi": {"ap": null, "known": []},
+  "journal": {"minute_s": 60, "sync_s": 300, "max_kb": 1024, "segment_kb": 64}
+}
