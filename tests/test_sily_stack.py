@@ -167,6 +167,16 @@ class FakeAp:
         self.offs += 1
 
 
+class FakeWatchdog:
+    """The watchdog of `FakeHw.arm_watchdog`: the ticks_ms of each feed."""
+
+    def __init__(self):
+        self.feeds = []
+
+    def feed(self):
+        self.feeds.append(ticks_ms())
+
+
 class FakeHw:
     """The ``sily.hw`` bundle on fakes; records what the application does.
 
@@ -175,7 +185,10 @@ class FakeHw:
     battery: the reading of `battery_mv` (mV); oled: what `display`
     returns (None: no device); display_error: raised by `display`;
     ap_error: raised by `access_point`; ap_address: the address of the
-    access points it makes (`FakeAp`, kept in aps).
+    access points it makes (`FakeAp`, kept in aps); cause: what
+    `reset_cause` returns (None: ``power`` or ``hard``, after power_on).
+    The watchdog (`FakeWatchdog`, wdt): the timeouts armed, whether its
+    timer feeds it (idle), the sleeps taken while nothing fed it (unfed).
     """
 
     def __init__(self, power_on=False, fail=None, adapter_error=None, seed=1):
@@ -197,6 +210,11 @@ class FakeHw:
         self.ap_error = None
         self.ap_address = "192.168.4.1"
         self.aps = []
+        self.cause = None
+        self.wdt = FakeWatchdog()
+        self.armed = []  # timeout_ms of each arm_watchdog
+        self.idle = False
+        self.unfed = []  # ms of the sleeps while armed, its timer's feed off
 
     def adapter(self, lora_cfg):
         if self.adapter_error is not None:
@@ -239,6 +257,8 @@ class FakeHw:
         return self.on
 
     def reset_cause(self):
+        if self.cause is not None:
+            return self.cause
         return "power" if self.on else "hard"
 
     def battery_mv(self):
@@ -250,6 +270,8 @@ class FakeHw:
 
     def sleep_ms(self, ms):
         self.sleeps.append(ms)
+        if self.armed and not self.idle:
+            self.unfed.append(ms)
         if self.interrupt_sleep:
             raise KeyboardInterrupt
 
@@ -258,6 +280,14 @@ class FakeHw:
 
     def blink(self, period_ms):
         self.blinks.append(period_ms)
+
+    def arm_watchdog(self, timeout_ms):
+        self.armed.append(timeout_ms)
+        self.idle = False
+        return self.wdt
+
+    def idle_watchdog(self):
+        self.idle = True
 
 
 class Recorder(Radio):

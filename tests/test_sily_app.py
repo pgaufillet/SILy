@@ -22,7 +22,7 @@ from test_sily_web import _get, _request, _split
 from mesh.frame import DEST_OFFSET, ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.reports import FIRST_REPORT, NodeInfo, Presence
-from sily import app, guard, journal, record, traffic
+from sily import app, guard, journal, record, traffic, watchdog
 from sily.config import check
 
 DIR = "build/test_sily_app"  # relative to the repository root, where the tests run
@@ -149,6 +149,7 @@ class Boot(Console):
         self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SAFE)
         self.assertEqual(hw.blinks, [app.SAFE_BLINK_MS])
         self.assertEqual(hw.adapters, [])
+        self.assertEqual(hw.armed, [])  # the watchdog left alone: the REPL free
         self.assertTrue("SILY SAFE file: %s missing (make configure)" % PATH in self.lines())
 
     def test_one_line_per_problem(self):
@@ -184,7 +185,7 @@ class Boot(Console):
         hw = FakeHw()
         _guard(hw).skip_next()
         self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SKIP)
-        self.assertEqual((hw.adapters, hw.blinks), ([], []))
+        self.assertEqual((hw.adapters, hw.blinks, hw.armed), ([], [], []))
         self.assertEqual(app.prepare(hw, _guard(hw), PATH)[0], guard.START)
 
 
@@ -202,6 +203,7 @@ class Run(Console):
         self.assertEqual(hw.kbd, [-1, 3])
         self.assertEqual((hw.resets, hw.sleeps), (0, []))
         self.assertEqual(_guard(hw).crashes, 0)
+        self.assertEqual((hw.armed, hw.idle), ([watchdog.TIMEOUT_MS], True))  # the REPL fed
         self.assertTrue("SILY STOP" in self.lines())
         self.assertIsNone(asyncio.get_event_loop().get_exception_handler())
 
@@ -252,6 +254,7 @@ class Crash(Console):
         a.add_task(_after(100, _raise(ValueError("task"))))
         self.assertEqual(app.start(a), app.RESET)
         self.assertEqual(hw.sleeps, [app.CRASH_PAUSE_MS])
+        self.assertEqual((hw.idle, hw.unfed), (True, []))  # the pause fed by the timer
         self.assertEqual(hw.resets, 1)
         self.assertEqual(_guard(hw).crashes, 1)
         self.assertEqual(hw.adapters[0].modem.standbys, 1)
@@ -271,6 +274,7 @@ class Crash(Console):
         hw = FakeHw(adapter_error=RuntimeError("no SX1262"))
         self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), app.RESET)
         self.assertEqual((hw.resets, _guard(hw).crashes), (1, 1))
+        self.assertEqual((len(hw.armed), hw.idle, hw.unfed), (1, True, []))
 
     def test_safe_mode_after_three_crashes(self):
         _write()
@@ -289,6 +293,41 @@ class Crash(Console):
         hw.interrupt_sleep = True
         self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), app.STOPPED)
         self.assertEqual((hw.resets, _guard(hw).crashes), (0, 1))
+        self.assertTrue(hw.idle)  # the REPL fed
+
+
+class Watchdog(Console):
+    def test_fed_by_the_loop_while_running(self):
+        hw = FakeHw()
+        a = _app(hw)
+        a.feed_ms = 20
+        running = []
+        a.add_task(_after(150, lambda a: running.append((hw.idle, len(hw.wdt.feeds)))))
+        a.add_task(_after(300, lambda a: a.stop()))
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(hw.armed, [watchdog.TIMEOUT_MS])
+        idle, fed = running[0]
+        self.assertFalse(idle)  # its timer's feed off
+        self.assertTrue(fed >= 4, fed)  # every 20 ms
+        self.assertTrue(len(hw.wdt.feeds) >= fed + 4, (fed, hw.wdt.feeds))
+        self.assertTrue(hw.idle)  # the stop hands the feed to the timer
+
+    def test_watchdog_reset_counts_as_a_crash(self):
+        _write()
+        hw = FakeHw(fail=(100, KeyboardInterrupt()))
+        hw.cause = app.WATCHDOG_RESET
+        for n in range(1, guard.MAX_CRASHES):
+            self.assertEqual(app.boot(hw, PATH, monitor_ms=20, journal_dir=JOURNAL), app.STOPPED)
+            self.assertEqual(_guard(hw).crashes, n)
+        records, _ = journal.read(JOURNAL)
+        boots = [(r["reset"], r["crashes"]) for r in records if r["k"] == "boot"]
+        self.assertEqual(boots, [("watchdog", 1), ("watchdog", 2)])
+        self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SAFE)
+        self.assertEqual(len(hw.armed), guard.MAX_CRASHES - 1)  # not in safe mode
+        hw.cause = None
+        hw.on = True  # switched off and on: a new try
+        self.assertEqual(app.boot(hw, PATH, monitor_ms=20, journal_dir=JOURNAL), app.STOPPED)
+        self.assertEqual(_guard(hw).crashes, 0)
 
 
 def _kinds(records):
@@ -318,6 +357,7 @@ class Journal(Console):
         boot = records[0]
         self.assertEqual((boot["role"], boot["address"], boot["sf"]), ("gateway", 0, 7))
         self.assertEqual((boot["reset"], boot["crashes"], boot["b"]), ("hard", 0, 1))
+        self.assertEqual(boot["watchdog_s"], watchdog.TIMEOUT_MS // 1000)
         self.assertEqual(boot["random_restart"], 1)  # a fresh frame counter store
         self.assertTrue(0 <= boot["counter"] < a.stack.engine.security.counter.peek())
         minute = records[kinds.index("min")]

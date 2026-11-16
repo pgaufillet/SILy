@@ -7,7 +7,8 @@ decision rests on two values of a key-value store (``board.platform``'s
 ``set``, ``erase``, ``commit``):
 
 - the crash count: one more at each crash (the application then resets
-  the board); from `MAX_CRASHES` on, the box boots in safe mode (no
+  the board) and at each boot that follows a watchdog reset (a hang,
+  ``sily.watchdog``); from `MAX_CRASHES` on, the box boots in safe mode (no
   application, the REPL free); `STABLE_MS` of running clears it, and so
   does a power-on (switching the box off and on retries);
 - the skip flag: set from the REPL (``sily.hw.skip_next_boot``, used by
@@ -41,10 +42,13 @@ class Guard:
         value = self.store.get(_CRASHES)
         return value[0] if value else 0
 
-    def decide(self, power_on):
-        """Return `START`, `SKIP` or `SAFE` for this boot; power_on: it follows one."""
+    def decide(self, power_on, hung=False):
+        """Return `START`, `SKIP` or `SAFE` for this boot; power_on: it follows
+        one; hung: it follows a watchdog reset (a crash)."""
         if power_on:
             self.clear()
+        elif hung:
+            self.crashed()
         store = self.store
         if store.get(_SKIP) is not None:
             store.erase(_SKIP)

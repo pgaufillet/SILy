@@ -7,10 +7,11 @@ DIR holds the journal's segments (``NNNNNN.log``, ``sily.journal``). Runs
 on CPython 3 and on the MicroPython unix port. One paragraph per boot (the
 lines of one boot number, in order):
 
-- the box, version, reset cause and crash count of its ``boot`` record;
+- the box, version, reset cause (``watchdog``: the boot before hung), crash
+  count and hardware watchdog timeout of its ``boot`` record;
 - its span (first to last line) and how it ended: ``stop`` (Ctrl-C),
-  ``fatal`` (with the error) or no end line (power cut, or read while
-  running);
+  ``fatal`` (with the error) or no end line (power cut, a hang reset by
+  the watchdog, or read while running);
 - the time from boot to the first attachment, the parent changes and
   detaches (events of the 1 Hz poll), the failures of own messages;
 - per link of the minute records' neighbour rows: the margin (dB) min,
@@ -253,19 +254,19 @@ def report(s):
     lines = []
     b = s["record"]
     if b is not None:
-        lines.append(
-            "boot %s: %s %s (%s) at %s, version %s, reset %s, crashes %s"
-            % (
-                s["boot"],
-                b.get("role"),
-                b.get("name"),
-                b.get("address"),
-                "SF%s" % b.get("sf"),
-                b.get("version"),
-                b.get("reset"),
-                b.get("crashes"),
-            )
+        line = "boot %s: %s %s (%s) at %s, version %s, reset %s, crashes %s" % (
+            s["boot"],
+            b.get("role"),
+            b.get("name"),
+            b.get("address"),
+            "SF%s" % b.get("sf"),
+            b.get("version"),
+            b.get("reset"),
+            b.get("crashes"),
         )
+        if b.get("watchdog_s") is not None:
+            line += ", watchdog %s s" % b["watchdog_s"]
+        lines.append(line)
     else:
         lines.append("boot %s: no boot record" % s["boot"])
     if s["end"] == "fatal":
@@ -273,7 +274,7 @@ def report(s):
     elif s["end"] == "stop":
         end = "stopped"
     else:
-        end = "no end line (power cut, or read while running)"
+        end = "no end line (power cut, hang, or read while running)"
     lines.append(
         "  span %s, %d lines, %d minute records; %s"
         % (_duration(s["span_s"]), s["lines"], s["minutes"], end)

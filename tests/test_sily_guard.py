@@ -65,6 +65,15 @@ class Decisions(unittest.TestCase):
         self.assertEqual(self.guard.decide(True), START)
         self.assertEqual(self.guard.decide(False), START)
 
+    def test_watchdog_reset_counts_a_crash(self):
+        self.assertEqual(self.guard.decide(False, hung=True), START)
+        self.assertEqual(self.guard.crashes, 1)
+        self.assertEqual(self.guard.decide(False), START)  # one count per reset
+        self._crash(MAX_CRASHES - 2)
+        self.assertEqual(self.guard.decide(False, hung=True), SAFE)
+        self.assertEqual(self.guard.crashes, MAX_CRASHES)
+        self.assertEqual(self.guard.decide(True), START)  # a power-on retries
+
     def test_clear(self):
         self._crash(MAX_CRASHES)
         self.guard.skip_next()

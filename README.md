@@ -17,6 +17,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
 
 - `src/` — what goes on the board's filesystem:
   - `main.py` — entry point run at boot: starts the application;
+  - `boot.py` — run at every boot and soft reset, before `main.py`: after
+    a soft reset, feeds the hardware watchdog again (`sily/watchdog.py`);
   - `sily/` — the application (below), the bench console (`sily/bench.py`)
     and the per-box hardware check (`sily/boxcheck.py`, `make box-check`):
     - `app.py` — boot decision, safe mode, the application's tasks, Ctrl-C
@@ -29,6 +31,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
       by the application and the bench;
     - `hw.py` — the board's hardware as the application takes it (over
       `board/`);
+    - `watchdog.py` — the hardware watchdog: armed and fed by the
+      application, fed by a hardware timer once it stops (*Application*);
     - `radio.py` — binding of the SX1262 adapter to the mesh radio;
     - `journal.py` — the field journal: JSON lines in size-bounded
       segments, sync policy, read-back (also on CPython);
@@ -381,6 +385,21 @@ At boot the board prints `SILY <version>`; then:
   LED off, `SILY STOP`) and leaves the REPL; any other error is a crash:
   `SILY FATAL` with its traceback, then a reset 5 s later (Ctrl-C in
   between keeps the REPL).
+
+The application arms the ESP32's hardware watchdog (`src/sily/watchdog.py`,
+20 s) and feeds it from its asyncio loop every second: a box whose loop
+stops turning (a task that never yields, a call blocked in C, a frozen
+chip) resets 20 s later instead of staying frozen. The next boot's record
+gives the reset cause `watchdog`, counted as a crash (safe mode after 3
+without 10 minutes of stable run, as above). The watchdog cannot be
+disarmed and survives a soft reset: once the application stops (Ctrl-C,
+`make journal`, a crash's pause), a hardware timer feeds it instead,
+whose callback runs at the REPL, so that the REPL and every host tool
+(`make deploy`, `journal`, `configure`, `box-check`, `tools/bench.py`)
+work as before; after a soft reset (`mpremote` without `resume`), `boot.py`
+starts that feed again. Safe mode and a skipped boot do not arm it (a soft
+reset there arms it with that feed: the same REPL). A hang at the REPL
+still resets the box.
 
 Each box keeps a field journal in `/journal/` (`src/sily/journal.py`,
 records in `src/sily/record.py`; kept by `make deploy`): JSON lines in

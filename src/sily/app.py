@@ -20,8 +20,15 @@ switched off and on retries after crashes (a power-on clears the count).
 Any other exception (a task, the runner, the node's assembly such as a
 silent SX1262) is a crash: ``SILY FATAL`` with the traceback, the crash
 counted, the radio and LED stopped, then after `CRASH_PAUSE_MS` (Ctrl-C
-works: the board stays at the REPL) the board resets. There is no hardware
-watchdog: it would also reset a board stopped at the REPL.
+works: the board stays at the REPL) the board resets.
+
+A hang is caught by the hardware watchdog (``sily.watchdog``), which the
+application arms at its start (`watchdog.TIMEOUT_MS`, in the ``boot``
+record) and feeds from a task of its loop; safe mode and a skipped boot
+never arm it. `App.close` hands the feed to a hardware timer: the REPL and
+the host tools stay usable after a stop, and during a crash's pause. A
+loop that stops turning resets the box; the next boot's reset cause is
+``watchdog``, counted as a crash by the start guard.
 
 `App` runs the node (``sily.stack``) and the tasks around it: the radio
 adapter, a monitor polling the mesh state once a second (no application
@@ -70,7 +77,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, display, guard, journal, nodes, record, traffic, turn, web
+from sily import config, display, guard, journal, nodes, record, traffic, turn, watchdog, web
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -81,6 +88,7 @@ SAFE_BLINK_MS = 100
 WRITER_MS = 200  # period of the journal writer's look at the queue
 QUEUE_ITEMS = 64  # callback items waiting for the writer
 BOOT_KEY = "boots"  # boot number, NVS namespace guard.NAMESPACE
+WATCHDOG_RESET = "watchdog"  # hw.reset_cause() after a reset by the watchdog
 
 # Kinds of the queued items.
 _REPORT = 0  # (_REPORT, t, port, origin, report)
@@ -129,7 +137,7 @@ class App:
     count `stable_ms` of running clears (None: no stability timer);
     monitor_ms: period of the monitor; journal_dir, fs: the journal's
     directory and file system (``sily.journal``); web_port: the web
-    server's port (``sily.web``).
+    server's port (``sily.web``); feed_ms: period of the watchdog's feed.
     """
 
     def __init__(
@@ -142,6 +150,7 @@ class App:
         journal_dir=journal.DIR,
         fs=None,
         web_port=web.PORT,
+        feed_ms=watchdog.FEED_MS,
     ):
         self.cfg = cfg
         self.hw = hw
@@ -151,6 +160,7 @@ class App:
         self.journal_dir = journal_dir
         self.fs = fs
         self.web_port = web_port
+        self.feed_ms = feed_ms
         self.clock = Clock()
         self.stack = None
         self.tap = None
@@ -170,6 +180,7 @@ class App:
         self.nodes = None  # nodes.Nodes on the gateway: the reports received
         self.ap = None  # the access point (sily.hw.access_point), or None
         self.web = None  # web.Web once started, or None
+        self.wdt = None  # the hardware watchdog once armed (sily.watchdog)
         self.failure_listeners = []  # fn(dest, port, seq, reason), outside the step
         self._factories = []
         self._closed = False
@@ -341,11 +352,20 @@ class App:
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(self._task_error)
         try:
+            self.wdt = self.hw.arm_watchdog(watchdog.TIMEOUT_MS)
+            asyncio.create_task(self._feed())  # from the first wait on
             self.open_journal()
             self.build()
             stack = self.stack
             crashes = 0 if self.guard is None else self.guard.crashes
-            fields = record.boot(self.cfg, stack, self.hw.reset_cause(), crashes, sily.__version__)
+            fields = record.boot(
+                self.cfg,
+                stack,
+                self.hw.reset_cause(),
+                crashes,
+                sily.__version__,
+                watchdog.TIMEOUT_MS,
+            )
             self.journal.write(self.clock.now(), "boot", fields)
             self.journal.sync()
             self.display = self._display()
@@ -475,6 +495,12 @@ class App:
         await asyncio.sleep_ms(self.stable_ms)
         self.guard.stable()
 
+    async def _feed(self):
+        wdt = self.wdt
+        while True:
+            wdt.feed()
+            await asyncio.sleep_ms(self.feed_ms)
+
     def status(self):
         """Return the state of the box as one dict (display, web page)."""
         cfg = self.cfg
@@ -549,14 +575,17 @@ class App:
         }
 
     def close(self, kind="stop", fields=None):
-        """Stop the node: pending items and a last line of kind (None: none)
-        journaled, the journal synced and closed, runner stopped, radio in
-        standby, LED and display off, web server stopped, access point off.
-        Idempotent."""
+        """Stop the node: the watchdog fed by its timer from now on (first:
+        the cleanup, a crash's pause and the REPL after them), pending items
+        and a last line of kind (None: none) journaled, the journal synced
+        and closed, runner stopped, radio in standby, LED and display off,
+        web server stopped, access point off. Idempotent."""
         if self._closed:
             return
         self._closed = True
         try:
+            if self.wdt is not None:
+                self.hw.idle_watchdog()
             j = self.journal
             if j is not None:
                 try:
@@ -592,7 +621,7 @@ def prepare(hw, start_guard, path=CONFIG_PATH):
     checked configuration (None in safe mode); reasons: the safe mode's,
     ``field: problem`` strings.
     """
-    decision = start_guard.decide(hw.power_on())
+    decision = start_guard.decide(hw.power_on(), hw.reset_cause() == WATCHDOG_RESET)
     if decision == guard.SKIP:
         return decision, None, []
     reasons = []

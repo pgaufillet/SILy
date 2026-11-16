@@ -95,6 +95,21 @@ the lines that changed, the asyncio loop free between two rows. The
 controller keeps its image while powered: the application powers it off at
 its stop and crash; a power-on starts it off.
 
+## Watchdog
+
+`machine.WDT` is the ESP-IDF task watchdog (`machine.WDT(0, timeout_ms)`;
+MicroPython 1.29, ESP-IDF 5.5). Measured on a T3S3: once armed it cannot
+be disarmed; it survives a soft reset (nothing feeding it, the board reset
+one timeout later, with `machine.reset_cause()` `WDT_RESET`); a
+`machine.Timer` callback calling `feed()` keeps it fed during a
+`time.sleep_ms` and at the idle REPL (scheduled callbacks run there). A
+soft reset runs `boot.py` but, from the raw REPL (`mpremote` without
+`resume`, `tools/bench.py`), not `main.py`, and deletes the hardware
+timers (their finaliser); a hardware reset (power, `machine.reset`, the
+watchdog's own) clears the watchdog. Hardware timers: 0 for the safe
+mode's blink (`src/sily/hw.py`), 1 for the watchdog's feed at the REPL
+(`src/sily/watchdog.py`, which gives the timeout and the feeds).
+
 ## Per-box procedure
 
 The box closed, its switch on (battery connected), its USB to the host

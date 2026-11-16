@@ -126,6 +126,15 @@ class Summary(unittest.TestCase):
             lines,
         )
 
+    def test_boot_after_a_watchdog_reset(self):
+        boot = {"b": 6, "t": 0, "k": "boot", "role": "node", "address": 3, "name": "box3"}
+        boot.update(sf=7, version="0.2", reset="watchdog", crashes=1, watchdog_s=20)
+        lines = journal_summary.report(journal_summary.summarise([boot]))
+        self.assertEqual(
+            lines[0],
+            "boot 6: node box3 (3) at SF7, version 0.2, reset watchdog, crashes 1, watchdog 20 s",
+        )
+
     def test_wifi_failure(self):
         boot = {"b": 4, "t": 0, "k": "boot", "role": "node", "ap": "SILy-box3"}
         failed = {"b": 4, "t": 40, "k": "ev", "e": "wifi", "err": "OSError(5,)"}

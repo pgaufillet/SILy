@@ -19,7 +19,10 @@ A thin bundle over ``board.t3s3``, ``board.platform`` and
 - `reset()`, `sleep_ms(ms)`, `kbd_intr(char)`: ``machine.reset``,
   ``time.sleep_ms``, ``micropython.kbd_intr``;
 - `blink(period_ms)`: the LED toggled by a hardware timer every period_ms,
-  until the next reset (safe mode: it goes on at the REPL).
+  until the next reset (safe mode: it goes on at the REPL);
+- `arm_watchdog(timeout_ms)`, `idle_watchdog()`: the hardware watchdog
+  (``sily.watchdog``), armed and fed (``feed``) by the application while
+  it runs, fed by a hardware timer once it stops.
 
 From the REPL or a host tool: `skip_next_boot()` (the next boot returns to
 the REPL at once, ``tools/bench.py`` before a hard reset) and
@@ -35,9 +38,10 @@ import micropython
 from board import t3s3
 from board.platform import HardwareRandom, NvsStorage, RtcRetained
 from board.sx1262 import Sx1262
+from sily import watchdog
 from sily.guard import NAMESPACE, Guard
 
-BLINK_TIMER = 0  # hardware timer of the safe mode's blink
+BLINK_TIMER = 0  # hardware timer of the safe mode's blink (1: the watchdog's)
 
 RESET_CAUSES = {
     machine.PWRON_RESET: "power",
@@ -52,6 +56,8 @@ _blinker = None
 
 sleep_ms = time.sleep_ms
 kbd_intr = micropython.kbd_intr
+arm_watchdog = watchdog.arm
+idle_watchdog = watchdog.idle
 
 
 def adapter(lora_cfg):

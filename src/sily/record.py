@@ -6,7 +6,8 @@ since the board's boot) and ``k``, its kind:
 - ``boot``: `boot` (version, reset cause, crash count, role, address,
   name, SF, power, gain, key fingerprint, presence period, next frame
   counter, ``random_restart``, noise floor, free heap, ``ap`` the SSID of
-  the access point configured or null);
+  the access point configured or null, ``watchdog_s`` the hardware
+  watchdog's timeout);
 - ``min``, every ``journal.minute_s``: the pieces of `minute` and the
   application's figures (``bat`` battery mV, ``heap`` free bytes, ``jw``
   and ``js`` the longest journal write and sync in ms since the last
@@ -265,7 +266,7 @@ def _noise(adapter):
     return stats, (None if stats is None else stats.get("noise"))
 
 
-def boot(cfg, stack, reset, crashes, version):
+def boot(cfg, stack, reset, crashes, version, watchdog_ms):
     """Return the fields of the ``boot`` record of configuration cfg and its stack."""
     engine = stack.engine
     counter = engine.security.counter
@@ -289,6 +290,7 @@ def boot(cfg, stack, reset, crashes, version):
         "noise": noise,
         "heap": stack.heap_node,
         "ap": None if ap is None else ap_ssid(ap["prefix"], cfg["name"]),
+        "watchdog_s": watchdog_ms // 1000,
     }
 
 
