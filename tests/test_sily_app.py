@@ -16,8 +16,8 @@ import unittest
 from test_sily_stack import FakeHw, peer_frame
 
 from mesh.frame import ROOT
-from mesh.ports import PRESENCE
-from mesh.reports import Presence
+from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
+from mesh.reports import FIRST_REPORT, NodeInfo, Presence
 from sily import app, guard, journal, record, traffic
 from sily.config import check
 
@@ -363,6 +363,7 @@ class Journal(Console):
         app.start(a)
         kinds = _kinds(journal.read(JOURNAL)[0])
         self.assertEqual(kinds[-2:], ["rp", "stop"])
+        self.assertEqual([r["address"] for r in a.mesh()["nodes"]], [9])
 
     def test_presence_extension_carries_the_battery(self):
         hw = FakeHw()
@@ -396,6 +397,56 @@ class Journal(Console):
         self.assertEqual(s["neighbours"], [])
         self.assertEqual(s["counters"]["journal_lines"], a.journal.lines - 1)  # before stop
         self.assertTrue("tx_frames" in s["counters"])
+
+
+class Mesh(Console):
+    """The gateway's view of the mesh (``sily.nodes``), fed by the journal writer."""
+
+    def test_reports_reach_the_view(self):
+        hw = FakeHw()
+        ext = record.encode_extension(3920, 1)
+        seen = []
+
+        def deliver(a):
+            on_report = a.stack.routing.on_report
+            on_report(PRESENCE, 9, Presence(FIRST_REPORT, ext, parent=0), None)
+            on_report(PRESENCE, 12, Presence(0, b"", parent=9), None)
+            on_report(TOPOLOGY, 9, [(0, 11, True, 97), (12, -2, False, 80)], None)
+            on_report(NODE_INFO, 9, NodeInfo(b"\x00" * 6, 0x0003, "relay"), None)
+            seen.append(len(a.nodes))  # inside the step: queued only
+
+        def look(a):
+            view = a.mesh()
+            seen.append((view["period_s"], view["beyond"], list(view["nodes"])))
+
+        a = _app(hw, presence_s=20)
+        a.add_task(_after(50, deliver))
+        a.add_task(_after(400, look))
+        a.add_task(_after(450, lambda a: a.stop()))
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(seen[0], 0)
+        period, beyond, rows = seen[1]
+        self.assertEqual((period, beyond), (20, 0))
+        self.assertEqual([r["address"] for r in rows], [9, 12])
+        relay, leaf = rows
+        self.assertEqual(
+            (relay["name"], relay["firmware"], relay["state"]), ("relay", "0.3", "ok")
+        )
+        self.assertEqual((relay["parent"], relay["hops"], relay["restarts"]), (0, 1, 1))
+        self.assertEqual(
+            (relay["battery"], relay["mode"], relay["age_s"]), (3920, "deployment", 0)
+        )
+        self.assertEqual(relay["links"], [[0, 11, 1, 97], [12, -2, 0, 80]])
+        self.assertEqual((leaf["parent"], leaf["hops"], leaf["battery"]), (9, 2, None))
+
+    def test_node_has_no_view(self):
+        hw = FakeHw()
+        seen = []
+        a = _app(hw, role="node", address=3)
+        a.add_task(_after(50, lambda a: seen.append(a.mesh())))
+        a.add_task(_after(100, lambda a: a.stop()))
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(seen, [None])
 
 
 class Traffic(Console):

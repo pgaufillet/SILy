@@ -42,10 +42,12 @@ new segment at each boot (boot number counted in the NVS namespace
 ``journal.minute_s`` (the battery read then, and cached for the presence
 extension), the ``ev`` events of the monitor's polls, the failures of own
 messages and, on the gateway, the reports received; a ``stop`` or
-``fatal`` line ends it. The minute record carries the test traffic's
-figures (``tt``) when there are some, and the display's longest row write
-and refresh (``ow``, ``or``) when it wrote. The journal is synced after the boot
-record, every ``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
+``fatal`` line ends it. On the gateway, the writer also keeps the reports
+in the view of the mesh (``sily.nodes``, `App.mesh`, for the web page).
+The minute record carries the test traffic's figures (``tt``) when there
+are some, and the display's longest row write and refresh (``ow``,
+``or``) when it wrote. The journal is synced after the boot record, every
+``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
 handler, failure callback, presence extension) run inside its step, on the
 root's reply path: they only queue an item or return cached bytes; a task
 formats and writes, yielding between items.
@@ -58,7 +60,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, display, guard, journal, record, traffic
+from sily import config, display, guard, journal, nodes, record, traffic
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -151,6 +153,7 @@ class App:
         self.error = None  # the first exception of a task
         self.traffic = None  # traffic.Receiver (gateway), traffic.Sender or None
         self.display = None  # display.Display, or None (mode off, absent)
+        self.nodes = None  # nodes.Nodes on the gateway: the reports received
         self.failure_listeners = []  # fn(dest, port, seq, reason), outside the step
         self._factories = []
         self._closed = False
@@ -205,6 +208,8 @@ class App:
             self.led = hw.led()
             self.led.value(0)
         self.traffic = self._traffic()
+        if gateway:
+            self.nodes = nodes.Nodes(self.stack.routing.dodag.info.presence_s)
 
     def _traffic(self):
         """Set up the test traffic (module documentation); return it or None."""
@@ -317,6 +322,8 @@ class App:
         else:
             kind, fields = record.report(item[2], item[3], item[4])
             self.journal.write(item[1], kind, fields)
+            if self.nodes is not None:
+                self.nodes.update(item[1], item[2], item[3], item[4])
 
     async def _writer(self):
         queue = self.queue
@@ -448,6 +455,23 @@ class App:
         if self.traffic is not None:
             out["traffic"] = self.traffic.status()
         return out
+
+    def mesh(self):
+        """Return the gateway's view of the mesh (web page), None on a node.
+
+        Keys: ``period_s`` (the root's presence period), ``beyond`` (reports
+        of origins beyond the bound) and ``nodes``, a generator of one dict
+        per node by address (`sily.nodes.Nodes.rows`: the caller may let
+        other tasks run between them).
+        """
+        view = self.nodes
+        if view is None:
+            return None
+        return {
+            "period_s": view.period_s,
+            "beyond": view.beyond,
+            "nodes": view.rows(self.clock.now),
+        }
 
     def close(self, kind="stop", fields=None):
         """Stop the node: pending items and a last line of kind (None: none)
