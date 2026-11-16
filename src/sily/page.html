@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang=en>
+<head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<link rel=icon href="data:,">
+<title>SILy</title>
+<style>
+body{font:15px/1.4 system-ui,sans-serif;margin:8px;color:#111;background:#fff}
+h1{font-size:18px;margin:0}
+h2{font-size:15px;margin:14px 0 4px}
+p{margin:4px 0}
+#up{color:#555}
+#up.bad{color:#fff;background:#c00;padding:2px 6px}
+.w{overflow-x:auto}
+table{border-collapse:collapse;font-size:13px}
+td,th{padding:2px 6px;text-align:right;white-space:nowrap;border-bottom:1px solid #ddd}
+th{background:#eee}
+tr>:first-child{text-align:left}
+tr.late td{background:#fd8}
+tr.silent td{color:#999}
+pre{font-size:13px;margin:0;overflow-x:auto}
+</style>
+</head>
+<body>
+<h1 id=hd>SILy</h1>
+<p id=sub></p>
+<p id=up>waiting for the box</p>
+<div id=gw></div>
+<div id=own></div>
+<script>
+"use strict";
+const $ = i => document.getElementById(i);
+const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, c => "&#" + c.charCodeAt(0) + ";");
+const dash = v => (v == null ? "-" : v);
+const tenths = v => (v == null ? "-" : (v / 10).toFixed(1));
+const volts = mv => (mv == null ? "-" : (mv / 1000).toFixed(2) + " V");
+const ago = s => (s == null ? "-" : s < 120 ? s + " s" : s < 7200 ? Math.floor(s / 60) + " min" : Math.floor(s / 3600) + " h");
+const two = n => String(n).padStart(2, "0");
+const uptime = s => (s == null ? "-" : Math.floor(s / 3600) + ":" + two(Math.floor(s / 60) % 60) + ":" + two(s % 60));
+const row = (cells, cls) => "<tr" + (cls ? " class=" + cls : "") + "><td>" + cells.map(esc).join("<td>");
+const table = (head, rows) => '<div class="w"><table><tr><th>' + head.join("<th>") + rows.join("") + "</table></div>";
+const FLAGS = [[4, "D"], [2, "Q"], [16, "R"], [32, "A"], [64, "K"], [1, "B"]];
+const flags = f => (f == null ? "-" : FLAGS.filter(x => f & x[0]).map(x => x[1]).join(""));
+const db = m => (m == -128 ? "?" : m);
+const label = n => n.address + (n.name ? " " + n.name : "");
+const links = l => l.map(e => (e[2] ? "*" : "") + e[0] + ":" + db(e[1]) + "/" + e[3] + "%").join(" ");
+
+function header(b) {
+  $("hd").textContent = document.title = (b.role == "gateway" ? "Gateway " : "Node ") + label(b);
+  $("sub").textContent = [volts(b.battery), dash(b.mode), "up " + uptime(b.time_s), "boot " + dash(b.boot)].join(" · ");
+}
+
+// The gateway's view: the parent tree, then one row per node.
+function mesh(b, m) {
+  const nodes = m.nodes || [], kids = {}, tt = {}, rank = {}, seen = {};
+  for (const n of nodes) (kids[n.parent] = kids[n.parent] || []).push(n);
+  for (const t of (b.traffic || {}).nodes || []) tt[t.address] = t;
+  for (const n of b.neighbours || []) rank[n.address] = n.rank;
+  const line = n => {
+    let s = label(n);
+    if (n.state != "ok") s += " [" + n.state + " " + ago(n.age_s == null ? n.heard_s : n.age_s) + "]";
+    s += " " + volts(n.battery);
+    const up = n.links.find(e => e[0] == n.parent);
+    if (up) s += " up " + db(up[1]) + " dB " + up[3] + "%";
+    if (n.parent_changes) s += " " + n.parent_changes + " parent changes";
+    return s;
+  };
+  const lines = [label(b)];
+  const walk = (a, depth) => {
+    for (const n of kids[a] || []) {
+      if (seen[n.address]) continue;
+      seen[n.address] = 1;
+      lines.push("  ".repeat(depth) + line(n));
+      walk(n.address, depth + 1);
+    }
+  };
+  walk(0, 1);
+  const lost = nodes.filter(n => !seen[n.address]);
+  if (lost.length) lines.push("?");
+  for (const n of lost) lines.push("  " + line(n) + " (parent " + dash(n.parent) + ")");
+  const rows = nodes.map(n => {
+    const t = tt[n.address];
+    return row([label(n), n.state + " " + ago(n.age_s), ago(n.heard_s), dash(n.parent), dash(n.hops),
+      dash(rank[n.address]), volts(n.battery), dash(n.mode), flags(n.flags),
+      n.links.length ? links(n.links) + " (" + ago(n.topology_age_s) + ")" : "-",
+      t ? t.received + "/" + t.expected : "-",
+      t && t.delivery != null ? (100 * t.delivery).toFixed(1) : "-",
+      t ? dash(t.median_ms) + "/" + dash(t.p90_ms) + "/" + dash(t.max_ms) : "-",
+      n.presences + "/" + n.restarts,
+      n.parent_changes + (n.parent_age_s == null ? "" : " (" + ago(n.parent_age_s) + ")"),
+      dash(n.firmware)], n.state);
+  });
+  return "<h2>Mesh</h2><p>" + nodes.length + " nodes, presence every " + m.period_s + " s" +
+    (m.beyond ? ", " + m.beyond + " reports beyond the bound" : "") + "</p>" +
+    "<pre>" + esc(lines.join("\n")) + "</pre><h2>Nodes</h2>" +
+    table(["node", "state", "heard", "parent", "hops", "rank", "battery", "mode", "flags",
+      "links adr:dB/%", "test rx/exp", "deliv %", "ms med/p90/max", "presences/restarts",
+      "parent chg", "fw"], rows) +
+    "<p>D duty > 80 %, Q queue overflow, R rank errors, A address conflict, " +
+    "K authentication failures, B first report since boot. * parent set.</p>";
+}
+
+// Any box's own view.
+function box(b) {
+  const c = b.counters || {}, out = [];
+  const items = [b.attached ? (b.grounded === false ? "attached (float)" : "attached") : "DETACHED",
+    "parent " + dash(b.parent), "rank " + (b.rank == 255 ? "-" : dash(b.rank)),
+    "duty " + (c.duty_budget_ms ? (100 * c.duty_ms / c.duty_budget_ms).toFixed(1) : "-") + " % of budget",
+    "queue " + dash(c.queue), "heap " + Math.round(b.heap / 1024) + " kB",
+    "journal " + dash(c.journal_lines) + " lines" + (c.journal_errors ? ", " + c.journal_errors + " errors" : ""),
+    "frames " + dash(c.tx_frames) + " sent, " + dash(c.rx_frames) + " received"];
+  out.push("<h2>This box</h2><p>" + esc(items.join(" · ")) + "</p>");
+  const key = n => (n.address == b.parent ? 0 : n.parent ? 1 : 2) * 65536 + n.address;
+  const nb = (b.neighbours || []).slice().sort((x, y) => key(x) - key(y));
+  out.push("<h2>Neighbours</h2>" + (nb.length ? table(
+    ["adr", "rank", "dB", "last dB", "ETX", "in %", "age", "RSSI", "SNR"],
+    nb.map(n => row([(n.address == b.parent ? "*" : n.parent ? "+" : "") + n.address,
+      n.rank == 255 ? "-" : dash(n.rank), tenths(n.margin), tenths(n.last_margin),
+      n.etx == null ? "-" : (n.etx / 128).toFixed(2), dash(n.d_in), ago(n.age_s), dash(n.rssi),
+      tenths(n.snr_mean)]))) + "<p>* preferred parent, + parent set</p>" : "<p>none heard</p>"));
+  if (b.foreign && b.foreign[0]) out.push("<p>Foreign sources: " + b.foreign[0] + ", " + b.foreign[1] + " frames</p>");
+  const t = b.traffic;
+  if (t && t.role == "sender") {
+    out.push("<h2>Test traffic</h2><p>" + esc("every " + t.period_s + " s, " + t.size + " B · submitted " +
+      t.submitted + " · accepted " + t.accepted + " · refused " + t.refused + " · failed " + t.failed) + "</p>");
+  } else if (t) {
+    out.push("<p>" + esc("Test traffic: " + t.nodes.length + " nodes, malformed " + t.malformed +
+      ", items lost " + t.items_lost + ", nodes beyond " + t.nodes_beyond) + "</p>");
+  }
+  if (b.web) out.push("<p>" + esc("Web: " + Object.keys(b.web).map(k => k + " " + b.web[k]).join(", ")) + "</p>");
+  return out.join("");
+}
+
+// Polling: the next request 5 s after the answer, none while hidden.
+const start = Date.now();
+let last = 0, error = "", next = null;
+
+function tick() {
+  const s = Math.round((Date.now() - (last || start)) / 1000), e = $("up"), bad = s >= 20;
+  e.className = bad ? "bad" : "";
+  e.textContent = bad ? "no answer for " + s + " s" + (error ? " (" + error + ")" : "") :
+    last ? "updated " + s + " s ago" : "waiting for the box";
+}
+
+function poll() {
+  if (document.hidden) return (next = null);
+  next = true;
+  const c = new AbortController(), k = setTimeout(() => c.abort(), 4000);
+  fetch("/status.json", {cache: "no-store", signal: c.signal})
+    .then(r => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+    .then(j => {
+      const b = j.box;
+      header(b);
+      $("gw").innerHTML = j.mesh ? mesh(b, j.mesh) : "";
+      $("own").innerHTML = box(b);
+      last = Date.now();
+      error = "";
+    })
+    .catch(e => (error = e.name == "AbortError" ? "timeout" : String(e.message || e)))
+    .finally(() => (clearTimeout(k), next = setTimeout(poll, 5000), tick()));
+}
+
+document.addEventListener("visibilitychange", () => document.hidden || next !== null || poll());
+setInterval(tick, 1000);
+poll();
+</script>
+</body>
+</html>
