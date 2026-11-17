@@ -456,6 +456,123 @@ class Presences(unittest.TestCase):
         self.assertTrue(line.of(PRESENCE, N)[-1][0] > healed)
 
 
+class PresenceSequence(unittest.TestCase):
+    """§9, §11: a node's own presence carries the root sequence it holds when
+    the presence goes on air, as the frame header carries the DODAG version
+    of that instant; the presences it forwards in the same frame carry none
+    (mode 1, their parent restored). R's next presence, bundled with N's,
+    is held in R's queue (no medium access, as in a reply window, §8) while
+    R takes another sequence."""
+
+    HOLD = 8 * PERIOD // 10  # beyond the longest gap between root beacons (0.55 period)
+
+    def hold(self, line):
+        """Queue R's next presence with a presence of N held for it and keep
+        them queued for HOLD; return (the presence message, the sequence it
+        was queued with, {frame counter: (sequence, version) R held when
+        the frame went on air, its messages})."""
+        relay = line.relay
+        e = relay.engine
+        rep = relay.routing.reporter
+        dodag = relay.routing.dodag
+        on_air = {}
+        base = e.sent
+
+        def sent(sel, counter, now):
+            on_air[counter] = ((dodag.sequence, e.dodag_version), list(sel.messages))
+            base(sel, counter, now)
+
+        e.sent = sent
+
+        def forwarded():
+            return e.queue.select(lambda m: m.port == PRESENCE and m.origin == N)
+
+        for _ in range(4):
+            line.net.run(rep.presence_at - 1)
+            if forwarded():
+                break
+            line.net.run(rep.presence_at + 1000)
+        self.assertTrue(forwarded())
+        at = rep.presence_at
+        e._defer(at + self.HOLD)
+        line.net.run(at + 1)
+        self.assertTrue(rep._presence is not None)
+        msg = rep._presence[1]
+        queued = dodag.sequence
+        self.assertEqual(msg.payload[0], queued)
+        return msg, queued, on_air
+
+    def on_air(self, line, since, msg, on_air):
+        """Return (header, own presence, forwarded presences, (sequence,
+        version) held) of R's first frame since since carrying its own
+        presence, msg."""
+        for t, h, msgs, _ in line.frames(R):
+            own = [m for m in msgs if m.port == PRESENCE and m.mode == FIRST_HOP]
+            if t > since and own:
+                held, sent = on_air[h.counter]
+                self.assertTrue(any(m is msg for m in sent))
+                fwd = [bytes(m.payload) for m in msgs if m.port == PRESENCE and m.mode == UPWARD]
+                return h, decode_presence(own[0].payload, parent=False), fwd, held
+        raise AssertionError("no presence of R on air")
+
+    def test_newer_sequence_while_queued(self):
+        line = Line(31)
+        line.formed()
+        start = line.net.now
+        msg, queued, on_air = self.hold(line)
+        line.net.run(line.net.now + self.HOLD + PERIOD // 5)
+        h, own, fwd, (seq, version) = self.on_air(line, start, msg, on_air)
+        # A root beacon came meanwhile: R holds a newer sequence, and its
+        # presence carries it.
+        self.assertTrue((seq - queued) & 0xFF in range(1, 4), (queued, seq))
+        self.assertEqual(own.sequence, seq)
+        # N's presence, forwarded in the same frame: its parent field, no sequence.
+        self.assertTrue(fwd)
+        self.assertEqual(set(p[:2] for p in fwd), set((b"\x10\x00",)))
+        self.assertEqual(line.of(PRESENCE, N)[-1][1].parent, R)
+
+    def test_new_version_while_queued(self):
+        # The root issues a new version from an older sequence (as a
+        # restarted root does, §9): R adopts it, its sequence reset, while
+        # its presence waits. R then sends a presence at once (a new
+        # preferred parent for the selection, §9), up to CHANGE_SLOTS slots
+        # later: the one queued may go on air first, here at once. The frame
+        # of the new version carries the new version's sequence: the former
+        # one, newer in serial order, would tell the root that its own
+        # version has a newer sequence elsewhere.
+        line = Line(32)
+        line.formed()
+        start = line.net.now
+        msg, queued, on_air = self.hold(line)
+        relay = line.relay
+        e = relay.engine
+        rep = relay.routing.reporter
+        base = rep.parent_changed
+
+        def parent_changed(now):
+            base(now)
+            rep.parent_changed = base
+            rep.presence_at = now + PERIOD // 10  # the one queued goes on air first
+            e._reply_end = None
+            e.access_at(now)
+
+        rep.parent_changed = parent_changed
+        root = line.root.routing.dodag
+        old = root.version
+        first = (queued - 64) & 0xFF
+        root._seq = first  # the restarted root's
+        root.set_version(old + 1, line.net.now)
+        line.root.node.wake()
+        line.net.run(line.net.now + self.HOLD + PERIOD // 5)
+        self.assertEqual(relay.routing.dodag.version, old + 1)
+        h, own, fwd, (seq, version) = self.on_air(line, start, msg, on_air)
+        self.assertEqual((h.dodag_version, version), (old + 1, old + 1))
+        self.assertTrue((seq - first) & 0xFF < 4, (queued, first, seq))
+        self.assertEqual(own.sequence, seq)
+        self.assertTrue(fwd)
+        self.assertEqual(set(p[:2] for p in fwd), set((b"\x10\x00",)))
+
+
 class Bundling(unittest.TestCase):
     """§7, §16: a relay sends the reports of its children with its own
     presence, one bundle per period, but forwards at once the presence of a

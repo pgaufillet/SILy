@@ -32,7 +32,11 @@ and driven by its `mesh.dodag.Dodag`:
   together; it also restarts the period. Sent only while attached, in mode 6 to the preferred
   parent (18 B with a 1-byte extension, §11 sizes), always in mode 6, also
   in a frame with a bundle of forwarded reports, carrying the root sequence
-  the node holds (``Dodag.sequence``) when it is generated; class 0
+  the node holds (``Dodag.sequence``) when it goes on air: the queued
+  presence's sequence byte is refreshed at every step, before the
+  transmit path (the frame header's DODAG version is the one of that
+  instant: a node adopting a version while its presence waits would
+  otherwise send the new version with the former one's sequence); class 0
   replace by newer (§12). Flags: bit 0 first report since boot; bit 1 queue overflow,
   bit 2 duty-cycle use above 80 % of the budget (seen by the link engine at
   each charge, ``duty_high``, or at the report), bit 4 rank errors (§9
@@ -577,6 +581,12 @@ class Reporter:
 
     def _tick(self, now):
         self._base_tick(now)
+        entry = self._presence
+        if entry is not None:
+            # The queued presence carries the sequence held when it goes on
+            # air (§9): the engine runs the transmit path after this tick.
+            # Attached when it was generated, the node holds a sequence.
+            entry[1].payload[0] = self.dodag.sequence
         while self._probes and now >= self._probes[0][1]:
             self._probe(self._probes.pop(0), False, now)
         attached = self.dodag.attached
@@ -704,7 +714,8 @@ class Reporter:
         return True
 
     def _send_presence(self, now):
-        if self._send(PRESENCE, encode_presence(self.presence(now))):
+        # A bytearray: its sequence byte is refreshed while queued (`_tick`).
+        if self._send(PRESENCE, bytearray(encode_presence(self.presence(now)))):
             self._carried = self._sticky
             self.counters.presence += 1
 
