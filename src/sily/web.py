@@ -1,22 +1,31 @@
 """The box's web server: one HTML page and the JSON it polls, under asyncio.
 
-Routes (``GET`` only, ``405`` otherwise, ``404`` for other paths, the query
-string ignored): ``/`` and ``/index.html``, the page (`PAGE`, beside this
-module, streamed from its file with its ``Content-Length``);
-``/status.json``, ``{"box": status(), "mesh": mesh()}``, ``mesh`` only when
-it returns a value (the gateway's view, ``sily.nodes``). The server receives
-these two callables, never the configuration: the page shows what
-``status`` returns and nothing else (no key, no password). Responses are
-HTTP/1.0, ``Connection: close``, ``Cache-Control: no-store``; the JSON ends
-with the connection (its length is not known in advance).
+Routes (``GET`` only, ``405`` otherwise, ``404`` for other paths): ``/``
+and ``/index.html``, the page (`PAGE`, beside this module, streamed from
+its file with its ``Content-Length``); ``/status.json``, ``{"box":
+status(), "mesh": mesh()}``, ``mesh`` only when it returns a value (the
+gateway's view, ``sily.nodes``). The server receives these callables, never
+the configuration: the page shows what ``status`` returns and nothing else
+(no key, no password). Responses are HTTP/1.0, ``Connection: close``,
+``Cache-Control: no-store``; the JSON ends with the connection (its length
+is not known in advance).
+
+The query string is ignored but for ``now`` on ``/status.json``: the
+phone's time when it sent the poll, ms since the Unix epoch (the page's
+``Date.now()``). A valid one (decimal digits only, at most `NOW_DIGITS`,
+from 2025-01-01 to before 2100-01-01: ``sily.utc.valid``) goes to the
+callable ``clock`` before the JSON is built, then the handler yields; an
+absent, malformed or out-of-range one is ignored (the JSON served as
+without it), as is any ``now`` without ``clock``.
 
 The server shares the asyncio loop with the mesh, whose root answers frames
 within tens of ms: no step of it may hold the loop long. The JSON is never
 built whole: `pieces` yields it piece by piece (dicts recursed, each item of
 a list of dicts or lists dumped whole by the C encoder, the nodes' generator
 consumed one row at a time), written by about `CHUNK` bytes with a
-``drain`` between, which lets the other tasks run; ``status()`` itself is
-one block, followed by a yield before the first byte. Every synchronous
+``drain`` between, which lets the other tasks run; ``clock(now)`` (a
+journal line at most) and ``status()`` are one block each, each followed by
+a yield. Every synchronous
 stretch of the server's code is timed: the longest since the start and
 since the last minute record (`figures`, `minute`).
 
@@ -50,6 +59,8 @@ import json
 import os
 import time
 
+from sily import utc
+
 PORT = 80
 HOST = "0.0.0.0"
 BACKLOG = 2  # connections waiting for accept
@@ -59,6 +70,7 @@ READ_PART = 256  # bytes asked per read of the request
 READ_MS = 2000  # the whole request within this
 RESPONSE_MS = 10000  # the whole response within this
 CHUNK = 512  # bytes written between two drains
+NOW_DIGITS = 13  # of the query's now: ms since the Unix epoch, 2001 to 2286
 
 _DIR = __file__.rsplit("/", 1)[0] if "/" in __file__ else "."
 PAGE = _DIR + "/page.html"
@@ -117,18 +129,33 @@ def _head(code, ctype, length=None):
 
 
 def _parse(data):
-    """Return (method, path) of a request (bytes up to its blank line), None if malformed."""
+    """Return (method, path, query) of a request (bytes up to its blank line;
+    query b"" without one), None if malformed."""
     line = bytes(data[: data.find(b"\r\n")]).split()
     if len(line) != 3 or not line[2].startswith(b"HTTP/"):
         return None
-    return line[0], line[1].split(b"?", 1)[0]
+    target = line[1].split(b"?", 1)
+    return line[0], target[0], target[1] if len(target) == 2 else b""
+
+
+def _now(query):
+    """Return the ms of the first ``now`` of query (bytes), None when absent or
+    not valid (module documentation)."""
+    for item in query.split(b"&"):
+        if item.startswith(b"now="):
+            digits = item[4:]
+            if 0 < len(digits) <= NOW_DIGITS and digits.isdigit():
+                return utc.valid(int(digits))
+            return None
+    return None
 
 
 class Web:
     """The server of the page and its JSON (module documentation).
 
     status: () -> dict, the box (``App.status``); mesh: () -> dict or None
-    (``App.mesh``); page: the page's file; host, port: where to listen;
+    (``App.mesh``); clock: (ms) -> None, the phone's time of a poll (``App``,
+    None: ignored); page: the page's file; host, port: where to listen;
     connections, read_ms, response_ms: the bounds (`CONNECTIONS`, `READ_MS`,
     `RESPONSE_MS`).
     """
@@ -137,6 +164,7 @@ class Web:
         self,
         status,
         mesh=None,
+        clock=None,
         page=PAGE,
         host=HOST,
         port=PORT,
@@ -146,6 +174,7 @@ class Web:
     ):
         self._status = status
         self._mesh = mesh
+        self._clock = clock
         self.page = page
         self.host = host
         self.port = port
@@ -276,7 +305,10 @@ class Web:
             route = _JSON
         else:
             route = 404
-        await self._wait(asyncio.wait_for_ms(self._respond(writer, route), self.response_ms))
+        now = None
+        if route == _JSON and self._clock is not None:
+            now = _now(request[2])
+        await self._wait(asyncio.wait_for_ms(self._respond(writer, route, now), self.response_ms))
         if route == 400:
             self.errors += 1
         else:
@@ -295,11 +327,14 @@ class Web:
             data.extend(part)
         return _parse(data)
 
-    async def _respond(self, writer, route):
+    async def _respond(self, writer, route, now=None):
         self._t0 = time.ticks_us()
         if route == _PAGE:
             await self._page(writer)
         elif route == _JSON:
+            if now is not None:
+                self._clock(now)
+                await self._wait(asyncio.sleep_ms(0))
             out = {"box": self._status()}
             mesh = None if self._mesh is None else self._mesh()
             if mesh is not None:

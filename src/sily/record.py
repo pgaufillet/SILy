@@ -8,7 +8,14 @@ since the board's boot) and ``k``, its kind:
   power, gain, key fingerprint, presence period, next frame counter,
   ``random_restart``, noise floor, free heap, ``ap`` the SSID of the
   access point configured or null, ``watchdog_s`` the hardware watchdog's
-  timeout);
+  timeout, ``utc`` the RTC's time at the line's ``t`` in ms since the Unix
+  epoch when it reads 2025-01-01 or later, else null: set by a page since
+  the last power-on, ``sily.utc``);
+- ``clock``: ``utc``, a phone's time in ms since the Unix epoch, sent with
+  a poll of the page and taken at the line's ``t``; the anchors of the
+  application's clock to UTC (``sily.utc``: the first of a boot, then one
+  per 10 minutes at most while the polls go on, and at once when the
+  phone's time departs by more than 2 s from the last anchor's estimate);
 - ``min``, every ``journal.minute_s``: the pieces of `minute` and the
   application's figures (``bat`` battery mV, ``heap`` free bytes, ``jw``
   and ``js`` the longest journal write and sync in ms since the last
@@ -274,8 +281,9 @@ def _noise(adapter):
     return stats, (None if stats is None else stats.get("noise"))
 
 
-def boot(cfg, stack, reset, crashes, version, build, watchdog_ms):
-    """Return the fields of the ``boot`` record of configuration cfg and its stack."""
+def boot(cfg, stack, reset, crashes, version, build, watchdog_ms, utc=None):
+    """Return the fields of the ``boot`` record of configuration cfg and its
+    stack; utc: the RTC's time (ms since the Unix epoch) when valid, else None."""
     engine = stack.engine
     counter = engine.security.counter
     routing = stack.routing
@@ -300,6 +308,7 @@ def boot(cfg, stack, reset, crashes, version, build, watchdog_ms):
         "heap": stack.heap_node,
         "ap": None if ap is None else ap_ssid(ap["prefix"], cfg["name"]),
         "watchdog_s": watchdog_ms // 1000,
+        "utc": utc,
     }
 
 

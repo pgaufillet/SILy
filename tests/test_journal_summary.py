@@ -240,6 +240,38 @@ class Summary(unittest.TestCase):
         # 60 dropped of 200 frames of 0 (140 received); 9 is no link.
         self.assertTrue("  dropped on purpose: from 0 60 (30.0 %), from 9 2" in lines, lines)
 
+    def test_clock(self):
+        self.assertIsNone(journal_summary.summarise(self.runs[0])["clock"])
+        now = 1794929400000  # 2026-11-17 15:30:00 UTC
+        boot = {"b": 4, "t": 800, "k": "boot", "role": "node", "utc": now - 60000}
+        run = [boot]
+        for t, ms in ((20800, now - 40030), (620800, now + 559990), (700800, now + 3600000)):
+            run.append({"b": 4, "t": t, "k": "clock", "utc": ms})
+        run.append({"b": 4, "t": 900000, "k": "stop"})
+        # The RTC 30 ms ahead of the phone at boot, the board's clock 20 ms
+        # slow over 10 min, then the phone's clock moved on by an hour.
+        s = journal_summary.summarise(run)
+        self.assertEqual(s["clock"], (now - 60030, "clock", 3, 2960010))
+        lines = journal_summary.report(s)
+        self.assertEqual(
+            lines[2],
+            "  clock: first line at 2026-11-17 15:28:59.970 UTC by the first clock line,"
+            " 3 clock lines, largest departure +2960010 ms",
+        )
+        run.pop(3)
+        self.assertEqual(journal_summary.summarise(run)["clock"], (now - 60030, "clock", 2, -30))
+        # The boot record's RTC alone.
+        s = journal_summary.summarise([boot, {"b": 4, "t": 60800, "k": "min"}])
+        self.assertEqual(s["clock"], (now - 60000, "boot", 0, None))
+        self.assertEqual(
+            journal_summary.report(s)[2],
+            "  clock: first line at 2026-11-17 15:29:00.000 UTC by the boot record's RTC,"
+            " 0 clock lines",
+        )
+        # A boot record without the field (an older journal), clock lines alone.
+        s = journal_summary.summarise([{"b": 5, "t": 0, "k": "boot"}, run[1], run[2]])
+        self.assertEqual(s["clock"], (now - 60830, "clock", 2, 20))
+
     def test_power_cut_boot(self):
         s = journal_summary.summarise(self.runs[1])
         self.assertEqual((s["boot"], s["end"], s["attach_s"]), (2, None, 5.0))
@@ -252,7 +284,8 @@ class Summary(unittest.TestCase):
         self.assertEqual(
             lines[0], "boot 1: node box3 (3) at SF7, version 0.2, reset power, crashes 0"
         )
-        self.assertTrue(lines[2].startswith("  attached after 0:00:12; parents 0 > 7"), lines[2])
+        self.assertEqual(lines[2], "  no clock")
+        self.assertTrue(lines[3].startswith("  attached after 0:00:12; parents 0 > 7"), lines[3])
         self.assertTrue(
             "  link 0: margin 8.5 / 8.5 / 8.5 dB (min/mean/max, 1), RSSI -97 dBm, 12 frames"
             in lines

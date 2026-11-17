@@ -45,7 +45,8 @@ the application goes on without it; powered off at stop and crash). With
 ``wifi.ap`` in the configuration, the WiFi access point ``<prefix>-<name>``
 (WPA2) starts after the display, before the mesh's tasks, then the web
 server (``sily.web``: the page and its JSON, `App.status` and, on the
-gateway, `App.mesh`); both stay on until the stop or crash. A failure at
+gateway, `App.mesh`; the phone's time of each poll to `App.sample`); both
+stay on until the stop or crash. A failure at
 their start (an exception, no address, the port taken) is an ``ev``
 ``wifi`` line: the access point is switched off and the application goes
 on without them. Later parts add their tasks with `App.add_task` before
@@ -54,7 +55,9 @@ the start, and their failure callbacks to ``failure_listeners``.
 The field journal (``sily.journal``, records of ``sily.record``) starts a
 new segment at each boot (boot number counted in the NVS namespace
 ``sily``; a boot in safe mode writes its ``safe`` line alone there): the
-``boot`` record (with ``sily.build_id``), then a ``min`` record every
+``boot`` record (with ``sily.build_id`` and the RTC's time when set), then
+the ``clock`` lines anchoring its clock to the time of a phone showing the
+page (``sily.utc``, the RTC set to each), a ``min`` record every
 ``journal.minute_s`` (the battery read then, and cached for the presence
 extension), the ``ev`` events of the monitor's polls, the failures of own
 messages and, on the gateway, the reports received; a ``stop`` or
@@ -80,7 +83,7 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, display, guard, journal, nodes, record, traffic, turn, watchdog, web
+from sily import config, display, guard, journal, nodes, record, traffic, turn, utc, watchdog, web
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -185,6 +188,7 @@ class App:
         self.ap = None  # the access point (sily.hw.access_point), or None
         self.web = None  # web.Web once started, or None
         self.wdt = None  # the hardware watchdog once armed (sily.watchdog)
+        self.anchor = utc.Anchor()  # the clock anchored to UTC (sily.utc)
         self.failure_listeners = []  # fn(dest, port, seq, reason), outside the step
         self._factories = []
         self._closed = False
@@ -308,7 +312,7 @@ class App:
             self.ap = self.hw.access_point(ssid, ap["password"])
             address = self.ap.address()
             if address and address != "0.0.0.0":
-                server = web.Web(self.status, mesh, port=self.web_port)
+                server = web.Web(self.status, mesh, self.sample, port=self.web_port)
                 await server.start()
                 self.web = server
                 return
@@ -363,6 +367,8 @@ class App:
             self.build()
             stack = self.stack
             crashes = 0 if self.guard is None else self.guard.crashes
+            rtc = utc.valid(self.hw.utc_ms())
+            now = self.clock.now()
             fields = record.boot(
                 self.cfg,
                 stack,
@@ -371,8 +377,10 @@ class App:
                 sily.__version__,
                 sily.build_id(),
                 watchdog.TIMEOUT_MS,
+                rtc,
             )
-            self.journal.write(self.clock.now(), "boot", fields)
+            self.journal.write(now, "boot", fields)
+            self.anchor.start(now, rtc)
             self.journal.sync()
             self.display = self._display()
             await self._wifi()
@@ -390,6 +398,15 @@ class App:
             loop.set_exception_handler(None)
         if self.error is not None:
             raise self.error
+
+    def sample(self, ms):
+        """Take a phone's time, ms since the Unix epoch (a poll of the page,
+        ``sily.web``): at each anchor (``sily.utc``), a ``clock`` line and
+        the RTC set."""
+        now = self.clock.now()
+        if self.anchor.sample(now, ms):
+            self.journal.write(now, "clock", {"utc": ms})
+            self.hw.set_utc(ms)
 
     # --- Callbacks of the mesh core: inside its step, queue only -----------------------
 
@@ -508,7 +525,9 @@ class App:
             await asyncio.sleep_ms(self.feed_ms)
 
     def status(self):
-        """Return the state of the box as one dict (display, web page)."""
+        """Return the state of the box as one dict (display, web page);
+        ``utc``: the UTC now by the last anchor (``sily.utc``), ms since the
+        Unix epoch, None without one."""
         cfg = self.cfg
         out = {
             "role": cfg["role"],
@@ -519,6 +538,7 @@ class App:
             "mode": record.MODES[self.mode],
             "attached": False,
             "heap": gc.mem_free(),
+            "utc": self.anchor.estimate(self.clock.now()),
         }
         stack = self.stack
         if stack is None:

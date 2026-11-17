@@ -2,9 +2,9 @@
 
 `FakeHw` stands for ``sily.hw``: the scripted adapter of
 ``test_sily_radio`` with the rest of the ``board.sx1262.Sx1262`` API, the
-simulator's platform fakes, an LED, an OLED display (`FakeOled`) and the
-board's control functions. The application's tests (``test_sily_app``) use
-it too.
+simulator's platform fakes, an LED, an OLED display (`FakeOled`), an RTC
+(`FakeRtc`) and the board's control functions. The application's tests
+(``test_sily_app``) use it too.
 """
 
 import asyncio
@@ -21,6 +21,7 @@ from mesh.link import destination, open_link
 from mesh.ports import PRESENCE
 from mesh.radio import CHANNEL, RX, SENSE, TX_DONE, Radio
 from mesh.reports import Presence, decode_node_info, encode_presence
+from sily import utc
 from sily.radio import lora_config
 from sily.stack import Stack, firmware_version
 from sim.platform import FakePlatform
@@ -177,6 +178,70 @@ class FakeWatchdog:
         self.feeds.append(ticks_ms())
 
 
+def _leap(year):
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _month_days(year, month):
+    if month == 2:
+        return 29 if _leap(year) else 28
+    return 30 if month in (4, 6, 9, 11) else 31
+
+
+class FakeRtc:
+    """``machine.RTC`` of a MicroPython port whose epoch is the 1 January of
+    epoch (2000: the ESP32 port's; 1970: the unix port's).
+
+    As the ESP32 port does (``machine_rtc.c``): ``datetime(tuple)`` turns
+    the calendar into seconds since the epoch (weekday ignored) and keeps
+    them with the microseconds (``settimeofday``), ``datetime()`` turns them
+    back, weekday 0 on Monday. Its own calendar (days counted year by year,
+    month by month), independent of ``sily.utc``'s. It runs on real time
+    (``ticks_ms``) from 0 (the epoch), as an RTC never set.
+    """
+
+    def __init__(self, epoch=2000):
+        self.epoch = epoch
+        self.us = 0  # since the epoch, at ticks
+        self.ticks = ticks_ms()
+        self.sets = 0
+
+    def time(self):
+        """Return the seconds since the epoch (``time.time`` on that port)."""
+        return self._us() // 1000000
+
+    def _us(self):
+        return self.us + ticks_diff(ticks_ms(), self.ticks) * 1000
+
+    def datetime(self, dt=None):
+        if dt is not None:
+            n = 0
+            for year in range(self.epoch, dt[0]):
+                n += 366 if _leap(year) else 365
+            for month in range(1, dt[1]):
+                n += _month_days(dt[0], month)
+            n += dt[2] - 1
+            s = n * 86400 + dt[4] * 3600 + dt[5] * 60 + dt[6]
+            self.us = s * 1000000 + dt[7]
+            self.ticks = ticks_ms()
+            self.sets += 1
+            return None
+        us = self._us()
+        s = us // 1000000
+        n = s // 86400
+        weekday = (n + (5 if self.epoch == 2000 else 3)) % 7  # Saturday, Thursday
+        year = self.epoch
+        while n >= (366 if _leap(year) else 365):
+            n -= 366 if _leap(year) else 365
+            year += 1
+        month = 1
+        while n >= _month_days(year, month):
+            n -= _month_days(year, month)
+            month += 1
+        s %= 86400
+        return (year, month, n + 1, weekday, s // 3600, s // 60 % 60, s % 60, us % 1000000)
+
+
 class FakeHw:
     """The ``sily.hw`` bundle on fakes; records what the application does.
 
@@ -189,9 +254,11 @@ class FakeHw:
     `reset_cause` returns (None: ``power`` or ``hard``, after power_on).
     The watchdog (`FakeWatchdog`, wdt): the timeouts armed, whether its
     timer feeds it (idle), the sleeps taken while nothing fed it (unfed).
+    The RTC (`FakeRtc`, rtc, of a port whose epoch is epoch): read and set
+    as ``sily.hw`` does; kept across `reset`.
     """
 
-    def __init__(self, power_on=False, fail=None, adapter_error=None, seed=1):
+    def __init__(self, power_on=False, fail=None, adapter_error=None, seed=1, epoch=2000):
         self.platform = FakePlatform(XorShift32(seed))
         self.on = power_on
         self.fail = fail
@@ -215,6 +282,7 @@ class FakeHw:
         self.armed = []  # timeout_ms of each arm_watchdog
         self.idle = False
         self.unfed = []  # ms of the sleeps while armed, its timer's feed off
+        self.rtc = FakeRtc(epoch)
 
     def adapter(self, lora_cfg):
         if self.adapter_error is not None:
@@ -263,6 +331,12 @@ class FakeHw:
 
     def battery_mv(self):
         return self.battery
+
+    def utc_ms(self):
+        return utc.read(self.rtc)
+
+    def set_utc(self, ms):
+        utc.write(self.rtc, ms)
 
     def reset(self):
         self.resets += 1

@@ -276,6 +276,82 @@ class Server(unittest.TestCase):
         self.assertEqual(json.loads(_split(json_data)[2]), {"box": _plain(node_status())})
         self.assertEqual(_split(page_data)[1]["content-type"], "text/html; charset=utf-8")
 
+    def test_now_goes_to_the_clock_before_the_json(self):
+        calls = []
+
+        def status():
+            calls.append("status")
+            return node_status()
+
+        async def client(port):
+            out = []
+            for path in (
+                b"/status.json?now=1794929400000",
+                b"/status.json?x=1&now=1735689600000&now=4102444799999",
+                b"/?now=1794929400000",  # the page: ignored
+                b"/status.json",
+            ):
+                out.append(await _get(port, _request(path)))
+            return out
+
+        server = Web(status, clock=lambda ms: calls.append(ms))
+        out = self._serve(server, client)
+        self.assertEqual(calls, [1794929400000, "status", 1735689600000, "status", "status"])
+        for data, _ in out[:2] + out[3:]:
+            self.assertEqual(json.loads(_split(data)[2]), {"box": _plain(node_status())})
+        self.assertEqual((server.requests, server.errors), (4, 0))
+
+    def test_now_not_valid_ignored(self):
+        queries = (
+            b"now=",
+            b"now=abc",
+            b"now=+1794929400000",
+            b"now=-1794929400000",
+            b"now=1794929400000.5",
+            b"now=1794929400000x",
+            b"now=1735689599999",  # before 2025-01-01
+            b"now=4102444800000",  # 2100-01-01
+            b"now=0001794929400000",  # too many digits
+            b"t=1794929400000",  # another name
+            b"now=x&now=1794929400000",  # the first counts
+            b"NOW=1794929400000",
+        )
+        calls = []
+
+        async def client(port):
+            out = []
+            for query in queries:
+                out.append(await _get(port, _request(b"/status.json?" + query)))
+            return out
+
+        server = Web(node_status, clock=lambda ms: calls.append(ms))
+        out = self._serve(server, client)
+        self.assertEqual(calls, [])
+        for data, _ in out:
+            self.assertEqual(json.loads(_split(data)[2]), {"box": _plain(node_status())})
+        self.assertEqual((server.requests, server.errors), (len(queries), 0))
+        self.assertEqual(web._now(b"now=1794929400000"), 1794929400000)  # the same parser
+
+    def test_failing_clock_counted_never_raised(self):
+        def clock(ms):
+            raise ValueError("clock failed")
+
+        raised = []
+
+        async def client(port):
+            asyncio.get_event_loop().set_exception_handler(lambda loop, c: raised.append(c))
+            out = [await _get(port, _request(b"/status.json?now=1794929400000"))]
+            out.append(await _get(port, _request(b"/status.json")))
+            await asyncio.sleep_ms(20)
+            return out
+
+        server = Web(node_status, clock=clock)
+        (first, _), (second, _) = self._serve(server, client)
+        self.assertEqual(first, b"")
+        self.assertEqual(_split(second)[0], 200)
+        self.assertEqual((server.errors, server.requests, server.active), (1, 1, 0))
+        self.assertEqual(raised, [])
+
     def test_not_found_and_not_allowed(self):
         async def client(port):
             return [
@@ -410,6 +486,26 @@ class Server(unittest.TestCase):
         self.assertGreaterEqual(figures["stretch_ms"], 5)  # since the start: kept
         self.assertEqual((figures["requests"], figures["sent"]), (1, server.sent))
 
+    def test_clock_and_status_are_separate_stretches(self):
+        def busy(ms):
+            t = time.ticks_us()
+            while time.ticks_diff(time.ticks_us(), t) < ms * 1000:
+                pass
+
+        def slow():
+            busy(8)
+            return node_status()
+
+        server = Web(slow, clock=lambda ms: busy(8))
+
+        async def client(port):
+            await _get(port, _request(b"/status.json?now=1794929400000"))
+            return server.figures()
+
+        figures = self._serve(server, client)
+        self.assertGreaterEqual(figures["stretch_ms"], 8)
+        self.assertLessEqual(figures["stretch_ms"], 13)  # not both in one
+
     def test_stop_then_listen_again(self):
         async def client(port):
             again = Web(node_status, port=port)
@@ -448,6 +544,8 @@ class Page(unittest.TestCase):
         with open(web.PAGE) as f:
             text = f.read()
         self.assertIn("/status.json", text)
+        self.assertIn('fetch("/status.json?now=" + Date.now(),', text)  # the phone's time
+        self.assertIn('"clock " + utc(b.utc)', text)
         self.assertIn('<link rel=icon href="data:,">', text)
         for scheme in ("http://", "https://"):
             self.assertFalse(scheme in text, scheme)

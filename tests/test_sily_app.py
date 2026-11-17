@@ -25,7 +25,7 @@ import sily
 from mesh.frame import DEST_OFFSET, ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.reports import FIRST_REPORT, NodeInfo, Presence
-from sily import app, guard, journal, record, traffic, watchdog
+from sily import app, guard, journal, record, traffic, utc, watchdog
 from sily.config import check
 
 DIR = "build/test_sily_app"  # relative to the repository root, where the tests run
@@ -1086,3 +1086,105 @@ class Wifi(Console):
         self.assertTrue(type(first[5]) is int and first[5] >= 1, first)  # longest stretch, ms
         self.assertEqual((second[0], second[6]), (1, None))  # stations unreadable
         self.assertEqual(_guard(hw).crashes, 0)
+
+
+NOW = 1794929400000  # 2026-11-17 15:30:00 UTC, ms since the Unix epoch
+NOW_S_2000 = 848244600  # the same in s since 2000-01-01 (the ESP32 port's time.time())
+
+
+class Utc(Console):
+    """The phone's time of the polls (``sily.utc``): clock lines, RTC, boot record, status."""
+
+    def _app(self, hw, tasks=(), **fields):
+        fields.setdefault("wifi", {"ap": AP})
+        a = _app(hw, **fields)
+        a.web_port = _free_port()
+        for factory in tasks:
+            a.add_task(factory)
+        return a
+
+    def _records(self, boot=1):
+        records, bad = journal.read(JOURNAL)
+        self.assertEqual(bad, 0)
+        return [r for r in records if r["b"] == boot]
+
+    def _poll_then_reset(self, epoch, seconds):
+        hw = FakeHw(epoch=epoch)
+        out = []
+        before = []
+        a = self._app(
+            hw,
+            (
+                _after(50, lambda a: before.append(a.status()["utc"])),
+                _fetch(100, b"/status.json?now=%d" % NOW, out),
+            ),
+            role="node",
+            address=3,
+        )
+        self.assertEqual(app.start(a), app.STOPPED)
+        self.assertEqual(before, [None])  # the RTC never set
+        box = json.loads(out[0][2])["box"]
+        self.assertTrue(0 <= box["utc"] - NOW < 1000, box["utc"])
+        records = self._records()
+        self.assertIsNone(records[0]["utc"])
+        clock = [r for r in records if r["k"] == "clock"]
+        self.assertEqual([r["utc"] for r in clock], [NOW])
+        self.assertTrue(records[0]["t"] < clock[0]["t"] < records[-1]["t"])
+        self.assertEqual(hw.rtc.sets, 1)
+        self.assertTrue(hw.rtc.time() - seconds in (0, 1), (epoch, hw.rtc.time()))
+        # A reset: the next boot reads the RTC into its record, and its
+        # status counts from it until a poll comes.
+        seen = []
+
+        def look(a):
+            seen.append((a.clock.now(), a.status()["utc"]))
+
+        a = self._app(hw, (_after(50, look), _after(100, lambda a: a.stop())))
+        app.start(a)
+        records = self._records(2)
+        boot = records[0]
+        self.assertTrue(0 <= boot["utc"] - NOW < 5000, (epoch, boot["utc"]))
+        t, status = seen[0]
+        self.assertTrue(0 <= status - (boot["utc"] + t - boot["t"]) < 100, status)
+        self.assertEqual([r for r in records if r["k"] == "clock"], [])
+
+    def test_poll_anchors_the_journal_and_sets_the_rtc_epoch_2000(self):
+        self._poll_then_reset(2000, NOW_S_2000)  # the ESP32 port's
+
+    def test_poll_anchors_the_journal_and_sets_the_rtc_epoch_1970(self):
+        self._poll_then_reset(1970, NOW // 1000)  # the unix port's
+
+    def test_samples_journaled_by_the_anchor_rules(self):
+        hw = FakeHw()
+        sets = []
+
+        def samples(a):
+            a.anchor.period_ms = 300
+            a.sample(NOW)  # the first: anchored
+            a.sample(NOW)  # within 2 s of the estimate: not
+            a.sample(NOW + 5000)  # the phone's clock moved: anchored
+            sets.append(hw.rtc.sets)
+
+        def later(a):
+            a.sample(a.status()["utc"])  # the period passed: anchored
+            sets.append(hw.rtc.sets)
+
+        stop = _after(500, lambda a: a.stop())
+        a = self._app(hw, (_after(50, samples), _after(450, later), stop))
+        self.assertEqual(app.start(a), app.STOPPED)
+        clock = [r for r in self._records() if r["k"] == "clock"]
+        self.assertEqual(len(clock), 3)
+        self.assertEqual([r["utc"] for r in clock[:2]], [NOW, NOW + 5000])
+        self.assertTrue(clock[2]["t"] - clock[1]["t"] >= 300, clock)
+        self.assertEqual(sets, [2, 3])
+        self.assertTrue(0 <= hw.utc_ms() - clock[2]["utc"] < 1000)
+
+    def test_rtc_before_2025_not_taken(self):
+        hw = FakeHw()
+        utc.write(hw.rtc, utc.MIN_MS - 1000)  # 2024-12-31 23:59:59
+        seen = []
+        look = _after(50, lambda a: seen.append(a.status()["utc"]))
+        a = self._app(hw, (look, _after(100, lambda a: a.stop())))
+        app.start(a)
+        self.assertIsNone(self._records()[0]["utc"])
+        self.assertEqual(seen, [None])

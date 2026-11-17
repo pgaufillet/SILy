@@ -14,6 +14,9 @@ A thin bundle over ``board.t3s3``, ``board.platform`` and
 - `power_on()`: this boot follows a power-on (a brownout reads as one);
 - `reset_cause()`: the cause of this boot, a word (`RESET_CAUSES`);
 - `battery_mv()`: the battery voltage in mV (``board.t3s3``);
+- `utc_ms()`, `set_utc(ms)`: the RTC's time, ms since the Unix epoch,
+  read and set through its calendar tuple (``sily.utc``: the ESP32 port's
+  own epoch, 2000-01-01, never enters);
 - `access_point(ssid, password)`: the WiFi access point started (WPA2),
   an `AccessPoint` (its address, the stations joined, off);
 - `reset()`, `sleep_ms(ms)`, `kbd_intr(char)`: ``machine.reset``,
@@ -38,7 +41,7 @@ import micropython
 from board import t3s3
 from board.platform import HardwareRandom, NvsStorage, RtcRetained
 from board.sx1262 import Sx1262
-from sily import watchdog
+from sily import utc, watchdog
 from sily.guard import NAMESPACE, Guard
 
 BLINK_TIMER = 0  # hardware timer of the safe mode's blink (1: the watchdog's)
@@ -105,6 +108,17 @@ def reset_cause():
 
 def battery_mv():
     return t3s3.battery_millivolts()
+
+
+def utc_ms():
+    """Return the RTC's time in ms since the Unix epoch, as it reads (not
+    checked: 2000-01-01 and on when never set)."""
+    return utc.read(machine.RTC())
+
+
+def set_utc(ms):
+    """Set the RTC to ms since the Unix epoch."""
+    utc.write(machine.RTC(), ms)
 
 
 def reset():

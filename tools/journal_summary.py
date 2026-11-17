@@ -14,6 +14,12 @@ lines of one boot number, in order):
 - its span (first to last line) and how it ended: ``stop`` (Ctrl-C),
   ``fatal`` (with the error) or no end line (power cut, a hang reset by
   the watchdog, or read while running);
+- its clock (``sily.utc``): the UTC of its first line, by its first
+  ``clock`` line or else by the ``boot`` record's ``utc`` (the RTC's), the
+  ``clock`` lines and the largest departure between consecutive anchors
+  (the ``boot`` record's then the ``clock`` lines: each anchor's UTC minus
+  the one its predecessor predicts, ms; the boards' drift, a jump of the
+  phone's clock, the RTC kept across a reset), or ``no clock``;
 - the time from boot to the first attachment, the parent changes and
   detaches (events of the 1 Hz poll), the failures of own messages;
 - the DODAG versions held and the root sequence (``ver``, ``seq`` of the
@@ -49,8 +55,8 @@ lines of one boot number, in order):
   best case over the minute records: the median and highest of the
   per-minute medians and maxima, with the samples and minutes counted.
 
-Times are the boards' own (ms since the board's boot): no absolute time on
-the boxes.
+Times are the boards' own (ms since the board's boot), but for the clock's
+UTC: an analysis maps a line's ``t`` to UTC by the latest anchor before it.
 """
 
 import sys
@@ -62,7 +68,7 @@ def _parent(path):
 
 
 sys.path.insert(0, _parent(_parent(__file__)) + "/src")
-from sily import journal  # noqa: E402
+from sily import journal, utc  # noqa: E402
 
 COUNTER_GROUPS = ("link", "rt", "radio")
 
@@ -98,6 +104,7 @@ def summarise(run):
         "error": last.get("err") if last["k"] == "fatal" else None,
     }
     t0 = first["t"]
+    s["clock"] = clock(run, boot)
     attach = [r for r in run if _event(r, "attach")]
     s["attach_s"] = (attach[0]["t"] - t0) / 1000 if attach else None
     parents = []
@@ -156,6 +163,26 @@ def summarise(run):
     s["turnaround"] = turnaround(minutes)
     s["traffic"] = traffic(minutes)
     return s
+
+
+def clock(run, boot):
+    """Return (UTC of the first line, ``clock`` or ``boot`` its anchor, clock
+    lines, largest departure or None; ms) of the records of one boot and its
+    boot record, None without an anchor."""
+    lines = [r for r in run if r["k"] == "clock" and r.get("utc") is not None]
+    anchors = [(r["t"], r["utc"]) for r in lines]
+    if boot is not None and boot.get("utc") is not None:
+        anchors.insert(0, (boot["t"], boot["utc"]))
+    if not anchors:
+        return None
+    largest = None
+    for i in range(1, len(anchors)):
+        t, ms = anchors[i - 1]
+        departure = anchors[i][1] - (ms + anchors[i][0] - t)
+        if largest is None or abs(departure) > abs(largest):
+            largest = departure
+    t, ms = (lines[0]["t"], lines[0]["utc"]) if lines else anchors[0]
+    return ms - (t - run[0]["t"]), "clock" if lines else "boot", len(lines), largest
 
 
 def dodag(minutes):
@@ -295,6 +322,20 @@ def _drops(rows, links):
     return ", ".join(items)
 
 
+def _clock_line(c):
+    if c is None:
+        return "  no clock"
+    first, source, count, largest = c
+    line = "  clock: first line at %s UTC by the %s, %d clock lines" % (
+        utc.text(first),
+        "first clock line" if source == "clock" else "boot record's RTC",
+        count,
+    )
+    if largest is not None:
+        line += ", largest departure %+d ms" % largest
+    return line
+
+
 def _duration(seconds):
     seconds = int(seconds)
     return "%d:%02d:%02d" % (seconds // 3600, seconds // 60 % 60, seconds % 60)
@@ -343,6 +384,7 @@ def report(s):
         "  span %s, %d lines, %d minute records; %s"
         % (_duration(s["span_s"]), s["lines"], s["minutes"], end)
     )
+    lines.append(_clock_line(s["clock"]))
     attached = "never attached"
     if s["attach_s"] is not None:
         attached = "attached after " + _duration(s["attach_s"])

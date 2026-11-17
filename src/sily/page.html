@@ -38,6 +38,7 @@ const volts = mv => (mv == null ? "-" : (mv / 1000).toFixed(2) + " V");
 const ago = s => (s == null ? "-" : s < 120 ? s + " s" : s < 7200 ? Math.floor(s / 60) + " min" : Math.floor(s / 3600) + " h");
 const two = n => String(n).padStart(2, "0");
 const uptime = s => (s == null ? "-" : Math.floor(s / 3600) + ":" + two(Math.floor(s / 60) % 60) + ":" + two(s % 60));
+const utc = ms => (ms == null ? "not set" : new Date(ms).toISOString().slice(11, 19) + " UTC");
 const row = (cells, cls) => "<tr" + (cls ? " class=" + cls : "") + "><td>" + cells.map(esc).join("<td>");
 const table = (head, rows) => '<div class="w"><table><tr><th>' + head.join("<th>") + rows.join("") + "</table></div>";
 const FLAGS = [[4, "D"], [2, "Q"], [16, "R"], [32, "A"], [64, "K"], [1, "B"]];
@@ -48,7 +49,8 @@ const links = l => l.map(e => (e[2] ? "*" : "") + e[0] + ":" + db(e[1]) + "/" + 
 
 function header(b) {
   $("hd").textContent = document.title = (b.role == "gateway" ? "Gateway " : "Node ") + label(b);
-  $("sub").textContent = [volts(b.battery), dash(b.mode), "up " + uptime(b.time_s), "boot " + dash(b.boot)].join(" · ");
+  $("sub").textContent = [volts(b.battery), dash(b.mode), "up " + uptime(b.time_s), "boot " + dash(b.boot),
+    "clock " + utc(b.utc)].join(" · ");
 }
 
 // The gateway's view: the parent tree, then one row per node.
@@ -134,7 +136,8 @@ function box(b) {
   return out.join("");
 }
 
-// Polling: the next request 5 s after the answer, none while hidden.
+// Polling: the next request 5 s after the answer, none while hidden; each
+// carries the phone's time (ms since the Unix epoch), which sets the box's clock.
 const start = Date.now();
 let last = 0, error = "", next = null;
 
@@ -149,7 +152,7 @@ function poll() {
   if (document.hidden) return (next = null);
   next = true;
   const c = new AbortController(), k = setTimeout(() => c.abort(), 4000);
-  fetch("/status.json", {cache: "no-store", signal: c.signal})
+  fetch("/status.json?now=" + Date.now(), {cache: "no-store", signal: c.signal})
     .then(r => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
     .then(j => {
       const b = j.box;

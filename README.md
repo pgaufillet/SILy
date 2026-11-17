@@ -38,6 +38,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
       segments, sync policy, read-back (also on CPython);
     - `record.py` — what the journal records (boot, minute, events,
       gateway reports) and the presence extension (battery, mode);
+    - `utc.py` — the journal's clock anchored to UTC by the phone's time
+      of the page's polls, the RTC's calendar (*Application*);
     - `tap.py` — link measurements (frames, RSSI, SNR) per source heard;
     - `drop.py` — drop rates: a share of chosen sources' frames dropped on
       purpose, for losses on a bench (*Application*);
@@ -435,17 +437,32 @@ the turnaround of its immediate replies, timed as the bench's `timed` does
 but with the journal, display, test traffic and web server running
 (`src/sily/turn.py`, `tr`: replies, median, 90th percentile and maximum,
 in 0.1 ms, from the RxDone interrupt of the frame answered to the start of
-the reply). The file stays open and is synced every `journal.sync_s`
+the reply). A `clock` line anchors the board's clock to UTC (`utc`, ms
+since the Unix epoch): a phone showing the box's status page sends its own
+time with each poll (below); the first poll of a boot is journaled, then
+one every 10 minutes at most while the polls go on, and at once a poll
+whose time departs by more than 2 s from the last anchor's estimate (the
+phone's clock changed). Each anchor also sets the board's RTC, which keeps
+its time across a soft reset, `machine.reset()` and a watchdog reset but
+not across a power cut (measured on a board): the `boot` record carries
+its time (`utc`) when set since the last power-on, null otherwise. The
+file stays open and is synced every `journal.sync_s`
 (300 s), after the boot record and at stop or crash: a power cut loses at
 most the last 5 minutes. `make journal PORT=... OUT=...` stops the
 application, copies the journal into `OUT/journal`, resets the board and
 prints a summary per boot (`tools/journal_summary.py`: build, span and
-end, attach time, parent changes, DODAG versions and root sequence,
+end, clock (the UTC of the first line, the `clock` lines, the largest
+departure between consecutive anchors), attach time, parent changes,
+DODAG versions and root sequence,
 margins per link, frames dropped on purpose, counters, battery, write and
 sync stalls; display, access point and web server; reply turnaround; test
 traffic; safe mode's reasons).
-Times are per boot (ms since the board started): no absolute time on the
-boxes.
+Times are per boot (`t`, ms since the board started); an analysis maps
+`t` to UTC by the latest anchor before it (`clock` line, else the `boot`
+record's `utc`): `utc + t - t_anchor`, the poll's one-way delay (tens of
+ms on the access point) not corrected. To set the clocks before a field
+test, open each box's page once with a phone whose clock is set by its
+network; a page left open keeps its box anchored.
 
 Test traffic (`src/sily/traffic.py`) measures the mesh in the field before
 punches exist. With `traffic.enabled` in the network file, every node
@@ -500,6 +517,9 @@ access point starts after the display and stays on while the application
 runs. A phone joins it (Android may warn that the network has no internet:
 stay connected) and opens http://192.168.4.1/: the page asks the box for
 `/status.json` every 5 s (none while hidden) and says how old its data is.
+Each poll carries the phone's time (`/status.json?now=<ms since the Unix
+epoch>`), which anchors the box's journal to UTC (`clock` lines, above);
+the page shows the box's clock (`clock 15:30:00 UTC`, or `not set`).
 Every box shows its own view: state (attached, parent, rank), duty cycle,
 queue, heap, journal, frames; its neighbours (margin, ETX, d_in, age, RSSI,
 SNR; parents first); its test traffic, the gateway's reply turnaround
