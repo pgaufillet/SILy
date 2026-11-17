@@ -7,13 +7,21 @@ DIR holds the journal's segments (``NNNNNN.log``, ``sily.journal``). Runs
 on CPython 3 and on the MicroPython unix port. One paragraph per boot (the
 lines of one boot number, in order):
 
-- the box, version, reset cause (``watchdog``: the boot before hung), crash
-  count and hardware watchdog timeout of its ``boot`` record;
+- the box, version, build id (``none``: not deployed by ``make deploy``),
+  reset cause (``watchdog``: the boot before hung), crash count and
+  hardware watchdog timeout of its ``boot`` record; a boot in safe mode
+  instead: its version, build and reasons (the ``safe`` line);
 - its span (first to last line) and how it ended: ``stop`` (Ctrl-C),
   ``fatal`` (with the error) or no end line (power cut, a hang reset by
   the watchdog, or read while running);
 - the time from boot to the first attachment, the parent changes and
   detaches (events of the 1 Hz poll), the failures of own messages;
+- the DODAG versions held and the root sequence (``ver``, ``seq`` of the
+  minute records; those without a sequence left out: a gateway listening
+  at boot reports version 0 before its first): the versions in turn (a
+  change: the gateway issued one, as at each of its boots), the first and
+  last sequence, and the longest time it stayed unchanged (on a node: no
+  newer one from its parent, its gateway or its path silent);
 - per link of the minute records' neighbour rows: the margin (dB) min,
   mean and max, the last RSSI mean and frames;
 - the frames dropped on purpose per source (the box file's ``drop``,
@@ -83,6 +91,7 @@ def summarise(run):
     s = {
         "boot": first.get("b"),
         "record": boot,
+        "safe": first if first["k"] == "safe" else None,
         "lines": len(run),
         "span_s": (last["t"] - first["t"]) / 1000,
         "end": last["k"] if last["k"] in ("stop", "fatal") else None,
@@ -103,6 +112,7 @@ def summarise(run):
     s["failures"] = len([r for r in run if _event(r, "fail")])
     minutes = [r for r in run if r["k"] == "min"]
     s["minutes"] = len(minutes)
+    s["dodag"] = dodag(minutes)
     links = {}
     for m in minutes:
         for row in m.get("nb", ()):
@@ -146,6 +156,32 @@ def summarise(run):
     s["turnaround"] = turnaround(minutes)
     s["traffic"] = traffic(minutes)
     return s
+
+
+def dodag(minutes):
+    """Return (versions, first sequence, last sequence, longest unchanged s) of
+    the minute records holding a root sequence, None without one."""
+    versions = []
+    first = last = None
+    since = None  # time of the first record of the current (version, sequence)
+    longest = 0
+    for m in minutes:
+        seq = m.get("seq")
+        if seq is None:
+            continue
+        ver = m.get("ver")
+        if not versions or versions[-1] != ver:
+            versions.append(ver)
+            since = m["t"]
+        elif seq != last:
+            since = m["t"]
+        if first is None:
+            first = seq
+        last = seq
+        longest = max(longest, m["t"] - since)
+    if first is None:
+        return None
+    return versions, first, last, longest / 1000
 
 
 def web(minutes):
@@ -264,18 +300,31 @@ def _duration(seconds):
     return "%d:%02d:%02d" % (seconds // 3600, seconds // 60 % 60, seconds % 60)
 
 
+def _build(record):
+    if "build" not in record:  # a journal written before the field
+        return ""
+    return ", build %s" % (record["build"] or "none")
+
+
 def report(s):
     """Return the lines of summary s."""
+    safe = s["safe"]
+    if safe is not None:
+        lines = [
+            "boot %s: safe mode, version %s%s" % (s["boot"], safe.get("version"), _build(safe))
+        ]
+        return lines + ["  safe: %s" % reason for reason in safe.get("why", ())]
     lines = []
     b = s["record"]
     if b is not None:
-        line = "boot %s: %s %s (%s) at %s, version %s, reset %s, crashes %s" % (
+        line = "boot %s: %s %s (%s) at %s, version %s%s, reset %s, crashes %s" % (
             s["boot"],
             b.get("role"),
             b.get("name"),
             b.get("address"),
             "SF%s" % b.get("sf"),
             b.get("version"),
+            _build(b),
             b.get("reset"),
             b.get("crashes"),
         )
@@ -307,6 +356,12 @@ def report(s):
             s["failures"],
         )
     )
+    if s["dodag"] is not None:
+        versions, first, last, longest = s["dodag"]
+        lines.append(
+            "  DODAG version %s; root sequence %s first, %s last, unchanged for %s at most"
+            % (" > ".join(str(v) for v in versions), first, last, _duration(longest))
+        )
     for address in sorted(s["links"]):
         link = s["links"][address]
         m = link["margins"]

@@ -3,11 +3,12 @@
 Every line holds ``b`` (boot number), ``t`` (ms, the application's clock:
 since the board's boot) and ``k``, its kind:
 
-- ``boot``: `boot` (version, reset cause, crash count, role, address,
-  name, SF, power, gain, key fingerprint, presence period, next frame
-  counter, ``random_restart``, noise floor, free heap, ``ap`` the SSID of
-  the access point configured or null, ``watchdog_s`` the hardware
-  watchdog's timeout);
+- ``boot``: `boot` (version, ``build`` the build id or null,
+  ``sily.build_id``, reset cause, crash count, role, address, name, SF,
+  power, gain, key fingerprint, presence period, next frame counter,
+  ``random_restart``, noise floor, free heap, ``ap`` the SSID of the
+  access point configured or null, ``watchdog_s`` the hardware watchdog's
+  timeout);
 - ``min``, every ``journal.minute_s``: the pieces of `minute` and the
   application's figures (``bat`` battery mV, ``heap`` free bytes, ``jw``
   and ``js`` the longest journal write and sync in ms since the last
@@ -34,6 +35,8 @@ since the board's boot) and ``k``, its kind:
   access point or the web server failing at start: ``err``; the
   application goes on without them);
 - ``stop`` (Ctrl-C), ``fatal`` (``err`` and ``tb``, the traceback);
+- ``safe`` (`safe`), the only line of a boot in safe mode: ``why`` its
+  reasons (``field: problem``), ``version``, ``build``;
 - on the gateway, the reports received (`report`): ``rp`` presence, ``rt``
   topology, ``ri`` node information, each with ``o`` its origin.
 
@@ -233,6 +236,11 @@ def failure(dest, port, seq, reason):
     return {"e": "fail", "dst": dest, "port": port, "seq": seq, "why": reason}
 
 
+def safe(reasons, version, build):
+    """Return the fields of the ``safe`` line: the reasons of safe mode, the code."""
+    return {"why": reasons, "version": version, "build": build}
+
+
 # --- Gateway reports ---------------------------------------------------------------------
 
 
@@ -266,7 +274,7 @@ def _noise(adapter):
     return stats, (None if stats is None else stats.get("noise"))
 
 
-def boot(cfg, stack, reset, crashes, version, watchdog_ms):
+def boot(cfg, stack, reset, crashes, version, build, watchdog_ms):
     """Return the fields of the ``boot`` record of configuration cfg and its stack."""
     engine = stack.engine
     counter = engine.security.counter
@@ -275,6 +283,7 @@ def boot(cfg, stack, reset, crashes, version, watchdog_ms):
     ap = cfg["wifi"]["ap"]
     return {
         "version": version,
+        "build": build,
         "reset": reset,
         "crashes": crashes,
         "role": cfg["role"],
@@ -343,7 +352,11 @@ def minute(stack, now, tap=None):
     last.
 
     Keys: ``att``, ``par``, ``rank``, ``gnd`` (`state`), ``ver`` (DODAG
-    version), ``mem`` (parent set), ``q`` (transmit queue length), ``dc``
+    version), ``seq`` (the root sequence the board holds, ``Dodag.sequence``:
+    the root's own, a node's carried one; null on a root until it queues its
+    first DODAG information, listening at boot included, its ``ver`` 0 then
+    no version yet, and on a node before its first), ``mem`` (parent set),
+    ``q`` (transmit queue length), ``dc``
     (ms on air in the duty-cycle window), ``fil`` (frames of the neighbour
     filter), ``drp`` with drop rates ([[source, frames dropped], ...],
     ``sily.drop``); counter totals ``link`` (`LINK`), ``rt`` (`ROUTING`,
@@ -362,6 +375,7 @@ def minute(stack, now, tap=None):
         "rank": s[2],
         "gnd": s[3],
         "ver": engine.dodag_version,
+        "seq": None if routing is None else routing.dodag.sequence,
         "mem": [] if routing is None else list(routing.parents.members()),
         "q": len(engine.queue),
         "dc": engine.dutycycle.used(now),

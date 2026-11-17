@@ -13,12 +13,15 @@ import json
 import os
 import socket
 import struct
+import sys
 import unittest
 from time import ticks_diff, ticks_us
 
+from test_sily_journal import Clock, MemFs
 from test_sily_stack import FakeHw, peer_frame, probe_frame
 from test_sily_web import _get, _request, _split
 
+import sily
 from mesh.frame import DEST_OFFSET, ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.reports import FIRST_REPORT, NodeInfo, Presence
@@ -187,6 +190,112 @@ class Boot(Console):
         self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SKIP)
         self.assertEqual((hw.adapters, hw.blinks, hw.armed), ([], [], []))
         self.assertEqual(app.prepare(hw, _guard(hw), PATH)[0], guard.START)
+
+
+class Build:
+    """The ``sily/build.py`` that ``make deploy`` writes (never in src/), while in use."""
+
+    BUILD = "a961409-dirty"
+
+    def __enter__(self):
+        sys.modules["sily.build"] = self
+        return self
+
+    def __exit__(self, *exc):
+        del sys.modules["sily.build"]
+
+
+class Safe(Console):
+    """The ``safe`` line of a boot in safe mode."""
+
+    def test_reasons_journaled_and_synced(self):
+        _write(sf=13, tx_pwr=1, journal={"max_kb": 8})  # its journal section unused
+        hw = FakeHw()
+        self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SAFE)
+        records, bad = journal.read(JOURNAL)
+        self.assertEqual((len(records), bad), (1, 0))  # read back: synced and closed
+        line = records[0]
+        self.assertEqual((line["k"], line["b"]), ("safe", 1))
+        shown = [x[len("SILY SAFE ") :] for x in self.lines() if x.startswith("SILY SAFE ")]
+        self.assertEqual(line["why"], shown)
+        self.assertTrue("sf: out of range 7 to 12" in line["why"], line["why"])
+        self.assertTrue("journal.max_kb: out of range 16 to 1536" in line["why"], line["why"])
+        self.assertEqual((line["version"], line["build"]), (sily.__version__, None))
+        self.assertEqual((hw.blinks, hw.armed), ([app.SAFE_BLINK_MS], []))
+
+    def test_missing_config(self):
+        _remove()
+        hw = FakeHw()
+        self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SAFE)
+        records, _ = journal.read(JOURNAL)
+        self.assertEqual(
+            [(r["k"], r["why"]) for r in records],
+            [("safe", ["file: %s missing (make configure)" % PATH])],
+        )
+
+    def test_after_the_crashes_in_their_boot_number(self):
+        _write()
+        hw = FakeHw(adapter_error=RuntimeError("no SX1262"))
+        for _ in range(guard.MAX_CRASHES):
+            self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), app.RESET)
+        self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SAFE)
+        records, _ = journal.read(JOURNAL)
+        self.assertEqual(
+            [(r["b"], r["k"]) for r in records],
+            [(1, "fatal"), (2, "fatal"), (3, "fatal"), (4, "safe")],
+        )
+        self.assertEqual(len(records[-1]["why"]), 1)
+        self.assertTrue(records[-1]["why"][0].startswith("crashes: 3 without"), records[-1])
+
+    def test_build_id_of_the_deployed_code(self):
+        _remove()
+        with Build():
+            self.assertEqual(app.boot(FakeHw(), PATH, journal_dir=JOURNAL), guard.SAFE)
+        self.assertEqual(journal.read(JOURNAL)[0][0]["build"], Build.BUILD)
+
+    def test_older_segments_kept(self):
+        # A box configured for more than the default bound: the safe line
+        # (its configuration unread) removes none of its segments.
+        _remove()
+        fs = MemFs(Clock())
+        fs.mkdir("/j")
+        for n in range(1, 17):  # 16 segments of 64 KB: the default 1024 KB
+            fs.data["/j/" + journal.segment_name(n)] = bytearray(65536)
+        self.assertEqual(app.boot(FakeHw(), PATH, journal_dir="/j", fs=fs), guard.SAFE)
+        self.assertEqual([n for n, _ in journal.segments("/j", fs)], list(range(1, 18)))
+        safe = journal.read("/j", fs)[0][-1]
+        self.assertEqual(safe["k"], "safe")
+
+    def test_journal_failure_leaves_the_blink_and_the_repl(self):
+        class Refusing(MemFs):
+            def listdir(self, path):
+                raise self.error
+
+        _remove()
+        for error, shown in (
+            (OSError(5), "2 errors"),
+            (RuntimeError("fs"), "RuntimeError('fs',)"),
+        ):
+            hw = FakeHw()
+            fs = Refusing(Clock())
+            fs.error = error
+            self.assertEqual(app.boot(hw, PATH, journal_dir="/j", fs=fs), guard.SAFE)
+            self.assertEqual(hw.blinks, [app.SAFE_BLINK_MS])
+            self.assertTrue(
+                "SILY SAFE journal not written: " + shown in self.lines(), self.lines()
+            )
+
+    def test_watchdog_after_a_soft_reset_stays_fed(self):
+        # Armed by the run before the soft reset, fed by its timer (boot.py):
+        # safe mode, its journal included, neither arms it again nor stops
+        # that feed.
+        _remove()
+        hw = FakeHw()
+        hw.armed.append(watchdog.TIMEOUT_MS)
+        hw.idle_watchdog()
+        self.assertEqual(app.boot(hw, PATH, journal_dir=JOURNAL), guard.SAFE)
+        self.assertEqual(journal.read(JOURNAL)[0][0]["k"], "safe")
+        self.assertEqual((hw.armed, hw.idle), ([watchdog.TIMEOUT_MS], True))
 
 
 class Run(Console):
@@ -367,6 +476,7 @@ class Journal(Console):
         self.assertEqual((boot["role"], boot["address"], boot["sf"]), ("gateway", 0, 7))
         self.assertEqual((boot["reset"], boot["crashes"], boot["b"]), ("hard", 0, 1))
         self.assertEqual(boot["watchdog_s"], watchdog.TIMEOUT_MS // 1000)
+        self.assertEqual((boot["version"], boot["build"]), (sily.__version__, None))
         self.assertEqual(boot["random_restart"], 1)  # a fresh frame counter store
         self.assertTrue(0 <= boot["counter"] < a.stack.engine.security.counter.peek())
         minute = records[kinds.index("min")]
@@ -375,6 +485,11 @@ class Journal(Console):
         for key in ("jw", "js", "jq", "je", "link", "rt", "radio", "nb", "heap"):
             self.assertTrue(key in minute, key)
         self.assertEqual(a.journal.syncs, 2)  # after the boot record and at the stop
+
+    def test_build_id_of_the_deployed_code(self):
+        with Build():
+            _, _, records = self._run(FakeHw(), 50)
+        self.assertEqual(records[0]["build"], Build.BUILD)
 
     def test_boot_numbers_and_segments_continue(self):
         hw = FakeHw()

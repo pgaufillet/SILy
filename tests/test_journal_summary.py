@@ -135,6 +135,69 @@ class Summary(unittest.TestCase):
             "boot 6: node box3 (3) at SF7, version 0.2, reset watchdog, crashes 1, watchdog 20 s",
         )
 
+    def test_build_per_boot(self):
+        boot = {"b": 8, "t": 0, "k": "boot", "role": "node", "address": 3, "name": "box3"}
+        boot.update(sf=7, version="0.2", build="a961409-dirty", reset="power", crashes=0)
+        head = "boot 8: node box3 (3) at SF7, version 0.2, build "
+        lines = journal_summary.report(journal_summary.summarise([boot]))
+        self.assertEqual(lines[0], head + "a961409-dirty, reset power, crashes 0")
+        boot["build"] = None  # not deployed by make deploy
+        lines = journal_summary.report(journal_summary.summarise([boot]))
+        self.assertEqual(lines[0], head + "none, reset power, crashes 0")
+
+    def test_safe_mode_boot(self):
+        why = ["crashes: 3 without 10 min of stable run", "sf: out of range 7 to 12"]
+        safe = {"b": 9, "t": 812, "k": "safe", "why": why, "version": "0.2", "build": "a961409"}
+        s = journal_summary.summarise([safe])
+        self.assertEqual(
+            journal_summary.report(s),
+            [
+                "boot 9: safe mode, version 0.2, build a961409",
+                "  safe: crashes: 3 without 10 min of stable run",
+                "  safe: sf: out of range 7 to 12",
+            ],
+        )
+
+    def test_dodag_versions_and_root_sequence(self):
+        s = journal_summary.summarise(self.runs[0])  # minute records without them
+        self.assertIsNone(s["dodag"])
+        self.assertFalse(any("DODAG" in line for line in journal_summary.report(s)))
+        # A node: no sequence before its first, then version 2; the gateway
+        # restarted (version 3), then silent for 2 minutes.
+        run = [{"b": 1, "t": 0, "k": "boot", "role": "node"}]
+        for t, ver, seq in (
+            (60000, 0, None),
+            (120000, 2, 40),
+            (180000, 2, 44),
+            (240000, 3, 45),
+            (300000, 3, 45),
+            (360000, 3, 45),
+            (420000, 3, 49),
+        ):
+            run.append({"b": 1, "t": t, "k": "min", "ver": ver, "seq": seq})
+        s = journal_summary.summarise(run)
+        self.assertEqual(s["dodag"], ([2, 3], 40, 49, 120.0))
+        lines = journal_summary.report(s)
+        self.assertTrue(
+            "  DODAG version 2 > 3; root sequence 40 first, 49 last,"
+            " unchanged for 0:02:00 at most" in lines,
+            lines,
+        )
+
+    def test_gateway_listening_at_boot(self):
+        # Version 0 until its first version, without a sequence: not a version.
+        run = [{"b": 2, "t": 0, "k": "boot", "role": "gateway"}]
+        for t, ver, seq in ((60000, 0, None), (120000, 5, 7), (180000, 5, 11)):
+            run.append({"b": 2, "t": t, "k": "min", "ver": ver, "seq": seq})
+        s = journal_summary.summarise(run)
+        self.assertEqual(s["dodag"], ([5], 7, 11, 0.0))
+        lines = journal_summary.report(s)
+        self.assertTrue(
+            "  DODAG version 5; root sequence 7 first, 11 last, unchanged for 0:00:00 at most"
+            in lines,
+            lines,
+        )
+
     def test_wifi_failure(self):
         boot = {"b": 4, "t": 0, "k": "boot", "role": "node", "ap": "SILy-box3"}
         failed = {"b": 4, "t": 40, "k": "ev", "e": "wifi", "err": "OSError(5,)"}

@@ -1699,7 +1699,7 @@ Addressing modes:
 
 | Port | Message | Mode, class | Payload |
 |---|---|---|---|
-| 1 | presence | upward (mode 6 on the first hop, 1 when forwarded), 0 | preferred parent 2 B (mode 1 only; in mode 6 it is the link destination); root sequence 1 B (mode 6 only: the sequence the sender holds, §9; dropped when forwarded); flags 1 B (bit 0 first report since boot, bit 1 queue overflow since last report, bit 2 duty-cycle use above 80 % since last report (seen at every transmission, kept until a presence goes on air: presence itself is refused above 80 %), bit 3 class 2 tails follow, bit 4 rank errors since last report (§9), bit 5 address conflict, bit 6 authentication failures since last report (§13), bit 7 next key loaded (§14)); if bit 3: tail count 1 B, then per idle flow not yet acknowledged: port 1 B, oldest unacknowledged sequence 2 B, last sequence 2 B (§12); application extension: the remaining bytes, opaque (length set by configuration; SILy: battery and mode, 1 B) |
+| 1 | presence | upward (mode 6 on the first hop, 1 when forwarded), 0 | preferred parent 2 B (mode 1 only; in mode 6 it is the link destination); root sequence 1 B (mode 6 only: the sequence the sender holds, §9; dropped when forwarded); flags 1 B (bit 0 first report since boot, bit 1 queue overflow since last report, bit 2 duty-cycle use above 80 % since last report (seen at every transmission, kept until a presence goes on air: presence itself is refused above 80 %), bit 3 class 2 tails follow, bit 4 rank errors since last report (§9), bit 5 address conflict, bit 6 authentication failures since last report (§13), bit 7 next key loaded (§14)); if bit 3: tail count 1 B, then per idle flow not yet acknowledged: port 1 B, oldest unacknowledged sequence 2 B, last sequence 2 B (§12); application extension: the remaining bytes, opaque (length set by configuration; SILy: 1 B, bits 5–0 battery voltage, 3.00–4.26 V in 20 mV steps, bits 7–6 operating mode in §17's order) |
 | 2 | topology | upward (6 / 1), 0 | count 1 B; per neighbour: address 2 B, margin 1 B (signed dB, saturated, §5), quality 1 B (bit 7 parent-set member, bits 6–0 delivery ratio 0–100 %); parent set first, then best other links; 6 entries by default |
 | 3 | acknowledgement | link-local, 0 | per acknowledged frame: link source 2 B, frame counter low 16 bits 2 B |
 | 4 | error | upward (6 / 1) for a failure on a source route (§10), or link-local (0) to its origin when a neighbour (§12), 1 | reason 1 B (1 next hop unreachable, 2 next hop not a neighbour, 3 no route, 4 queue full, 5 duty-cycle budget, 6 route beyond 8 hops); next hop 2 B; failed message: origin 2 B, destination 2 B, port 1 B, sequence 2 B (§10, §12; the root forwards it to the origin) |
@@ -1744,7 +1744,7 @@ goes with the first topology report and then with every 8th.
 | 10 | 0x01 | port: presence |
 | 11 | … | root sequence |
 | 12 | 0x00 | presence flags |
-| 13 | … | SILy extension (battery, mode) |
+| 13 | … | SILy extension (bits 5–0 battery, bits 7–6 mode) |
 | 14–17 | … | tag |
 
 ### Compaction

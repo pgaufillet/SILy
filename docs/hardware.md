@@ -112,6 +112,16 @@ mode's blink (`src/sily/hw.py`), 1 for the watchdog's feed at the REPL
 
 ## Per-box procedure
 
+With several boards on one host, their ACM ports swap after resets: a
+command meant for one board can reach another (a configuration once went
+to the wrong board). Address each board by its USB serial number instead:
+`mpremote devs` lists the boards connected (device, serial number, USB
+identifiers), and `PORT=id:<serial>` works with every target that goes
+through mpremote (`deploy`, `box-check`, `configure`, `journal`).
+`make flash` goes through esptool, which takes a device path only, and the
+board re-enumerates when esptool resets it: flash with that board alone on
+USB.
+
 The box closed, its switch on (battery connected), its USB to the host
 (`PORT`, e.g. `/dev/ttyACM0`):
 
@@ -132,14 +142,19 @@ The box closed, its switch on (battery connected), its USB to the host
    display shows the test page (version, box name, results); the access
    point `SILy-check-<box>` shows on a phone. The box name, the last three
    bytes of the MAC address, goes on the box's label. A board without
-   battery: `BATTERY=0`.
+   battery: `BATTERY=0`. On USB without a battery, the charger's output
+   reads 4.18–4.24 V, steady (a spread of 80–101 mV over the check's 10
+   readings, on 2 boards): a box declared with a battery passes on USB
+   alone, battery missing or not. Check the battery with USB unplugged:
+   the box then runs on it, and the display's first page or the box's
+   status page (after step 4) gives its voltage.
 
 | Item | PASS when |
 |---|---|
 | firmware | the board name says the SILy firmware: `LILYGO T3-S3 (SILy)` |
 | software | key derivation default of 6000 iterations (shared by every box of a network); the SILy version is shown |
 | radio | the SX1262 answers after its reset |
-| battery | 10 readings over 0.5 s within 3000–4400 mV and within 150 mV of each other: one Li-ion cell, from empty (about 3.0 V, where its protection and the 3.3 V regulator give up) to full (4.2 V, the charger's end voltage), plus a few per cent of reading accuracy at the top. On USB without a battery the charger's output reads instead, unsteady or out of range: a FAIL names that case first |
+| battery | 10 readings over 0.5 s within 3000–4400 mV and within 150 mV of each other: one Li-ion cell, from empty (about 3.0 V, where its protection and the 3.3 V regulator give up) to full (4.2 V, the charger's end voltage), plus a few per cent of reading accuracy at the top. On USB without a battery the charger's output reads instead, and passes: see above |
 | uart | the driver reports UART1 at 38400 baud 8N1 on GPIO43 and GPIO44; the line also tells whether a powered receiver drives the RX line (not judged) |
 | wifi | the access point is up with an address (192.168.4.1) |
 | display | OBSERVE: the test page shows; FAIL if nothing answers at 0x3C |

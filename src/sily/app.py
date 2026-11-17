@@ -8,7 +8,9 @@
 - safe mode, when the guard counts `guard.MAX_CRASHES` crashes without
   10 minutes of stable run, or ``/config.json`` is missing or invalid
   (``sily.config``): one line ``SILY SAFE field: problem`` per reason, the
-  LED blinks fast (`SAFE_BLINK_MS`) and `boot` returns: the REPL is free;
+  LED blinks fast (`SAFE_BLINK_MS`), a ``safe`` line with the reasons
+  goes into the journal (`safe_mode`) and `boot` returns: the REPL is
+  free;
 - otherwise the application runs under asyncio (`App`) until stopped.
 
 Recovery: Ctrl-C (``mpremote`` sends one when it connects) stops the
@@ -51,7 +53,8 @@ the start, and their failure callbacks to ``failure_listeners``.
 
 The field journal (``sily.journal``, records of ``sily.record``) starts a
 new segment at each boot (boot number counted in the NVS namespace
-``sily``): the ``boot`` record, then a ``min`` record every
+``sily``; a boot in safe mode writes its ``safe`` line alone there): the
+``boot`` record (with ``sily.build_id``), then a ``min`` record every
 ``journal.minute_s`` (the battery read then, and cached for the presence
 extension), the ``ev`` events of the monitor's polls, the failures of own
 messages and, on the gateway, the reports received; a ``stop`` or
@@ -89,6 +92,7 @@ WRITER_MS = 200  # period of the journal writer's look at the queue
 QUEUE_ITEMS = 64  # callback items waiting for the writer
 BOOT_KEY = "boots"  # boot number, NVS namespace guard.NAMESPACE
 WATCHDOG_RESET = "watchdog"  # hw.reset_cause() after a reset by the watchdog
+SAFE_JOURNAL_KB = 1 << 20  # bound of the journal for the safe line: no segment removed
 
 # Kinds of the queued items.
 _REPORT = 0  # (_REPORT, t, port, origin, report)
@@ -365,6 +369,7 @@ class App:
                 self.hw.reset_cause(),
                 crashes,
                 sily.__version__,
+                sily.build_id(),
                 watchdog.TIMEOUT_MS,
             )
             self.journal.write(self.clock.now(), "boot", fields)
@@ -645,11 +650,34 @@ def prepare(hw, start_guard, path=CONFIG_PATH):
     return guard.START, cfg, reasons
 
 
-def safe_mode(hw, reasons):
-    """Print the reasons, blink the LED fast; the caller returns to the REPL."""
+def safe_mode(hw, reasons, journal_dir=journal.DIR, fs=None):
+    """Print the reasons, blink the LED fast, journal them; the caller returns to the REPL.
+
+    The ``safe`` line (``sily.record.safe``) opens this boot's segment,
+    synced: it tells ``make journal`` why the box sat blinking. The
+    configuration may be the problem: the journal takes its defaults,
+    except its bound (`SAFE_JOURNAL_KB`: the line removes no segment, a
+    box configured above the default keeps its older ones; the next boot
+    that runs applies its own). Its failure is a console line only (the
+    blink and the REPL stay). The watchdog is left alone: unarmed after a
+    hardware reset, fed by its timer after a soft one (``boot.py``).
+    """
     for reason in reasons:
         _out("SILY SAFE", reason)
     hw.blink(SAFE_BLINK_MS)
+    error = None
+    try:
+        number = next_boot(hw.storage(guard.NAMESPACE))
+        j = journal.Journal(journal_dir, number, Clock().now, SAFE_JOURNAL_KB, fs=fs)
+        j.open()
+        j.write(j.clock(), "safe", record.safe(reasons, sily.__version__, sily.build_id()))
+        j.close()
+        if j.errors:
+            error = "%d errors" % j.errors
+    except Exception as e:  # the blink and the REPL stay
+        error = repr(e)
+    if error is not None:
+        _out("SILY SAFE journal not written:", error)
 
 
 def _stop(app, hw):
@@ -724,6 +752,6 @@ def boot(hw=None, path=CONFIG_PATH, **options):
         _out("SILY SKIP: this boot skipped on request, the REPL is free")
         return decision
     if decision == guard.SAFE:
-        safe_mode(hw, reasons)
+        safe_mode(hw, reasons, options.get("journal_dir", journal.DIR), options.get("fs"))
         return decision
     return start(App(cfg, hw, start_guard, **options))

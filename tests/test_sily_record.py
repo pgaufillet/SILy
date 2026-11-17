@@ -80,6 +80,8 @@ class Minute(unittest.TestCase):
         self.assertTrue(rec["rank"] < RANK_INFINITE)
         self.assertEqual(rec["mem"], [ROOT])
         self.assertEqual(rec["ver"], engine.dodag_version)
+        self.assertIsNotNone(rec["seq"])  # carried from the root
+        self.assertEqual(rec["seq"], self.board.routing.dodag.sequence)
         self.assertEqual(rec["link"]["tf"], engine.counters.tx_frames)
         self.assertTrue(rec["link"]["rf"] > 0)
         self.assertEqual(rec["rt"]["pr"], self.board.routing.reporter.counters.presence)
@@ -105,6 +107,8 @@ class Minute(unittest.TestCase):
     def test_root_record(self):
         rec = _minute(Node(self.root), self.net.now)
         self.assertEqual((rec["att"], rec["par"], rec["rank"]), (1, None, 0))
+        self.assertIsNotNone(rec["seq"])  # its own, advanced at each beacon
+        self.assertEqual(rec["seq"], self.root.routing.dodag.sequence)
         self.assertEqual([row[0] for row in rec["nb"]], [NODE])
         self.assertTrue(rec["rt"]["rcv"] > 0)  # the node's reports
         self.assertFalse("pr" in rec["rt"])  # the root sends none
@@ -133,6 +137,36 @@ class Minute(unittest.TestCase):
         rec = _minute(node, self.net.now)
         self.assertEqual(rec["drp"], [[ROOT, 1], [4, 0], [9, 3]])
         self.assertEqual(json.loads(json.dumps(rec)), rec)
+
+
+class Sequence(unittest.TestCase):
+    def test_none_before_the_first(self):
+        # A root listening at boot (no version given, as the gateway's) and a
+        # node apart: neither holds a root sequence yet; the root's ver 0 is
+        # no version.
+        net = Network(1, KEY)
+        root = net.add(ROOT, routing=lambda e: Routing(e, EU_869, INFO, version=None))
+        node = net.add(NODE, routing=_routing)
+        net.run(30000)
+        self.assertFalse(root.routing.dodag.configured)
+        for board in (root, node):
+            rec = _minute(Node(board), net.now)
+            self.assertEqual((rec["ver"], rec["seq"]), (0, None), board.engine.address)
+
+    def test_advances_with_the_root_beacons(self):
+        net, root, board = _attached()
+        before = _minute(Node(board), net.now)["seq"]
+        net.run(net.now + 2 * INFO.presence_s * 1000)  # beacons every half period
+        after = _minute(Node(board), net.now)
+        self.assertNotEqual(after["seq"], before)
+        self.assertEqual(after["seq"], _minute(Node(root), net.now)["seq"])
+
+    def test_static_routes(self):
+        net = Network(1, KEY)
+        board = net.add(NODE)
+        net.run(1000)
+        self.assertIsNone(board.routing)
+        self.assertIsNone(_minute(Node(board), net.now)["seq"])
 
 
 class Neighbours(unittest.TestCase):

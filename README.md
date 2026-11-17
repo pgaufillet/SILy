@@ -391,7 +391,8 @@ At boot the board prints `SILY <version>`; then:
 - without a valid `/config.json`, or after 3 crashes without 10 minutes of
   stable run, it stays in safe mode: one `SILY SAFE field: problem` line per
   reason, the LED blinking fast, the REPL free (a power-on clears the crash
-  count: switching the box off and on retries);
+  count: switching the box off and on retries); the reasons also go into
+  the journal (a `safe` line, alone in that boot's segment);
 - otherwise the application runs: the mesh node and, once a second, the
   LED showing whether it is attached (the gateway always is). Ctrl-C, as
   `mpremote` sends when it connects, stops it cleanly (radio in standby,
@@ -419,27 +420,30 @@ records in `src/sily/record.py`; kept by `make deploy`): JSON lines in
 segments `NNNNNN.log`, a new one at each boot and every `journal.segment_kb`
 (64 KB), the oldest removed beyond `journal.max_kb` (1024 KB, about 18 h of
 a node, 10 h of a gateway with four nodes at SF7). Each boot writes a
-`boot` record, then every `journal.minute_s` (60 s) a `min` record: state
-(attached, parent, rank, parent set, grounded), battery, heap, queue, duty
-cycle, about 60 counter totals, the neighbours (margin, ETX, d_in, age;
-frames, RSSI and SNR measured per source), the journal's own longest write
-and sync; `ev` lines for the state changes seen by a poll once a second
-and for failed messages; on the gateway, the presence (with each box's
-battery and mode, carried in its presence extension), topology and node
-information reports received; `stop` or `fatal` (with the traceback) at
-the end. On the gateway, the `min` record also carries the turnaround of
-its immediate replies, timed as the bench's `timed` does but with the
-journal, display, test traffic and web server running (`src/sily/turn.py`,
-`tr`: replies, median, 90th percentile and maximum, in 0.1 ms, from the
-RxDone interrupt of the frame answered to the start of the reply). The
-file stays open and is synced every `journal.sync_s` (300 s), after the
-boot record and at stop or crash: a power cut loses at most the last 5
-minutes. `make journal PORT=... OUT=...` stops the application, copies
-the journal into `OUT/journal`, resets the board and prints a summary per
-boot (`tools/journal_summary.py`: span and end, attach time, parent
-changes, margins per link, frames dropped on purpose, counters, battery,
-write and sync stalls;
-display, access point and web server; reply turnaround; test traffic).
+`boot` record (with the build id: `make deploy` writes `git describe` into
+the copy it sends, `build` null on a board it never deployed), then every
+`journal.minute_s` (60 s) a `min` record: state (attached, parent, rank,
+parent set, grounded, DODAG version and root sequence), battery, heap,
+queue, duty cycle, about 60 counter totals, the neighbours (margin, ETX,
+d_in, age; frames, RSSI and SNR measured per source), the journal's own
+longest write and sync; `ev` lines for the state changes seen by a poll
+once a second and for failed messages; on the gateway, the presence
+(with each box's battery and mode, carried in its presence extension),
+topology and node information reports received; `stop` or `fatal` (with
+the traceback) at the end. On the gateway, the `min` record also carries
+the turnaround of its immediate replies, timed as the bench's `timed` does
+but with the journal, display, test traffic and web server running
+(`src/sily/turn.py`, `tr`: replies, median, 90th percentile and maximum,
+in 0.1 ms, from the RxDone interrupt of the frame answered to the start of
+the reply). The file stays open and is synced every `journal.sync_s`
+(300 s), after the boot record and at stop or crash: a power cut loses at
+most the last 5 minutes. `make journal PORT=... OUT=...` stops the
+application, copies the journal into `OUT/journal`, resets the board and
+prints a summary per boot (`tools/journal_summary.py`: build, span and
+end, attach time, parent changes, DODAG versions and root sequence,
+margins per link, frames dropped on purpose, counters, battery, write and
+sync stalls; display, access point and web server; reply turnaround; test
+traffic; safe mode's reasons).
 Times are per boot (ms since the board started): no absolute time on the
 boxes.
 
