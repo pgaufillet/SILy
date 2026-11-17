@@ -76,6 +76,9 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   `tools/network.example.json` and `tools/box.example.json`.
 - `tools/journal_summary.py` — summary of a journal read back from a box
   (`make journal`), per boot (CPython 3 or the unix port).
+- `tools/survey.py` — range survey: the links between a walking box and
+  boxes at fixed positions by distance, from their journals and the
+  walker's GPX track (CPython 3 or the unix port).
 - `tools/bench.py` — two-board bench measurements, run from the host over
   the serial ports; results in `docs/measurements.md`.
 - `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
@@ -463,6 +466,36 @@ record's `utc`): `utc + t - t_anchor`, the poll's one-way delay (tens of
 ms on the access point) not corrected. To set the clocks before a field
 test, open each box's page once with a phone whose clock is set by its
 network; a page left open keeps its box anchored.
+
+A range survey (`tools/survey.py`) sets the journals of a walking box and
+of boxes at fixed positions against the walker's track. Before the walk,
+set each box's clock (its page opened once); after it, read each journal
+back (`make journal PORT=... OUT=build/walk/box3`), export the walk from
+Garmin Connect as a GPX file and read the fixed boxes' positions from a
+map (decimal degrees); then
+
+    tools/survey.py --gpx walk.gpx --walker 3 --at 0=LAT,LON --at 7=LAT,LON \
+        --out build/walk build/walk/box3/journal build/walk/base/journal build/walk/box7/journal
+
+Each minute record covers a window since the previous one; its UTC comes
+from its box's anchors and the walker's position at its middle from the
+track (interpolated; none beyond its ends nor across 30 s without a
+point). `survey.csv` holds one row per window and link direction (`down`:
+the walker hears a fixed box; `up`: a fixed box hears the walker) with the
+distance, the frames heard in the window, RSSI and SNR means, last margin,
+the walker's test messages and parent, and on the gateway's rows the
+walker's messages it received; `survey.md`, also printed, a table per
+link and direction by distance band (`--band`, 50 m): windows, share
+heard, frames, RSSI and SNR means, lowest margin, the walker's messages
+and its share of windows through a relay, then the farthest distance
+heard; under the gateway's, the walker's messages submitted, received
+and the delivery share by band. Submitted and received come from
+different boxes' windows: the latency (seconds, against windows of 10 s)
+and the retries move a few messages across windows and bands. The
+records it cannot place are counted at its top. A boot whose
+start the journal's bound removed is left out: with `journal.minute_s` at
+10 s, the bound holds about a sixth of the hours above, so read the
+journals back soon after the walk.
 
 Test traffic (`src/sily/traffic.py`) measures the mesh in the field before
 punches exist. With `traffic.enabled` in the network file, every node
