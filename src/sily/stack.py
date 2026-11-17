@@ -124,7 +124,10 @@ class Stack:
                     info.profile,
                 )
             node = NodeInfo(hw.mac(), firmware_version(), name)
-            self.routing = Routing(self.engine, profile, info, node_info=node, extension=extension)
+            # The root's version: the one after the network's (no persistent state).
+            self.routing = Routing(
+                self.engine, profile, info, version=None, node_info=node, extension=extension
+            )
             self.routing.on_report = on_report
         radio = self.filter
         self.drop = None

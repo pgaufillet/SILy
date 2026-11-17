@@ -12,6 +12,7 @@ from mesh import profile as profiles
 from mesh.counter import FrameCounter
 from mesh.dodag import (
     DESYNC_SLOTS,
+    FOLLOW_PERIODS,
     INFO_SEQUENCE,
     INFO_SIZE,
     TOPOLOGY_S,
@@ -214,6 +215,12 @@ class _Case(unittest.TestCase):
     def assertQuiet(self, b, start, end):
         b.advance(end)
         self.assertEqual(b.port9(start, end), [])
+
+    def after_beacon(self, b):
+        """Advance just past the root's next beacon: none for 0.45 periods."""
+        sent = len(b.adverts())
+        while len(b.adverts()) == sent:
+            b.advance(b.now + 50)
 
 
 class Codec(unittest.TestCase):
@@ -1242,12 +1249,6 @@ class Root(_Case):
         self.assertEqual((b.dodag.version, b.dodag.counters.newer), (5, 1))
         self.assertEqual(b.dodag.counters.solicits, 0)
 
-    def after_beacon(self, b):
-        """Advance just past the root's next beacon: none for 0.45 periods."""
-        sent = len(b.adverts())
-        while len(b.adverts()) == sent:
-            b.advance(b.now + 50)
-
     def test_root_answers_solicitations_and_older_versions(self):
         # Each time right after a beacon, so that the advertisement within
         # Imin is Trickle's answer, not the next beacon.
@@ -1266,3 +1267,152 @@ class Root(_Case):
     def test_set_version_on_a_node_refused(self):
         b = Bench()
         self.assertRaises(ValueError, b.dodag.set_version, 1, 0)
+
+
+class RootBoot(_Case):
+    """A root without a given version (the application's, `sily.stack`, §9
+    global repair at boot): silent until it hears a frame, then the version
+    after that frame's; afterwards the version after the network's whenever
+    a frame of finite rank shows the network ahead of it."""
+
+    def root(self, sequence=None):
+        b = Bench(address=ROOT, info=INFO, version=None, sequence=sequence)
+        self.assertEqual((b.dodag.configured, b.dodag.counters.issued), (False, 0))
+        return b
+
+    def issued(self, b, start, version, count=1):
+        """version issued at start: carried at once, advertised within Imin."""
+        d = b.dodag
+        self.assertEqual((d.version, b.engine.dodag_version), (version, version))
+        self.assertTrue(d.configured)
+        self.assertEqual(d.counters.issued, count)
+        return self.assertAdvertWithin(b, start, version=version, rank=0)
+
+    def test_silent_until_a_first_frame(self):
+        b = self.root()
+        b.advance(5 * PERIOD)
+        self.assertEqual(b.frames, [])
+        self.assertIsNone(b.engine.deadline())  # no timer: nothing to send
+        start = b.now
+        b.rx(self.p.presence(8, 4, 200))  # a child of the root's previous run
+        t, h = self.issued(b, start, 5)
+        # The root sequence after the newest heard; beacons from then on.
+        self.assertEqual(b.port9(t)[0][2][INFO_SEQUENCE], 201)
+        at = b.dodag._beacon_at
+        self.assertTrue(start + PERIOD * 9 // 20 <= at <= start + PERIOD * 11 // 20, at - start)
+        b.advance(at + 300)
+        self.assertEqual([p[INFO_SEQUENCE] for _, _, p in b.port9(at)], [202])
+
+    def test_first_frame_of_rank_255_counts(self):
+        # The root off beyond the silence limit: its former children are
+        # detached and only solicit, in the version they hold. The
+        # solicitation is answered in the new version.
+        b = self.root()
+        b.advance(PERIOD)
+        start = b.now
+        b.rx(self.s.solicitation(9))
+        self.issued(b, start, 10)
+        self.assertEqual(b.dodag.counters.solicited, 1)
+        # A fresh node's solicitation carries version 0 (nothing adopted).
+        b = self.root()
+        b.rx(self.s.solicitation(0))
+        self.issued(b, 0, 1)
+
+    def test_version_after_the_first_wraps(self):
+        b = self.root()
+        b.rx(self.p.frame(8, 15))
+        self.issued(b, 0, 0)
+
+    def test_newer_version_heard_later_issues_the_next(self):
+        # A part of the network still ahead of the root (heard after its
+        # first frame, a laggard's): the version after it.
+        b = self.root()
+        b.rx(self.p.frame(8, 4))
+        b.steady([(self.p, 8, 5)])
+        self.after_beacon(b)
+        start = b.now
+        b.rx(self.q.frame(16, 7))
+        self.assertEqual(b.dodag.counters.newer, 1)
+        self.issued(b, start, 8, 2)
+        # The network adopting it (older versions) changes nothing.
+        b.rx(self.p.frame(8, 5))
+        b.rx(self.q.frame(16, 7))
+        self.assertEqual((b.dodag.version, b.dodag.counters.issued), (8, 2))
+
+    def test_incomparable_and_rank_255_not_followed(self):
+        b = self.root()
+        b.rx(self.p.frame(8, 10))
+        self.issued(b, 0, 11)
+        # 8 apart: following it would chase two parts of the network for
+        # ever (each newer than the other in turn).
+        b.rx(self.q.frame(8, 3))
+        self.assertEqual(b.dodag.counters.incomparable, 1)
+        # Rank 255 not followed (§9): a fresh node's 0 is 5 ahead of 11, a
+        # detached node adopts any other version anyway.
+        b.rx(self.s.solicitation(0))
+        b.rx(self.s.info(RANK_INFINITE, 14, seq=90))
+        self.assertEqual((b.dodag.version, b.dodag.counters.issued), (11, 1))
+
+    def test_own_version_with_a_newer_sequence_issues_the_next(self):
+        # The root's own version with a sequence newer than its own: from its
+        # previous run, the boot's first frame having carried none (a
+        # laggard's data frame). Only the root issues either.
+        b = self.root()
+        b.rx(self.p.frame(8, 4))
+        b.steady([(self.p, 8, 5)])
+        self.after_beacon(b)
+        own = b.dodag.sequence
+        start = b.now
+        b.rx(self.q.presence(16, 5, own, parent=P))  # the same: nothing
+        b.rx(self.q.presence(16, 5, (own + 200) & 0xFF, parent=P))  # older (serial)
+        b.rx(self.q.presence(16, 4, (own + 90) & 0xFF, parent=P))  # another version
+        b.rx(self.q.info(RANK_INFINITE, 5, seq=(own + 90) & 0xFF))  # rank 255
+        # Floating: its sequence, 128 increments behind, would look newer.
+        stale = Message(FIRST_HOP, 0, PRESENCE, bytes([(own + 90) & 0xFF, 0, 0x5A]))
+        b.rx(self.q.frame(16, 5, [stale], P, floating=1))
+        self.assertEqual((b.dodag.version, b.dodag.counters.issued), (5, 1))
+        b.rx(self.q.presence(16, 5, (own + 90) & 0xFF, parent=P))
+        self.issued(b, start, 6, 2)
+
+    def test_following_ends_after_its_periods(self):
+        # Later, only a second root would show a newer version or sequence:
+        # two roots following each other would issue versions without end.
+        end = FOLLOW_PERIODS * PERIOD
+        for at, version, issued in ((end - 1, 8, 2), (end, 5, 1)):
+            b = self.root()
+            b.rx(self.p.frame(8, 4))  # version 5 issued at 0
+            b.advance(at)
+            b.rx(self.q.frame(16, 7))
+            self.assertEqual((b.dodag.version, b.dodag.counters.issued), (version, issued))
+            b = self.root()
+            b.rx(self.p.frame(8, 4))
+            b.advance(at)
+            seq = (b.dodag.sequence + 90) & 0xFF
+            b.rx(self.q.presence(16, 5, seq, parent=P))
+            self.assertEqual(b.dodag.counters.issued, issued, at)
+
+    def test_given_version_neither_listens_nor_follows(self):
+        b = Bench(address=ROOT, info=INFO, version=5)
+        self.assertAdvertWithin(b, 0, version=5, rank=0)  # nothing heard
+        b.steady()
+        own = b.dodag.sequence
+        b.rx(self.p.frame(8, 7))
+        b.rx(self.q.presence(16, 5, (own + 90) & 0xFF, parent=P))
+        self.assertEqual((b.dodag.version, b.dodag.counters.issued), (5, 0))
+
+    def test_first_sequence_given_listens_for_the_version_only(self):
+        b = self.root(sequence=100)
+        b.advance(PERIOD)
+        self.assertEqual(b.frames, [])
+        start = b.now
+        b.rx(self.p.presence(8, 4, 200))
+        t, h = self.issued(b, start, 5)
+        self.assertEqual(b.port9(t)[0][2][INFO_SEQUENCE], 100)
+
+    def test_set_version_ends_the_listening(self):
+        b = self.root()
+        b.dodag.set_version(3, 0)
+        b.wake()
+        self.issued(b, 0, 3)
+        b.rx(self.p.frame(8, 1))  # older: no longer the first frame
+        self.assertEqual((b.dodag.version, b.dodag.counters.issued), (3, 1))

@@ -165,13 +165,34 @@ and the port 9 handler. It owns the board's `mesh.parents.Parents` and its
   on-air delay varies by up to a quarter period; at one beacon per period,
   two lost beacons could leave a gap of 3.3 periods and detach a subtree.
   `set_version` issues a version (and new parameters) and re-arms the
-  beacon on the new period: the policy deciding when (global repair, §9)
-  belongs to the root's later step. **Root sequence at boot** (§9): the
-  one after the newest heard while the root listens, any value (0) if
-  none; the root of this step listens until it queues its first DODAG
-  information (the version is given, ``version``: the boot listening of a
-  presence period belongs with the global repair policy), unless a first
-  sequence is given (``sequence``).
+  beacon on the new period. **Version at boot** (§9 global repair, MP14;
+  ``version`` None, the application's root): the root sends nothing (no
+  beacon, Trickle stopped) until it hears a frame, of any port and rank
+  (a detached node's solicitation carries the version it holds, a fresh
+  node's 0), then issues the version after that frame's, before the
+  frame's messages are processed (its answers carry it); alone, it has no
+  one to talk to. It then **follows the network** for `FOLLOW_PERIODS`
+  presence periods: a frame of finite rank of a newer version, or of its
+  own version carrying a newer root sequence without the floating flag
+  (from the root's previous run: only the root issues either; a floating
+  node's sequence, 128 increments behind, would look newer), makes it
+  issue the version after that frame's. Its previous run's network shows
+  within a period or two; later, only a second root would, and two roots
+  following each other would issue versions without end. Attached nodes
+  adopt a newer version, detached ones any other after their solicitation,
+  so that a restarted root's subtree takes it whatever the restart lasted;
+  in the version it held, the sequence of the root's previous run, newer,
+  would make the restarted root's frames not feasible until forgotten. Not
+  followed: frames of rank 255 (a fresh node's 0 would make a root at 9 to
+  15 issue again) and versions 8 apart (two parts of the network, each
+  newer than the other in turn, would be chased for ever). A root given
+  its version (``version``) neither listens nor follows: it advertises
+  from boot. The rest of the policy
+  (operator command, parameter change, inconsistency, rate limit) belongs
+  to the root's later step. **Root sequence at boot** (§9): the one after
+  the newest heard until the root queues its first DODAG information, any
+  value (0) if none, unless a first sequence is given (``sequence``: the
+  version is still the one after the network's when ``version`` is None).
 
 ``next_hop`` gives the preferred parent for upward messages, none for an
 upward class 1/2 message while the node is ungrounded (the link engine's
@@ -223,6 +244,7 @@ DESYNC_SLOTS = 4  # random delay of the poison and solicitations (CW_MIN slots, 
 TOPOLOGY_ON_CHANGE = 0x01  # flags bit 0: topology report on change (deployment, §17)
 HOLD_IMIN = 2  # detach hold, in Imin (§9)
 WINDOW_SLOTS = 8  # answer window beyond Imin: solicitation 1 + backoff 4 + answer 2 + step 1
+FOLLOW_PERIODS = 4  # root at boot: presence periods it follows the network after its first version
 
 # Topology period (s) per SF 7-12, SILy profile (§16).
 TOPOLOGY_S = (180, 300, 600, 900, 3600, 3600)
@@ -372,6 +394,7 @@ class Counters:
         self.rank_errors = 0  # reported by data-path validation
         self.foreign_profile = 0  # DODAG information of another regional profile (MP22)
         self.malformed = 0  # DODAG information that cannot be decoded
+        self.issued = 0  # root: versions issued (`Dodag.set_version`, at boot included)
 
 
 class Dodag:
@@ -381,15 +404,17 @@ class Dodag:
     profile: own regional profile identifier (§4); info: `DodagInfo` the
     root issues, or a node's parameters until it adopts the network's
     (`default_info` of the engine's SF by default); version: the root's
-    first DODAG version; parents: its `Parents` (built on the engine's
-    neighbour table by default); sequence: the root's first root sequence
-    (None: the one after the newest heard before its first DODAG
+    first DODAG version (None: the root listens, then follows the network:
+    the version after the one of the first frame heard, then after a newer
+    one for `FOLLOW_PERIODS`, see the module docstring); parents: its `Parents` (built on the
+    engine's neighbour table by default); sequence: the root's first root
+    sequence (None: the one after the newest heard before its first DODAG
     information, 0 if none).
 
     Read: ``info``, ``version``, ``sequence`` (the root sequence its frames
-    carry), ``configured`` (a version adopted since boot; always True on
-    the root), ``attached``, ``imin_ms``, ``topology_ms``, ``parents``,
-    ``trickle``, ``counters``.
+    carry), ``configured`` (a version held: adopted since boot, or issued
+    by the root; False only on a root still listening), ``attached``,
+    ``imin_ms``, ``topology_ms``, ``parents``, ``trickle``, ``counters``.
     """
 
     def __init__(self, engine, profile, info=None, version=0, parents=None, sequence=None):
@@ -405,8 +430,13 @@ class Dodag:
         self.trickle = Trickle(1, 1, engine.random)
         self._buf = bytearray(INFO_SIZE)  # payload of every advertisement, updated in place
         self._apply_info(info)
-        self.version = version & VERSION_MASK if self.root else 0
-        self.configured = self.root
+        # Root without a given version: silent until its first frame, then
+        # the version after the network's (§9 global repair at boot).
+        self._follow = self.root and version is None
+        self._listening = self._follow
+        self._follow_until = None  # root at boot: end of its following (§9)
+        self.version = version & VERSION_MASK if self.root and version is not None else 0
+        self.configured = self.root and not self._listening
         parents.on_new_version(self.version, 0)
         engine.dodag_version = self.version
         engine.rank = parents.rank
@@ -485,8 +515,8 @@ class Dodag:
         return None
 
     def reset(self, now, need_info=False):
-        """Reset the Trickle timer (an event of §9) if the node has a route."""
-        if self.attached:
+        """Reset the Trickle timer (an event of §9) if the node has a route and a version."""
+        if self.attached and self.configured:
             self.trickle.reset(now, need_info)
 
     def rank_error(self, now):
@@ -505,12 +535,18 @@ class Dodag:
             self._advertise(True)
 
     def set_version(self, version, now, info=None):
-        """Root: issue DODAG version (and new parameters info); Trickle reset."""
+        """Root: issue DODAG version (and new parameters info); Trickle reset.
+
+        Ends the listening of a root without a given version.
+        """
         if not self.root:
             raise ValueError("not the root")
         if info is not None:
             self._apply_info(info)
         self.version = version & VERSION_MASK
+        self.configured = True
+        self._listening = False
+        self.counters.issued += 1
         self.engine.dodag_version = self.version
         self.parents.on_new_version(self.version, now)
         self.trickle.reset(now, True)
@@ -523,6 +559,9 @@ class Dodag:
         if n is None:
             return n
         self._dirty = True  # a poison too: its children select again
+        if self._listening:  # the root's first frame, rank 255 included (§9)
+            self.set_version(header.dodag_version + 1, now)
+            self._follow_until = now + FOLLOW_PERIODS * self.engine.neighbours.period_ms
         if header.rank == RANK_INFINITE:
             return n
         c = self.counters
@@ -542,6 +581,8 @@ class Dodag:
             c.newer += 1
             if not self.root:
                 self._lag(now)
+            elif self._following(now):  # the network ahead of the root
+                self.set_version(header.dodag_version + 1, now)
         return n
 
     def _preferred(self):
@@ -563,10 +604,32 @@ class Dodag:
         if seq is None:
             return
         self.engine.neighbours.set_sequence(header.source, seq)
-        if self.root and self._seq is None:
+        if not self.root:
+            return
+        own = self._seq
+        if own is None:
             newest = self._newest
             if newest is None or sequence_newer(seq, newest):
                 self._newest = seq
+        elif (
+            self._following(now)
+            and header.dodag_version == self.version
+            and header.rank != RANK_INFINITE
+            and not header.floating
+            and sequence_newer(seq, own)
+        ):
+            # Its own version with a newer sequence: issued by its previous
+            # run, which only the root does (§9). Not from a floating node:
+            # 128 increments behind, its sequence would look newer.
+            self.set_version(self.version + 1, now)
+
+    def _following(self, now):
+        # Root at boot: within FOLLOW_PERIODS of its first version. Its
+        # previous run's network shows within a period or two; later, only a
+        # second root would, and two roots following each other would issue
+        # versions without end.
+        t = self._follow_until
+        return t is not None and now < t
 
     def _ask(self, now):
         # Solicit in this step's tick, at most once per Imin.
@@ -682,8 +745,9 @@ class Dodag:
     def _start(self, now):
         self._started = True
         if self.root:
-            self.trickle.reset(now, True)
-            self._beacon_at = self._next_beacon(now)
+            if not self._follow:  # otherwise from its first version (`set_version`)
+                self.trickle.reset(now, True)
+                self._beacon_at = self._next_beacon(now)
         else:
             self._solicit_at = now + randbelow(self.engine.random, self.imin_ms + 1)
 

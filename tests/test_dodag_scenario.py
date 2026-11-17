@@ -27,10 +27,11 @@ A, B, C, D = 0x00A1, 0x00B1, 0x00C1, 0x00D1
 R = 0x0101  # a relay
 
 
-def _routing(reports, sequence=None):
-    # sequence: the root's first root sequence (`mesh.dodag.Dodag`).
+def _routing(reports, sequence=None, version=0):
+    # sequence, version: the root's first root sequence and DODAG version
+    # (`mesh.dodag.Dodag`; version None: issued after the first frame heard).
     def make(engine):
-        r = Routing(engine, EU_869, INFO, sequence=sequence)
+        r = Routing(engine, EU_869, INFO, version, sequence=sequence)
         r.on_report = lambda port, origin, report, header: reports.append((port, origin))
         return r
 
@@ -38,12 +39,13 @@ def _routing(reports, sequence=None):
 
 
 class Line:
-    def __init__(self, seed, sequence=None):
+    def __init__(self, seed, sequence=None, version=0):
         net = Network(seed, _KEY)
         self.net = net
         self.names = (ROOT, A, B, C, D)
         self.reports = []
-        self.boards = [net.add(n, routing=_routing(self.reports, sequence)) for n in self.names]
+        make = _routing(self.reports, sequence, version)
+        self.boards = [net.add(n, routing=make) for n in self.names]
         for a, b in zip(self.names, self.names[1:]):
             net.link_both(a, b)
         self.root = self.boards[0]
@@ -740,3 +742,174 @@ class SequenceForgotten(unittest.TestCase):
         net.run(net.now + PERIOD)
         self.assertEqual(boards[ROOT].received(20), [b"back"])
         self.assertEqual(b.failures, [])
+
+
+class _FirstInfoLost(Observer):
+    """`sim.net.Observer` cutting the link from the root to A while the first
+    DODAG information of the root's next boot is on air."""
+
+    def __init__(self, line):
+        self.line = line
+        self.lost = []
+
+    def booted(self, board):
+        if board is not self.line.root:
+            return
+        engine = board.engine
+        base = engine.sent
+        net = self.line.net
+
+        def sent(sel, counter, now):
+            base(sel, counter, now)
+            info = any(m.port == DODAG_INFO and len(m.payload) for m in sel.messages)
+            if info and not self.lost:
+                self.lost.append(now)
+                net.medium.cut(ROOT, A)
+                net.at(now + sel.toa_ms + 1, net.medium.restore, ROOT, A)
+
+        engine.sent = sent
+
+
+class RootReboot(unittest.TestCase):
+    """MP14: the root restarts while its subtree stays up. The root of the
+    application (`sily.stack`: `Routing` without a version) issues the
+    version after the one heard in the first frame of the network: the
+    attached nodes adopt it (newer), the detached ones after their
+    solicitation (another version). In the root's own version they would
+    hold the root sequence of its previous run, ahead of the one it starts
+    from: an older sequence is not feasible, so they would take none of its
+    beacons, float after G and fail their class 1 messages until they forget
+    the sequence (50 presence periods).
+
+    The line runs for 20 presence periods before the restart: the root
+    sequence is about 40, far ahead of what a root starting from scratch
+    would carry. Bounds from the root's return (it boots) until every node
+    is attached, grounded and on the root's new version: 2.5 periods after
+    a short restart (the root silent until A's next frame, up to 1.1
+    periods, then one Imin per hop: about 1.8 periods without loss; two
+    failed rounds at one hop, the answers of a node's two neighbours,
+    hidden from each other, colliding, add about 0.5 period; 2.1 periods at
+    most over 500 seed shifts, 2.2 when the first DODAG information is
+    lost); 7 periods after a long one, the line detached (A's next
+    solicitation, at most one period, then the rejoin of each hop through a
+    parent heard grounded, up to about one period each, §9 repair times;
+    5.4 periods at most over 500 seed shifts). A class 1 message of every
+    node then reaches the root within 4 periods (retries with backoff:
+    21 s at most over 500 seed shifts); a node floating would fail its
+    message after its 2-period hold. Still there 5 periods later, beyond
+    G: settled again within LATER (5 periods), whereas a node floating for
+    good on the sequence of the root's previous run stays so until it
+    forgets it. Usually still settled then; 2 runs in 1000 had an ordinary
+    transient detach under way (a parent's frames lost at its child for a
+    silence limit, under collisions with the child's own child, hidden
+    from the parent), settled again within 0.6 period."""
+
+    RUN = 20 * PERIOD
+    LATER = 5 * PERIOD
+
+    def line(self, seed):
+        line = Line(seed, version=None)
+        line.run(self.RUN)
+        self.assertEqual(line.attached(), [True] * 4)
+        self.assertTrue(line.root.routing.dodag.sequence > 30, line.root.routing.dodag.sequence)
+        return line
+
+    def restart(self, line, off_ms):
+        """Switch the root off for off_ms; return (its version before, the time it is back)."""
+        old = line.root.routing.dodag.version
+        back = line.net.now + off_ms
+        line.root.power_loss(off_ms=off_ms)
+        line.run(back)
+        line.root.listen(20)
+        return old, back
+
+    def settled(self, line):
+        root = line.root.routing.dodag
+        return root.configured and all(
+            b.routing.attached
+            and b.routing.parents.grounded
+            and b.routing.dodag.version == root.version
+            for b in line.nodes
+        )
+
+    def returned(self, line, old, back, bound):
+        """Run until every node is attached, grounded and on the root's new
+        version; return the time it took from back."""
+        while not self.settled(line):
+            states = [
+                (b.engine.rank, b.routing.dodag.version, b.routing.parents.grounded)
+                for b in line.nodes
+            ]
+            self.assertTrue(line.net.now < back + bound, (old, states))
+            line.run(line.net.now + 100)
+        root = line.root.routing.dodag
+        self.assertEqual((root.version, root.counters.issued), ((old + 1) & 0xF, 1))
+        return line.net.now - back
+
+    def delivered(self, line):
+        """A class 1 message of every node reaches the root (within 4 periods)."""
+        before = len(line.root.received(20))
+        start = line.net.now
+        for b in line.nodes:
+            b.submit(20, 1, ROOT, bytes([b.address]))
+        while len(line.root.received(20)) - before < len(line.nodes):
+            self.assertTrue(line.net.now < start + 4 * PERIOD, [b.failures for b in line.nodes])
+            line.run(line.net.now + 100)
+        got = sorted(line.root.received(20)[before:])
+        self.assertEqual(got, [bytes([b.address]) for b in line.nodes])
+        self.assertEqual([b.failures for b in line.nodes], [[]] * 4)
+
+    def later(self, line, old):
+        """Still there 5 periods later, beyond G: settled (again) within
+        LATER, still on the root's new version, delivering."""
+        line.run(line.net.now + 5 * PERIOD)
+        self.returned(line, old, line.net.now, self.LATER)
+        self.delivered(line)
+
+    def test_short_restart(self):
+        line = self.line(21)
+        poisons = [b.routing.dodag.counters.poisons for b in line.nodes]
+        old, back = self.restart(line, PERIOD // 2)
+        self.returned(line, old, back, 5 * PERIOD // 2)
+        # Nobody detached: adopted on the way.
+        self.assertEqual([b.routing.dodag.counters.poisons for b in line.nodes], poisons)
+        self.delivered(line)
+        self.later(line, old)
+
+    def test_long_off(self):
+        line = self.line(22)
+        old, back = self.restart(line, 4 * PERIOD)
+        self.assertEqual(line.attached(), [False] * 4)  # beyond the silence limit
+        self.returned(line, old, back, 7 * PERIOD)
+        self.delivered(line)
+        self.later(line, old)
+
+    def test_short_restart_first_information_lost(self):
+        # A adopts the version from the root's next DODAG information (the
+        # next Trickle one, a beacon, or the answer to A's solicitation once
+        # a frame of the newer version is heard).
+        line = self.line(24)
+        lose = _FirstInfoLost(line)
+        line.net.observers.append(lose)
+        old, back = self.restart(line, PERIOD // 2)
+        self.returned(line, old, back, 5 * PERIOD // 2)
+        self.assertEqual(len(lose.lost), 1)
+        self.delivered(line)
+
+    def test_cold_start_issues_one_version(self):
+        # The root boots 1.5 periods after A, B and C, D 3 periods after them
+        # (a fresh node, version 0, joining an attached network): one version
+        # issued, adopted once by every node, kept.
+        line = Line(25, version=None)
+        line.root.power_loss(off_ms=3 * PERIOD // 2)
+        line.nodes[3].power_loss(off_ms=3 * PERIOD)
+        line.run(8 * PERIOD)
+        self.assertEqual(line.attached(), [True] * 4)
+        root = line.root.routing.dodag
+        version = root.version
+        line.run(20 * PERIOD)
+        self.assertTrue(self.settled(line))
+        self.assertEqual((root.version, root.counters.issued), (version, 1))
+        self.assertEqual([b.routing.dodag.counters.adoptions for b in line.nodes], [1] * 4)
+        line.root.listen(20)
+        self.delivered(line)

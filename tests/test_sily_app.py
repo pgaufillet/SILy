@@ -335,9 +335,11 @@ def _kinds(records):
 
 
 class Journal(Console):
-    def _run(self, hw, ms, **fields):
+    def _run(self, hw, ms, tasks=(), **fields):
         fields.setdefault("journal", {"minute_s": 1})
         a = _app(hw, **fields)
+        for factory in tasks:
+            a.add_task(factory)
         a.add_task(_after(ms, lambda a: a.stop()))
         result = app.start(a)
         records, bad = journal.read(JOURNAL)
@@ -347,7 +349,14 @@ class Journal(Console):
     def test_boot_minute_stop(self):
         hw = FakeHw()
         hw.battery = 3870
-        a, result, records = self._run(hw, 1500)
+        # A gateway alone sends nothing (its version follows the network's):
+        # a node's frame, which it answers at once, makes its counter move.
+        frame = probe_frame(1, bytes.fromhex(KEY))
+
+        def deliver(a):
+            a.stack.adapter.on_receive(frame, -70, 6.5)
+
+        a, result, records = self._run(hw, 1500, (_after(50, deliver),))
         self.assertEqual(result, app.STOPPED)
         kinds = _kinds(records)
         self.assertEqual(kinds[0], "boot")

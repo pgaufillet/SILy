@@ -165,7 +165,7 @@ measurement recorded).
 | MP11 | Loop freedom, or loops detected and broken immediately (rank / feasibility condition, data-path validation, hop limit); *immediately* = negligible against the system's time step, the presence period | designed | §9: RPL rank rule, rank following within L + 56, poisoning before rejoin, Babel's feasibility condition with a root sequence (L kept across a detach), data-path validation with duplicate cache; no hop limit needed. No loop in the cases checked (TLA+ `DODAG`, `Seq = "babel"`: line, star, star2 and diamond graphs, a dead relay, up to 1–3 losses in any pattern, one root sequence increment, fixed link costs; a diamond run with 2 losses stopped incomplete), the argument holding whatever was lost; without the root sequence, none with at most one consecutive loss per link, and beyond, a loop ended by a parent switch or at the L + 56 bound: about 1 s with traffic, at most about 7 Imin idle (0.4–0.7 presence period at SF7–12), without loss of class 1/2 messages (custody): negligible against the presence period, hence accepted |
 | MP12 | Stability: hysteresis, no route flapping; link quality (margin, delivery ratio) preferred over hop count; asymmetric links detected | designed | §9: ETX over 16-frame windows, margin eligibility with 3/6 dB hysteresis, ETX ≤ 4 eligibility (waived, for reachability alone, only on the link to the root and the last candidate's), parent switch threshold, rank hysteresis; asymmetric links flagged by the root |
 | MP13 | Bounded resources: sized tables (default 64 nodes, depth 8), bounded queues and buffers, documented degradation beyond | designed | §12 (resource table and degradation), §9 (neighbour table), §10 (graph, depth) |
-| MP14 | Reboot tolerance: a rebooted node or root rejoins without operator action; no persistent state required except security counters and the duty-cycle window (§6) | designed | §9: a node solicits at boot and rejoins; the root listens one presence period and issues the next DODAG version (no persistent routing state); persistent state limited to the frame counter and class 2 sequences in NVS, replay table and duty-cycle window in RTC memory (§6, §14) |
+| MP14 | Reboot tolerance: a rebooted node or root rejoins without operator action; no persistent state required except security counters and the duty-cycle window (§6) | designed | §9: a node solicits at boot and rejoins; the root sends nothing until it hears a frame, then issues the version after that frame's, and after a newer one heard within 4 presence periods (no persistent routing state): its subtree adopts it, attached or detached (host simulator: root restarted on a line within and beyond its children's silence limit, every node attached, grounded and delivering class 1 again within 2 and 6 presence periods); persistent state limited to the frame counter and class 2 sequences in NVS, replay table and duty-cycle window in RTC memory (§6, §14) |
 | MP15 | Partition tolerance: an isolated node stays audible, is reported as soon as a neighbour hears it and rejoins automatically; class 1 holds messages during repair; no long-term store-and-forward (application journals do that) | designed | §9: a node without route solicits once per presence period and appears in its neighbours' topology reports; §12: class 1 and 2 held 2 presence periods from the loss of route or grounding, not renewed at a hand-over |
 | MP16 | Coexistence: several networks on one channel (network identity / key); foreign LoRa traffic filtered (private sync word) | designed | §14: private sync word filters LoRaWAN; other networks fail authentication, counted and reported; two networks in range tolerated, not supported (shared capacity) |
 | MP17 | Security: only authenticated nodes inject traffic or routing information; replay protection; limits of a network-wide shared key documented | designed | §14: AES-128-CCM on every frame (4-byte tag), nonce from address and lifelong frame counter, replay table, PBKDF2 key derivation, staged key switch, next key wrapped under the current key for distribution by the application; threat model and limits of the shared key |
@@ -1095,10 +1095,17 @@ acknowledgement window and the time of its newest failure.
   128 of serial arithmetic), and takes the next sequence heard
   from a neighbour that is not floating, at any rank (every entry of that
   time has long expired). The root at boot takes the sequence after the
-  newest heard during its listening period, as for the version
-  (presences carry it), any value if none. Adopting a new DODAG version
+  newest heard before its first DODAG information (presences carry it),
+  any value if none. Adopting a new DODAG version
   restarts L and takes the sequence of the information adopted:
-  sequences are compared within a version.
+  sequences are compared within a version. A root restarted in the
+  version its network holds would therefore strand its subtree: the
+  nodes hold the sequence of its previous run, newer than the one it
+  starts from unless one of their presences was heard in time, and its
+  frames are not feasible to them (they float after G, then fail their
+  class 1 messages) until they forget it, up to 50 presence periods. So
+  the root issues a new version at boot (DODAG version and global
+  repair, below).
 - **Repair times**: a local repair is unchanged when the node was at its
   lowest rank, and gains candidates: a neighbour grounded elsewhere
   becomes feasible at any rank once its sequence is newer than the
@@ -1162,12 +1169,42 @@ acknowledgement window and the time of its newest failure.
   operating mode, §17) is a new version. Configuration and routing
   generation are thus checked in every frame header at no cost.
 - The root issues a new version (**global repair**) only on demand: at
-  **boot** (it listens for one presence period and takes the
-  version after the newest one heard, any value if none: no persistent
-  state); on **operator command**; on a **parameter change**; on
-  **inconsistency** (rank-error flags in 3 consecutive presence reports of
-  one node, or a node still unreachable after rerouting, §10). At
-  most one version every **4 presence periods**.
+  **boot**; when its **network is ahead** of it; on **operator command**;
+  on a **parameter change**; on **inconsistency** (rank-error flags in 3
+  consecutive presence reports of one node, or a node still unreachable
+  after rerouting, §10). At most one version every **4 presence periods**
+  for the last three.
+- **At boot** the root sends nothing (no beacon, no advertisement) until
+  it hears a frame, of any port and rank, then issues the version after
+  that frame's (no persistent state); alone, it has no one to talk to.
+  The version comes from the frame header, a solicitation's included: a
+  detached node carries the version it holds, a fresh node 0 (it has
+  adopted nothing). Its subtree takes the new version whatever the
+  restart lasted: nodes still attached (a restart within their silence
+  limit) adopt it as newer, without detaching; detached ones (beyond it)
+  adopt it as another version after their solicitation, the first of
+  which ends the root's silence. Listening longer before the first
+  advertisement would bring an attached subtree nearer its silence limit.
+  Left open: the root off beyond the silence limit during a global
+  repair, back hearing first a laggard's older version while the rest
+  of its network, detached, holds the next one: it issues that one, and
+  nothing shows the network ahead (solicitations carry no sequence), so
+  the rest stays without route until it forgets the sequence.
+- **Network ahead**: during the 4 presence periods after its first
+  version, a frame of finite rank of a newer version, or of the root's
+  own version with a newer root sequence without the floating flag
+  (impossible in steady state, only the root issuing either: a part of
+  the network still holds the version or sequence of the root's previous
+  run, e.g. a laggard's older version heard first at boot; a floating
+  node's sequence, 128 increments behind, would look newer), makes the
+  root issue the version after that frame's. The previous run's network
+  shows within a period or two; later, only a second root would (a
+  misconfiguration, §13: MP22), and two roots following each other would issue
+  versions without end. Not followed: frames of rank 255 (a fresh node's
+  0 would otherwise make a root at versions 9 to 15 issue again), and versions 8 apart (two parts
+  of the network, each newer than the other in turn, would be chased for
+  ever; that part detaches from its top, whose parent is no longer of its
+  version, and adopts the root's version after its solicitation).
 - **Serial arithmetic on 4 bits** compares versions less than 8 apart. That
   suffices: a node keeps a finite rank only while it hears a parent, so a node
   cut off from the root detaches within 2.5 presence periods; frames of rank 255
