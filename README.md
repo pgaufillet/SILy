@@ -39,12 +39,14 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
     - `record.py` — what the journal records (boot, minute, events,
       gateway reports) and the presence extension (battery, mode);
     - `utc.py` — the journal's clock anchored to UTC by the phone's time
-      of the page's polls, the RTC's calendar (*Application*);
+      of the page's polls and by the RTC (set by `make configure`), the
+      RTC's calendar (*Application*);
     - `tap.py` — link measurements (frames, RSSI, SNR) per source heard;
     - `drop.py` — drop rates: a share of chosen sources' frames dropped on
       purpose, for losses on a bench (*Application*);
     - `traffic.py` — test traffic: numbered messages from the nodes,
-      delivery and latency per node at the gateway (*Application*);
+      delivery, latency and clock offset per node at the gateway
+      (*Application*);
     - `display.py` — the OLED status display: rotating pages of the box's
       status, written row by row (*Application*);
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
@@ -72,13 +74,15 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   suites on several seeds (`seeds.py`) and the large-network suite
   (`large.py`), both outside `make test`.
 - `tools/box.py` — configuration of the boxes from the host (`config`:
-  one box, `make configure`; `check`: a whole network), with the templates
-  `tools/network.example.json` and `tools/box.example.json`.
+  one box and its RTC set to UTC, `make configure`; `check`: a whole
+  network), with the templates `tools/network.example.json` and
+  `tools/box.example.json`.
 - `tools/journal_summary.py` — summary of a journal read back from a box
   (`make journal`), per boot (CPython 3 or the unix port).
 - `tools/survey.py` — range survey: the links between a walking box and
   boxes at fixed positions by distance, from their journals and the
-  walker's GPX track (CPython 3 or the unix port).
+  walker's GPX track; the boxes' clocks in UTC, a node's through the
+  gateway's clock offsets (`--clocks`; CPython 3 or the unix port).
 - `tools/bench.py` — two-board bench measurements, run from the host over
   the serial ports; results in `docs/measurements.md`.
 - `tools/simbench.py` — simulator benchmark: wall-clock time and digest of
@@ -126,7 +130,7 @@ make firmware                  # build the SILY_T3S3 firmware
 make flash PORT=/dev/ttyACM0   # flash it
 make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it (keeps /config.json)
 make box-check PORT=/dev/ttyACM0  # per-box hardware check (docs/hardware.md)
-make configure PORT=/dev/ttyACM0 NETWORK=<file> BOX=<file>  # the box's /config.json, then reset
+make configure PORT=/dev/ttyACM0 NETWORK=<file> BOX=<file>  # the box's /config.json, RTC, reset
 make journal PORT=/dev/ttyACM0 OUT=build/box3  # copy the box's journal, reset it, print the summary
 ```
 
@@ -375,7 +379,8 @@ journal), as in the templates `tools/network.example.json` and
 `tools/box.example.json`. `make configure` merges them, checks the result
 (every problem reported as `field: problem`), derives the frame key and its
 fingerprint on the host (no password on the boxes), writes `/config.json`,
-clears the start guard and resets the board. `tools/box.py check --network
+clears the start guard, sets the board's RTC to the host's UTC and resets
+the board (the clock below). `tools/box.py check --network
 NETWORK BOX...` checks a whole network: each box, unique addresses and
 access point names, one gateway (without `--network`, each box on its own
 fields).
@@ -448,7 +453,19 @@ whose time departs by more than 2 s from the last anchor's estimate (the
 phone's clock changed). Each anchor also sets the board's RTC, which keeps
 its time across a soft reset, `machine.reset()` and a watchdog reset but
 not across a power cut (measured on a board): the `boot` record carries
-its time (`utc`) when set since the last power-on, null otherwise. The
+its time (`utc`) when set since the last power-on, null otherwise.
+`make configure` also sets the RTC, to the host's UTC, before the reset
+that starts the application: the board prints 8 readings of its RTC, the
+host stamps each line on arrival, adds the smallest host-minus-board
+difference to the RTC (relative: the delay of the call does not count)
+and checks with 8 more readings (`rtc: ... check: +0 ms`; beyond 10 ms
+the command fails). The RTC ends 1 to 3 ms ahead of the host's clock
+(the shortest line's transfer: USB, the tty, mpremote's 10 ms poll of
+the port, whose phase the readings spread), which is as good as the
+laptop's time service. The gateway stays on the
+laptop's or mains power, never on a battery pack, so that its boot
+record keeps that anchor for the run; a node moved to a battery loses it
+(harmless: the gateway places it, below). The
 file stays open and is synced every `journal.sync_s`
 (300 s), after the boot record and at stop or crash: a power cut loses at
 most the last 5 minutes. `make journal PORT=... OUT=...` stops the
@@ -463,14 +480,42 @@ traffic; safe mode's reasons).
 Times are per boot (`t`, ms since the board started); an analysis maps
 `t` to UTC by the latest anchor before it (`clock` line, else the `boot`
 record's `utc`): `utc + t - t_anchor`, the poll's one-way delay (tens of
-ms on the access point) not corrected. To set the clocks before a field
-test, open each box's page once with a phone whose clock is set by its
-network; a page left open keeps its box anchored.
+ms on the access point) not corrected. A node needs no anchor of its own:
+the gateway journals its clock offset to each node every minute (test
+traffic, below), and `tools/survey.py` places the node's journal on the
+gateway's clock, hence in UTC by the gateway's anchors. Before a field
+test, configure the gateway with `make configure` (its RTC set) and keep
+it powered; opening a box's page with a phone whose clock is set by its
+network still anchors it (a page left open keeps its box anchored), and
+the survey compares the two placements:
+
+    tools/survey.py --clocks build/run/base/journal build/run/box3/journal ...
+
+prints, per box and boot, how it is placed (the gateway's offsets: the
+minute records with one, their span and the node's rate against the
+gateway's clock in ppm, positive when fast; or its own anchors) and each anchor of its own
+against the placement without it (a node's against the gateway's
+offsets, a gateway's `clock` lines against its `boot` record's RTC), as
+the difference in ms (that placement minus the anchor). Where a node's
+boot has offsets they win over its anchors: they follow its clock minute
+by minute where an anchor is held by its crystal (25 ppm: 90 ms an hour)
+and put every box on one clock. Error budget of a node placed by the
+gateway: the gateway's RTC within about 3 ms of the host's clock at
+configuration, then the gateway's own drift (up to 25 ppm: 90 ms an
+hour, common to every box) unless its page anchors it again; what is
+left of the fastest delivery's delay beyond the time on air taken off,
+the node placed late by it: about 20 ms for a node one hop away (the
+node's step and channel sensing before the frame, the gateway's
+interrupt service and step after it, from the bench's step timings: to
+be measured), a hop's time on air and up to a slot's forwarding delay
+more per hop beyond the second; the envelope follows the rate within a
+few ms (a change of rate by Δ ppm bends it by at most Δ times 7.5 min).
 
 A range survey (`tools/survey.py`) sets the journals of a walking box and
 of boxes at fixed positions against the walker's track. Before the walk,
-set each box's clock (its page opened once); after it, read each journal
-back (`make journal PORT=... OUT=build/walk/box3`), export the walk from
+configure the gateway (`make configure`: its RTC set) and keep it
+powered, with test traffic on (the nodes' clocks come from it); after
+it, read each journal back (`make journal PORT=... OUT=build/walk/box3`), export the walk from
 Garmin Connect as a GPX file and read the fixed boxes' positions from a
 map (decimal degrees); then
 
@@ -478,8 +523,9 @@ map (decimal degrees); then
         --out build/walk build/walk/box3/journal build/walk/base/journal build/walk/box7/journal
 
 Each minute record covers a window since the previous one; its UTC comes
-from its box's anchors and the walker's position at its middle from the
-track (interpolated; none beyond its ends nor across 30 s without a
+from its box's clock (above: a node's through the gateway's offsets, else
+its own anchors; `survey.md` has the clocks' section of `--clocks`) and
+the walker's position at its middle from the track (interpolated; none beyond its ends nor across 30 s without a
 point). `survey.csv` holds one row per window and link direction (`down`:
 the walker hears a fixed box; `up`: a fixed box hears the walker) with the
 distance, the frames heard in the window, RSSI and SNR means, last margin,
@@ -516,7 +562,15 @@ submission time, the unknown clock offset included, and the figure is that
 minus its smallest value over the last 10 minute records of that node
 boot. It shows queueing, medium access, retries and holding above the
 fastest delivery seen, not the absolute delay (median, 90th percentile and
-maximum per minute record). Nodes count their messages submitted,
+maximum per minute record). The same values give each node's *clock
+offset*: per minute record, the smallest reception minus submission time
+less the time on air of the hops the gateway can tell (its own frame
+when the frame's link source is the node, 66 ms for 10 bytes at SF7;
+that and a relay's frame otherwise, 133 ms), with the node's clock at
+that message's submission (`offset_ms`, `offset_t`, the last columns of
+the node's row): the gateway's clock minus the node's, plus what is left
+of the fastest delivery's delay, from which `tools/survey.py` places the
+node's journal (above). Nodes count their messages submitted,
 accepted, refused at submission and failed afterwards, per reason. The
 figures go into the `tt` field of the minute records and into
 `App.status()` (`traffic`); the summary of `make journal` gives them over

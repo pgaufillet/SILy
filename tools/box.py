@@ -20,8 +20,28 @@ refused by ``config`` and ``check``):
 reported, a box overriding a network field refused), derives the frame key
 and fingerprint, then writes the result to the board's ``/config.json``
 with mpremote (its Ctrl-C stops a running application), clears the start
-guard (crash count, skip flag) and resets the board, which starts the
-application. ``make configure PORT=... NETWORK=... BOX=...`` runs it.
+guard (crash count, skip flag), sets the board's RTC to the host's UTC
+and resets the board, which starts the application: its ``boot`` record
+carries the RTC's time (``utc``), the journal's anchor until a power cut.
+``make configure PORT=... NETWORK=... BOX=...`` runs it.
+
+Setting the RTC (`configure`): the board prints `READINGS` readings of
+its RTC (``sily.hw.utc_ms``, ms since the Unix epoch through the
+calendar tuple, ``sily.utc``; not ``mpremote rtc --set``, which writes
+local time), `READING_GAP_MS` apart; the host stamps each line on
+arrival with its own clock (``time.time_ns``, UTC). The smallest host
+minus board difference is how far the RTC is behind the host's clock,
+plus the shortest transfer of a line (the print, USB, mpremote's poll of
+the port every 10 ms, the pipe; the gap spreads the readings over the
+poll's phases). A second
+call adds it to the RTC on the board (``hw.set_utc(hw.utc_ms() +
+delta)``: relative, so that the delay of the call itself does not
+count), reads the RTC again the same way as a check, then resets the
+board. The RTC ends ahead of the host's clock by that shortest transfer
+(1 to 3 ms expected: the readings spread over the poll's phases, 1.25 ms
+apart), less up to the millisecond truncated from the reading it adds
+to; the check's lowest difference beyond `RTC_TOLERANCE_MS` fails the
+command. The host's clock is as good as its own time service.
 
 ``check`` reads a set of box files (a whole network): each must merge with
 the network file or, without one, with `STAND_IN` in its place (a box's
@@ -41,7 +61,7 @@ def _parent(path):
 
 
 sys.path.insert(0, _parent(_parent(__file__)) + "/src")
-from sily import config  # noqa: E402
+from sily import config, utc  # noqa: E402
 
 # The template's password: a network file must replace it.
 EXAMPLE_PASSWORD = "replace with the network passphrase"
@@ -183,10 +203,26 @@ def check_boxes(boxes, network=None, network_path="network"):
     return errors
 
 
+# RTC readings per exchange, their gap (ms: not a multiple of mpremote's
+# 10 ms poll of the port), and the bound of the check after setting (ms).
+READINGS = 8
+READING_GAP_MS = 37
+RTC_TOLERANCE_MS = 10
+READING = "RTC "  # prefix of a reading's line
+
+
+def read_code(n=READINGS, gap_ms=READING_GAP_MS):
+    """Return the board's code printing n RTC readings (``RTC <ms>``) gap_ms apart."""
+    return (
+        "from sily import hw\nimport time\nfor i in range(%d):\n"
+        " print(%r, hw.utc_ms())\n time.sleep_ms(%d)" % (n, READING.strip(), gap_ms)
+    )
+
+
 def push_commands(mpremote, port, local):
     """Return the mpremote command writing local as the board's /config.json.
 
-    Then the start guard cleared and the board reset (the application starts).
+    Then the start guard cleared and the RTC read (`read_code`).
     """
     return [
         mpremote,
@@ -200,13 +236,102 @@ def push_commands(mpremote, port, local):
         "exec",
         "from sily import hw; hw.clear_guard()",
         "+",
+        "exec",
+        read_code(),
+    ]
+
+
+def clock_commands(mpremote, port, delta_ms):
+    """Return the mpremote command adding delta_ms to the board's RTC, then
+    reading it again (`read_code`) and resetting the board (the application
+    starts)."""
+    return [
+        mpremote,
+        "connect",
+        port,
+        "resume",
+        "exec",
+        "from sily import hw; hw.set_utc(hw.utc_ms() + (%d))" % delta_ms,
+        "+",
+        "exec",
+        read_code(),
+        "+",
         "reset",
     ]
 
 
+def reading(line):
+    """Return the ms of an RTC reading's line, None for another line."""
+    if not line.startswith(READING):
+        return None
+    try:
+        return int(line[len(READING) :])
+    except ValueError:
+        return None
+
+
+def lowest(pairs):
+    """Return the smallest host minus board ms of [(host ms, board ms)], None without one."""
+    if not pairs:
+        return None
+    return min([host - board for host, board in pairs])
+
+
+def run_stamped(cmd, echo=print):
+    """Run cmd; return (exit status, [(host ms at arrival, board ms)]) of the
+    RTC readings among its lines, the other lines echoed."""
+    import subprocess
+    import time
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
+    pairs = []
+    while True:
+        raw = proc.stdout.readline()  # unbuffered: returns at the line's end
+        if not raw:
+            break
+        host = time.time_ns() // 1000000
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        board = reading(line)
+        if board is None:
+            echo(line)
+        else:
+            pairs.append((host, board))
+    return proc.wait(), pairs
+
+
+def configure(mpremote, port, local, run=run_stamped, echo=print):
+    """Write local as the board's /config.json, clear its start guard, set its
+    RTC to the host's UTC and reset it (module documentation); return the
+    exit status. run(cmd) -> (status, [(host ms, board ms)]): `run_stamped`."""
+    status, before = run(push_commands(mpremote, port, local))
+    if status:
+        return status
+    delta = lowest(before)
+    if delta is None:
+        echo("rtc: no reading from the board: not set, not reset")
+        return 1
+    status, after = run(clock_commands(mpremote, port, delta))
+    if status:
+        return status
+    check = lowest(after)
+    echo(
+        "rtc: read %s UTC, set to the host's (%+d ms); check: %s ms (lowest host minus"
+        " board of %d readings, their transfer included)"
+        % (
+            utc.text(before[0][1]),
+            delta,
+            "none" if check is None else "%+d" % check,
+            len(after),
+        )
+    )
+    if check is None or abs(check) > RTC_TOLERANCE_MS:
+        echo("rtc: check beyond %d ms: the boot record's utc would be off" % RTC_TOLERANCE_MS)
+        return 1
+    return 0
+
+
 def _config(network_path, box_path, port, mpremote):
     import os
-    import subprocess
     import tempfile
 
     network, errors = load_json(network_path)
@@ -236,7 +361,7 @@ def _config(network_path, box_path, port, mpremote):
         with open(local, "w") as f:
             json.dump(cfg, f, indent=1)
             f.write("\n")
-        return subprocess.call(push_commands(mpremote, port, local))
+        return configure(mpremote, port, local)
 
 
 def _check(network_path, box_paths):

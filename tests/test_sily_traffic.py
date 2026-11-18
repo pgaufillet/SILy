@@ -11,10 +11,11 @@ links and the nodes' own counts.
 import struct
 import unittest
 
+from mesh.airtime import time_on_air_us
 from mesh.dodag import DodagInfo
-from mesh.frame import ROOT, UPWARD, Message
+from mesh.frame import FIRST_HOP, ROOT, UPWARD, Header, Message, frame_size
 from mesh.link import MAX_PAYLOAD, QUEUE_FULL
-from mesh.profile import EU_869
+from mesh.profile import EU_869, get
 from mesh.routing import Routing
 from sily import traffic
 from sily.traffic import HEAD, HEAD_SIZE, PORT, WINDOW, Receiver, Sender
@@ -158,12 +159,20 @@ class Clock:
         return self.t
 
 
-def _receive(r, clock, origin, boot, numbers, sent=None, delay=100, offset=0):
-    """Deliver numbers of boot from origin; node time sent (default number * 1000)."""
+def _header(source):
+    """Header of a frame to the gateway from link source source."""
+    return Header(ROOT, source, 1, 1)
+
+
+def _receive(r, clock, origin, boot, numbers, sent=None, delay=100, offset=0, via=None, size=None):
+    """Deliver numbers of boot from origin, through via (None: direct); node
+    time sent (default number * 1000), received delay ms later on a gateway
+    clock offset ms ahead; payload of size bytes (default the header's)."""
     for seq in numbers:
         node_t = seq * 1000 if sent is None else sent
         clock.t = node_t + offset + delay
-        r.handler(origin, _message(boot, seq, node_t), None)
+        msg = _message(boot, seq, node_t, size or HEAD_SIZE)
+        r.handler(origin, msg, _header(origin if via is None else via))
     r.drain()
 
 
@@ -242,8 +251,8 @@ class Delivery(unittest.TestCase):
     def test_handler_only_queues(self):
         r = Receiver(self.clock, capacity=2)
         for seq in range(3):
-            r.handler(5, _message(1, seq, 0), None)
-        r.handler(5, Message(UPWARD, 1, PORT, b"short", origin=5, seq=0), None)
+            r.handler(5, _message(1, seq, 0), _header(5))
+        r.handler(5, Message(UPWARD, 1, PORT, b"short", origin=5, seq=0), _header(5))
         self.assertEqual(r.origins, {})
         self.assertEqual((len(r.queue), r.queue.overflow, r.malformed), (2, 1, 1))
         tt = r.minute()
@@ -309,15 +318,109 @@ class Latency(unittest.TestCase):
         self.assertEqual(_row(self.r, 5)["received"], n)
 
 
+PROFILE = get(EU_869)
+
+
+def _air_us(length, sf=7):
+    return time_on_air_us(length, sf, PROFILE.bandwidth_hz, PROFILE.coding_rate)
+
+
+class Offset(unittest.TestCase):
+    """The clock offset of each period: smallest reception minus submission
+    time, less the time on air of the hops the gateway can tell."""
+
+    def setUp(self):
+        self.clock = Clock()
+        self.r = Receiver(self.clock, sf=7, profile=PROFILE)
+        self.one = _air_us(traffic.first_frame_bytes(HEAD_SIZE)) // 1000
+        self.two = (
+            _air_us(traffic.first_frame_bytes(HEAD_SIZE)) + _air_us(traffic.frame_bytes(HEAD_SIZE))
+        ) // 1000
+
+    def offset(self, origin=5):
+        row = _row(self.r, origin)
+        return row["offset_t"], row["offset_ms"]
+
+    def test_time_on_air_at_sf7(self):
+        # 27 and 29 B frames: 66.816 ms each at SF7, 125 kHz, CR 4/5.
+        self.assertEqual((self.one, self.two), (66, 133))
+        self.assertEqual(self.r.air(HEAD_SIZE, True), 66)
+        self.assertEqual(self.r.air(HEAD_SIZE, False), 133)
+
+    def test_smallest_of_the_period_less_one_hop(self):
+        offset = 3600000  # the gateway booted an hour before the node
+        for seq, delay in zip(range(5), (180, 95, 140, 120, 300)):
+            _receive(self.r, self.clock, 5, 1, (seq,), delay=delay, offset=offset)
+        self.r.minute()
+        self.assertEqual(self.offset(), (1000, offset + 95 - self.one))
+
+    def test_relayed_less_two_hops(self):
+        _receive(self.r, self.clock, 5, 1, (0, 1), delay=400, offset=-2000, via=6)
+        _receive(self.r, self.clock, 5, 1, (2,), delay=150, offset=-2000)
+        self.r.minute()
+        # 400 - 133 = 267 relayed against 150 - 66 = 84 direct.
+        self.assertEqual(self.offset(), (2000, -2000 + 150 - self.one))
+        _receive(self.r, self.clock, 5, 1, (3, 4), delay=200, offset=-2000, via=6)
+        _receive(self.r, self.clock, 5, 1, (5,), delay=150, offset=-2000)
+        self.r.minute()
+        # 200 - 133 = 67 relayed against 84 direct.
+        self.assertEqual(self.offset(), (3000, -2000 + 200 - self.two))
+
+    def test_time_on_air_of_the_size_received(self):
+        _receive(self.r, self.clock, 5, 1, (0,), delay=200, size=200)
+        self.r.minute()
+        one = _air_us(traffic.first_frame_bytes(200)) // 1000
+        self.assertEqual(self.offset(), (0, 200 - one))
+        self.assertTrue(one > self.one, one)
+        _receive(self.r, self.clock, 5, 1, (1,), delay=200)
+        self.r.minute()
+        self.assertEqual(self.offset(), (1000, 200 - self.one))
+
+    def test_without_radio_settings_no_time_on_air(self):
+        self.r = Receiver(self.clock)
+        _receive(self.r, self.clock, 5, 1, (0, 1), delay=120, offset=500, via=6)
+        self.r.minute()
+        self.assertEqual(self.offset(), (0, 620))
+
+    def test_each_period_apart(self):
+        _receive(self.r, self.clock, 5, 1, (0,), delay=100)
+        self.r.minute()
+        _receive(self.r, self.clock, 5, 1, (1,), delay=300)
+        self.r.minute()
+        self.assertEqual(self.offset(), (1000, 300 - self.one))  # not the earlier 100
+        self.r.minute()
+        self.assertEqual(self.offset(), (None, None))
+
+    def test_first_receptions_only(self):
+        _receive(self.r, self.clock, 5, 1, (0, 1), delay=300)
+        _receive(self.r, self.clock, 5, 1, (1,), delay=100)  # a duplicate
+        self.r.minute()
+        self.assertEqual(self.offset(), (0, 300 - self.one))
+
+    def test_reboot_drops_the_old_boot(self):
+        _receive(self.r, self.clock, 5, 1, (0,), delay=100, offset=0)
+        _receive(self.r, self.clock, 5, 2, (0,), delay=400, offset=50000)
+        self.r.minute()
+        self.assertEqual(self.offset(), (0, 50000 + 400 - self.one))
+
+    def test_minute_record_columns(self):
+        _receive(self.r, self.clock, 5, 1, (0, 1), delay=100)
+        row = self.r.minute()["o"][0]
+        self.assertEqual(len(row), len(traffic.FIELDS))
+        self.assertEqual(row[-2:], [0, 100 - self.one])
+
+
 class Bounds(unittest.TestCase):
     def test_largest_size_within_the_engine(self):
         self.assertEqual(traffic.SIZE_MAX, MAX_PAYLOAD)
 
     def test_frame_of_a_forwarded_message(self):
-        from mesh.frame import frame_size
-
         msg = Message(UPWARD, 1, PORT, bytes(30), origin=7, seq=1)
         self.assertEqual(traffic.frame_bytes(30), frame_size([msg]))
+
+    def test_frame_of_a_first_hop_message(self):
+        msg = Message(FIRST_HOP, 1, PORT, bytes(30), seq=1)
+        self.assertEqual(traffic.first_frame_bytes(30), frame_size([msg]))
 
 
 # --- Simulator scenario ------------------------------------------------------------
@@ -360,7 +463,7 @@ class Scenario(unittest.TestCase):
     def setUpClass(cls):
         net = Network(11, KEY)
         cls.net = net
-        cls.receiver = Receiver(lambda: net.now)
+        cls.receiver = Receiver(lambda: net.now, sf=net.sf, profile=net.profile)
         cls.senders = {A: [], B: [], C: []}  # per node, one per boot
         cls.running = {}  # node -> its sender while the board is on
         cls.minutes = []
@@ -458,7 +561,7 @@ class Scenario(unittest.TestCase):
                 continue
             for r in tt["o"]:
                 if r[9]:
-                    rows[r[0]].append(r[9:])
+                    rows[r[0]].append(r[9:13])
         for name in (A, B, C):
             self.assertTrue(len(rows[name]) >= 18, (name, len(rows[name])))
             for _, med, p90, top in rows[name]:
@@ -468,6 +571,27 @@ class Scenario(unittest.TestCase):
         worst = max(r[3] for r in rows[B])
         self.assertTrue(worst > 1000, worst)
         self.assertTrue(max(r[1] for r in rows[A]) < 1000, rows[A])
+
+    def test_clock_offsets(self):
+        # One clock for every board: each offset is what is left of the
+        # fastest delivery's delay once the time on air of the hops known is
+        # taken off, never negative. Direct nodes (A, B): the sensing and
+        # rounding; C, two hops through A, both frames taken off.
+        offsets = {A: [], B: [], C: []}
+        for i, tt in enumerate(self.minutes):
+            if tt is None:
+                continue
+            minute_t = (i + 1) * MINUTE_MS
+            for r in tt["o"]:
+                if r[14] is not None:
+                    self.assertTrue(minute_t - MINUTE_MS < r[13] <= minute_t, (i, r))
+                    offsets[r[0]].append(r[14])
+        one_hop = _air_us(traffic.first_frame_bytes(SIZE)) // 1000
+        for name in (A, B, C):
+            self.assertTrue(len(offsets[name]) >= 18, (name, len(offsets[name])))
+            self.assertTrue(min(offsets[name]) >= 0, (name, offsets[name]))
+        self.assertTrue(min(offsets[A]) <= 5, offsets[A])
+        self.assertTrue(min(offsets[C]) < one_hop, (one_hop, offsets[C]))
 
     def test_minute_record_rows(self):
         last = self.minutes[-1]

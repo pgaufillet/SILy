@@ -53,10 +53,13 @@ lines of one boot number, in order):
   received against those expected, duplicates, reordered, late, stale,
   node boots (the last minute record's totals), and the latency above the
   best case over the minute records: the median and highest of the
-  per-minute medians and maxima, with the samples and minutes counted.
+  per-minute medians and maxima, with the samples and minutes counted;
+  the minutes with a clock offset (``offset_ms``), from which
+  ``tools/survey.py`` places the node's journal in UTC.
 
 Times are the boards' own (ms since the board's boot), but for the clock's
-UTC: an analysis maps a line's ``t`` to UTC by the latest anchor before it.
+UTC: an analysis maps a line's ``t`` to UTC by the latest anchor before it,
+or, for a node, through the gateway's clock offsets (``tools/survey.py``).
 """
 
 import sys
@@ -71,6 +74,7 @@ sys.path.insert(0, _parent(_parent(__file__)) + "/src")
 from sily import journal, utc  # noqa: E402
 
 COUNTER_GROUPS = ("link", "rt", "radio")
+OFFSET_MS = 14  # column of a node's row at the gateway (``sily.traffic.FIELDS``)
 
 
 def boots(records):
@@ -257,12 +261,16 @@ def traffic(minutes):
     nodes = {}
     for tt in with_tt:
         for row in tt["o"]:
-            node = nodes.setdefault(row[0], {"medians": [], "maxima": [], "samples": 0})
+            node = nodes.setdefault(
+                row[0], {"medians": [], "maxima": [], "samples": 0, "offsets": 0}
+            )
             node["row"] = row
             if row[9]:
                 node["samples"] += row[9]
                 node["medians"].append(row[10])
                 node["maxima"].append(row[12])
+            if len(row) > OFFSET_MS and row[OFFSET_MS] is not None:
+                node["offsets"] += 1
     lost = {"mal": final.get("mal", 0), "q": final.get("q", 0), "ovf": final.get("ovf", 0)}
     return {"gateway": nodes, "lost": lost}
 
@@ -301,6 +309,11 @@ def _traffic_lines(t):
                     node["samples"],
                     len(node["medians"]),
                 )
+            )
+        if node["offsets"]:
+            lines.append(
+                "    clock offset to the gateway in %d minutes (tools/survey.py --clocks"
+                " places the node's journal by them)" % node["offsets"]
             )
     lost = t["lost"]
     if lost["mal"] or lost["q"] or lost["ovf"]:

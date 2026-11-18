@@ -3,8 +3,10 @@
 
     tools/survey.py --gpx TRACK.gpx --walker ADDRESS --at ADDRESS=LAT,LON
         [--at ...] [--band M] [--out DIR] JOURNAL_DIR...
+    tools/survey.py --clocks JOURNAL_DIR...
 
-Runs on CPython 3 and on the MicroPython unix port. Inputs:
+Runs on CPython 3 and on the MicroPython unix port. ``--clocks`` prints
+the clocks' section alone (below), without track. Inputs:
 
 - JOURNAL_DIR: the field journal of one box as ``make journal`` copies it
   (``OUT/journal``); the box (address, name, role) is the one of its
@@ -15,17 +17,44 @@ Runs on CPython 3 and on the MicroPython unix port. Inputs:
   its points (``trkpt``: ``lat``, ``lon``, ``time`` in UTC with ``Z``,
   fractional seconds or not; a time without ``Z`` is refused).
 
+Clocks (`boot_clock`): a box's anchors (``sily.utc``, as
+``tools/journal_summary.py``: the ``boot`` record's ``utc``, the RTC's,
+set by ``make configure`` or a page since the last power-on, and the
+``clock`` lines, a phone's) place a line at ``utc + t - t_anchor`` by
+the latest anchor at or before it, else by the boot's first anchor. A
+node's boot also has the clock offsets the gateway journals each minute
+(``sily.traffic``: ``offset_t``, ``offset_ms`` of the node's row; their
+rows matched on the low 16 bits of the boot number): each gives a point
+(`offsets`), the node's ``t`` and the UTC of the gateway's clock at
+``offset_t + offset_ms`` by the gateway's anchors of that boot, an upper
+bound of the node's UTC then (plus the fastest delivery's delay left:
+the steps, sensing, waits and further hops beyond those the gateway
+took off). Their lower envelope (`envelope`: at each point, the lower
+convex hull of the points within `ENVELOPE_MS` / 2 of it) follows the
+fastest deliveries and the clocks' drift (tens of ppm, steady over the
+window; a change of rate bends the hull by at most the change times a
+quarter of the window); a line's UTC is its ``t`` plus the envelope,
+linear between its points and held beyond its first and last. Where a
+node's boot has offsets they win over its own anchors: they follow its
+clock minute by minute where an anchor is held by its crystal (about
+90 ms an hour at 25 ppm) and they put every node on the gateway's clock,
+so that the boxes' windows line up; its own anchors place the boots the
+gateway did not hear, and the gateway's. The clocks' section (in
+``survey.md``, and the whole output of ``--clocks``): per box and boot,
+its placement (the minute records with offsets, their span and the
+node's rate against the gateway's clock, positive when fast) and each anchor of its
+own against the placement without it: a node's against its offsets, a
+gateway's ``clock`` lines against its ``boot`` record's RTC alone
+(difference: that placement minus the anchor, ms).
+
 Windows: each ``min`` record covers the window from the previous minute
-record of its boot (or the boot record) to its own ``t``. Its UTC comes
-from the box's own anchors (``sily.utc``, as ``tools/journal_summary.py``:
-the ``boot`` record's ``utc`` and the ``clock`` lines): a line's UTC is
-``utc + t - t_anchor`` by the latest anchor at or before it, else by the
-boot's first anchor. The walker's position at the window's middle is
+record of its boot (or the boot record) to its own ``t``; its UTC comes
+from the clocks above. The walker's position at the window's middle is
 interpolated linearly between the track's points. Left out and counted:
-the records of a boot without anchor, or whose ``boot`` record the
-journal's bound removed (the frames since boot cannot be differenced),
-and windows whose middle falls outside the track's span or between two
-points more than `GAP_MS` apart.
+the records of a boot without anchor nor offsets (``no anchor``), or
+whose ``boot`` record the journal's bound removed (the frames since boot
+cannot be differenced), and windows whose middle falls outside the
+track's span or between two points more than `GAP_MS` apart.
 
 Rows (``survey.csv``, `COLUMNS`), one per (window, observer, source):
 ``down`` for each window of the walker and each fixed box (the walker
@@ -55,8 +84,9 @@ before; 0 when the row is absent).
 
 Summary (``survey.md``, also printed): the track, then per box the
 windows, placed and left out per reason, and the journal lines skipped
-(truncated or malformed, ``sily.journal.read``); then per fixed box and
-direction a table per distance band (``--band``, 50 m by default):
+(truncated or malformed, ``sily.journal.read``); the clocks' section;
+then per fixed box and direction a table per distance band (``--band``,
+50 m by default):
 windows, share of windows with a frame, frames, RSSI and SNR means over
 the frames, the lowest last margin; on the walker's tables, its test
 messages and the share of windows relayed (a parent other than the
@@ -86,7 +116,8 @@ from sily import journal, utc  # noqa: E402
 
 USAGE = (
     "usage: survey.py --gpx TRACK.gpx --walker ADDRESS --at ADDRESS=LAT,LON [--at ...]"
-    " [--band M] [--out DIR] JOURNAL_DIR..."
+    " [--band M] [--out DIR] JOURNAL_DIR...\n"
+    "       survey.py --clocks JOURNAL_DIR..."
 )
 BAND_M = 50
 GAP_MS = 30000  # track points further apart: no position between them
@@ -99,7 +130,12 @@ PARENT = 7
 FRAMES = 8
 RSSI_MEAN = 10
 SNR_MEAN = 11
-RECEIVED = 2  # of a node's row at the gateway (``sily.traffic.FIELDS``)
+# Columns of a node's row at the gateway (``sily.traffic.FIELDS``).
+RECEIVED = 2
+NODE_BOOT = 1
+OFFSET_T = 13
+OFFSET_MS = 14
+ENVELOPE_MS = 1800000  # window of the clock offsets' lower envelope (30 min)
 
 REASONS = ("no boot record", "no anchor", "outside", "gap")
 COLUMNS = (
@@ -288,6 +324,142 @@ def to_utc(marks, t):
     return ms + t - t_anchor
 
 
+def gateway_of(boards):
+    """Return the gateway's box among boards (`board`), None without one."""
+    b = boards.get(GATEWAY)
+    return b if b is not None and b["role"] == "gateway" else None
+
+
+def offsets(gateway, address, boot):
+    """Return the clock points [(t, d)] of boot number boot of node address
+    from the gateway's journal (`board`), sorted.
+
+    One per row of the node's boot (the low 16 bits of its number) with an
+    offset in the gateway's minute records (``sily.traffic``): t its
+    ``offset_t`` (the node's clock), d the UTC of the gateway's clock at
+    ``offset_t + offset_ms`` (by the anchors of that gateway boot, `to_utc`)
+    minus t: t + d is the node's UTC at t, late by what is left of the
+    fastest delivery's delay. A gateway boot without anchor gives none.
+    """
+    points = []
+    for run in gateway["runs"]:
+        marks = anchors(run)
+        if not marks:
+            continue
+        for r in run:
+            tt = r.get("tt") if r["k"] == "min" else None
+            if not tt or "o" not in tt:
+                continue
+            for row in tt["o"]:
+                if row[0] != address or len(row) <= OFFSET_MS or row[OFFSET_MS] is None:
+                    continue
+                if row[NODE_BOOT] != boot & 0xFFFF:
+                    continue
+                t = row[OFFSET_T]
+                points.append((t, to_utc(marks, t + row[OFFSET_MS]) - t))
+    points.sort()
+    return points
+
+
+def _hull(points):
+    """Return the lower convex hull of points [(t, d)] (sorted, distinct t)."""
+    out = []
+    for p in points:
+        while len(out) >= 2:
+            o = out[-2]
+            a = out[-1]
+            if (a[0] - o[0]) * (p[1] - o[1]) - (a[1] - o[1]) * (p[0] - o[0]) > 0:
+                break  # a below the chord from o to p
+            out.pop()
+        out.append(p)
+    return out
+
+
+def _line(points, t):
+    """Return d at t of the polyline points [(t, d)] (sorted): linear between
+    them, held beyond its ends (floor of the interpolation, ms)."""
+    if t <= points[0][0]:
+        return points[0][1]
+    if t >= points[-1][0]:
+        return points[-1][1]
+    lo = 0
+    hi = len(points) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if points[mid][0] <= t:
+            lo = mid
+        else:
+            hi = mid
+    a = points[lo]
+    b = points[hi]
+    return a[1] + (b[1] - a[1]) * (t - a[0]) // (b[0] - a[0])
+
+
+def envelope(points, window_ms=ENVELOPE_MS):
+    """Return the lower envelope [(t, d)] of clock points [(t, d)] (`offsets`).
+
+    At each point's t, the lower convex hull of the points within
+    window_ms / 2 of it, at that t: below every point of the window, on the
+    straight line through the lowest ones (the fastest deliveries) when the
+    clocks drift at a steady rate. The window bounds the error of a rate
+    that changes (temperature). Of points with the same t, the lowest.
+    """
+    pts = []
+    for p in points:
+        if pts and pts[-1][0] == p[0]:
+            continue  # sorted: the lowest d of a t first
+        pts.append(p)
+    half = window_ms // 2
+    out = []
+    lo = 0
+    hi = 0
+    for p in pts:
+        while pts[lo][0] < p[0] - half:
+            lo += 1
+        while hi < len(pts) and pts[hi][0] <= p[0] + half:
+            hi += 1
+        out.append((p[0], _line(_hull(pts[lo:hi]), p[0])))
+    return out
+
+
+class BootClock:
+    """The UTC of the lines of one boot of a box (`boot_clock`): `utc`.
+
+    source: ``gateway`` (the gateway's clock offsets, `envelope`: held
+    beyond its first and last points), ``anchors`` (the box's own, `to_utc`)
+    or None (not placed); marks: the box's anchors; env: the envelope, None
+    without offsets.
+    """
+
+    def __init__(self, marks, env):
+        self.marks = marks
+        self.env = env
+        if env:
+            self.source = "gateway"
+        elif marks:
+            self.source = "anchors"
+        else:
+            self.source = None
+
+    def utc(self, t):
+        """Return the UTC (ms) of t, None when not placed."""
+        if self.env:
+            return t + _line(self.env, t)
+        return to_utc(self.marks, t)
+
+
+def boot_clock(box, run, gateway):
+    """Return the `BootClock` of run, a boot of box (`board`); gateway: the
+    gateway's box or None. The gateway's offsets of a node's boot win over
+    its own anchors."""
+    env = None
+    if gateway is not None and box["role"] != "gateway" and run:
+        points = offsets(gateway, box["address"], run[0]["b"])
+        if points:
+            env = envelope(points)
+    return BootClock(anchors(run), env)
+
+
 def windows(run):
     """Return the windows of the minute records of one boot, its boot record
     first: [(record, start t, links, traffic, received)].
@@ -390,6 +562,7 @@ def survey(boards, track, walker, at):
     """
     rows = []
     counts = {}
+    gateway_box = gateway_of(boards)
     for address in sorted(boards):
         count = {"windows": 0, "placed": 0}
         for reason in REASONS:
@@ -401,13 +574,13 @@ def survey(boards, track, walker, at):
             if run[0]["k"] != "boot":
                 count["no boot record"] += minutes
                 continue
-            marks = anchors(run)
+            clock = boot_clock(boards[address], run, gateway_box)
             gateway = boards[address]["role"] == "gateway"
             for r, start, links, traffic, received in windows(run):
-                if not marks:
+                if clock.source is None:
                     count["no anchor"] += 1
                     continue
-                middle = to_utc(marks, (start + r["t"]) // 2)
+                middle = clock.utc((start + r["t"]) // 2)
                 where, why = position(track, middle)
                 if where is None:
                     count[why] += 1
@@ -419,7 +592,7 @@ def survey(boards, track, walker, at):
                     "t": r["t"],
                     "lat": where[0],
                     "lon": where[1],
-                    "moved_m": moved(track, to_utc(marks, start), to_utc(marks, r["t"])),
+                    "moved_m": moved(track, clock.utc(start), clock.utc(r["t"])),
                     "attached": r.get("att"),
                     "parent": r.get("par"),
                     "submitted": None,
@@ -552,6 +725,88 @@ def _label(address, boards):
     return "%s (%s)" % (b["name"], address) if b is not None else "%s" % address
 
 
+def differences(box, run, gateway):
+    """Return (reference, [(t, kind, anchor UTC, reference UTC)]) of a boot:
+    each anchor of its own against its placement without it, None and []
+    without one.
+
+    A node placed by the gateway's offsets: each anchor (``boot`` record's
+    RTC, ``clock`` lines: a phone's) against them. Otherwise a ``boot``
+    record's RTC (a gateway's, set by ``make configure``): each ``clock``
+    line against it alone.
+    """
+    clock = boot_clock(box, run, gateway)
+    marks = []
+    for r in run:
+        if r["k"] in ("boot", "clock") and r.get("utc") is not None:
+            marks.append((r["t"], r["k"], r["utc"]))
+    if clock.env:
+        return "gateway", [(t, k, ms, clock.utc(t)) for t, k, ms in marks]
+    if marks and marks[0][1] == "boot":
+        base = [(marks[0][0], marks[0][2])]
+        return "boot", [(t, k, ms, to_utc(base, t)) for t, k, ms in marks[1:]]
+    return None, []
+
+
+def _rate(env):
+    """Return the rate (ppm) of a node's clock against the gateway's from its
+    envelope: positive, fast; None over less than a minute."""
+    span = env[-1][0] - env[0][0]
+    if span < 60000:
+        return None
+    return -(env[-1][1] - env[0][1]) * 1000000 / span
+
+
+def clock_lines(boards):
+    """Return the lines (Markdown) of the boxes' clocks: per box and boot, its
+    placement (`boot_clock`) and its anchors against the placement without
+    them (`differences`)."""
+    gateway = gateway_of(boards)
+    lines = []
+    for address in sorted(boards):
+        box = boards[address]
+        for run in box["runs"]:
+            if run[0]["k"] == "safe":
+                continue
+            clock = boot_clock(box, run, gateway)
+            head = "%s, boot %s: " % (_label(address, boards), run[0]["b"])
+            if clock.source == "gateway":
+                env = clock.env
+                rate = _rate(env)
+                head += "by the gateway's clock offsets, %d minute records over %s, %s" % (
+                    len(env),
+                    _span(env[-1][0] - env[0][0]),
+                    "rate -" if rate is None else "rate %+.1f ppm" % rate,
+                )
+            elif clock.source == "anchors":
+                head += "by its own anchors (%d)" % len(clock.marks)
+            else:
+                head += "not placed"
+            lines.extend(["", head + "."])
+            reference, rows = differences(box, run, gateway)
+            if not rows:
+                continue
+            against = "the gateway's offsets" if reference == "gateway" else "the boot's RTC"
+            lines.extend(
+                [
+                    "",
+                    "| t (s) | anchor | its UTC | by %s | difference (ms) |" % against,
+                    "|---|---|---|---|---|",
+                ]
+            )
+            for t, kind, ms, placed in rows:
+                lines.append(
+                    "| %.3f | %s | %s | %s | %+d |"
+                    % (t / 1000, kind, utc.text(ms), utc.text(placed), placed - ms)
+                )
+    return lines
+
+
+def _span(ms):
+    s = ms // 1000
+    return "%d:%02d:%02d" % (s // 3600, s // 60 % 60, s % 60)
+
+
 def summary(rows, counts, boards, track, walker, at, band_m):
     """Return the lines of the survey's summary (Markdown)."""
     lines = ["# Range survey", ""]
@@ -584,6 +839,8 @@ def summary(rows, counts, boards, track, walker, at, band_m):
     bad = sum([b["bad"] for b in boards.values()])
     if bad:
         lines.extend(["", "%d journal lines skipped (truncated or malformed)." % bad])
+    lines.extend(["", "## Clocks"])
+    lines.extend(clock_lines(boards))
     for source in sorted(at):
         for direction in ("down", "up"):
             if direction == "down":
@@ -667,11 +924,15 @@ def _position(text):
 
 def options(args):
     """Return (options, journal directories) of the arguments; ValueError on a mistake."""
-    opts = {"--at": {}, "--band": BAND_M, "--out": "."}
+    opts = {"--at": {}, "--band": BAND_M, "--out": ".", "--clocks": False}
     dirs = []
     i = 0
     while i < len(args):
         a = args[i]
+        if a == "--clocks":
+            opts[a] = True
+            i += 1
+            continue
         if a in ("--gpx", "--walker", "--at", "--band", "--out"):
             if i + 1 >= len(args):
                 raise ValueError("%s without value" % a)
@@ -694,6 +955,13 @@ def options(args):
             raise ValueError("unknown option %s" % a)
         dirs.append(a)
         i += 1
+    if opts["--clocks"]:
+        track_options = ("--gpx", "--walker")
+        if [o for o in track_options if o in opts] or opts["--at"] or len(args) > len(dirs) + 1:
+            raise ValueError("--clocks takes journal directories only")
+        if not dirs:
+            raise ValueError("no journal directory")
+        return opts, dirs
     for required in ("--gpx", "--walker"):
         if required not in opts:
             raise ValueError("no %s" % required)
@@ -708,6 +976,19 @@ def options(args):
     return opts, dirs
 
 
+def load_boards(dirs):
+    """Return {address: `board`} of journal directories; ValueError on a mistake."""
+    boards = {}
+    for directory in dirs:
+        b = board(directory)
+        address = b["address"]
+        if address in boards:
+            raise ValueError("%s: a second journal of %s" % (directory, address))
+        b["directory"] = directory
+        boards[address] = b
+    return boards
+
+
 def load(opts, dirs):
     """Return (track, boards) of the command line's inputs; ValueError on a mistake."""
     try:
@@ -718,15 +999,12 @@ def load(opts, dirs):
     track = parse_gpx(text)
     if not track:
         raise ValueError("%s: no track point" % opts["--gpx"])
-    boards = {}
-    for directory in dirs:
-        b = board(directory)
-        address = b["address"]
-        if address in boards:
-            raise ValueError("%s: a second journal of %s" % (directory, address))
+    boards = load_boards(dirs)
+    for address in sorted(boards):
         if address != opts["--walker"] and address not in opts["--at"]:
-            raise ValueError("%s: box %s neither --walker nor --at" % (directory, address))
-        boards[address] = b
+            raise ValueError(
+                "%s: box %s neither --walker nor --at" % (boards[address]["directory"], address)
+            )
     if opts["--walker"] not in boards:
         raise ValueError("no journal of the walker %d" % opts["--walker"])
     return track, boards
@@ -739,6 +1017,15 @@ def main(argv, echo=print):
         echo("survey: %s" % e)
         echo(USAGE)
         return 2
+    if opts["--clocks"]:
+        try:
+            boards = load_boards(dirs)
+        except ValueError as e:
+            echo("survey: %s" % e)
+            return 1
+        for line in ["# Clocks"] + clock_lines(boards):
+            echo(line)
+        return 0
     try:
         track, boards = load(opts, dirs)
     except ValueError as e:

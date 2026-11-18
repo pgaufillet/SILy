@@ -42,18 +42,33 @@ Gateway (`Receiver`), per node, totals since the gateway's boot (`FIELDS`):
   the absolute delay; the window bounds the error of the clocks' relative
   drift (tens of ppm: tens of ms over 10 minutes). Per period of the
   minute record: samples, median, 90th percentile and maximum (ms,
-  nearest rank) of the messages received in it (first receptions only).
+  nearest rank) of the messages received in it (first receptions only);
+- clock offset (``offset_t``, ``offset_ms``), per period of the minute
+  record: of the messages received in it (first receptions), the smallest
+  reception time minus submission time minus the time on air of the hops
+  the gateway can tell (`Receiver.air`): the message's own frame when the
+  frame's link source is its origin (one hop), that frame and a relay's
+  otherwise (two hops or more); ``offset_ms`` is that value, the
+  gateway's clock minus the node's plus what is left of the fastest
+  delivery's delay (zero or more: the steps, sensing, waits and further
+  hops), ``offset_t`` the node's clock (ms since its boot, the ``t`` of
+  its journal) at that message's submission. An analysis maps the node's
+  ``t`` to the gateway's (``tools/survey.py``: the lower envelope of the
+  periods' values follows the clocks' drift). A period without sample
+  gives none; a node's reboot drops the samples of its old boot in the
+  period.
 
 The gateway's port handler runs inside the mesh core's step: it reads the
-three fields (the payload is valid during the call only) and queues them;
-a task does the accounting (`Receiver.drain`), and the minute record closes
-the latency period (`Receiver.minute`).
+three fields (the payload is valid during the call only), the payload's
+length and whether the link source is the origin, and queues them; a task
+does the accounting (`Receiver.drain`), and the minute record closes the
+latency period (`Receiver.minute`).
 """
 
 import asyncio
 import struct
 
-from mesh.airtime import time_on_air_ms
+from mesh.airtime import time_on_air_ms, time_on_air_us
 from mesh.frame import OVERHEAD, ROOT
 from mesh.platform import randbelow
 from sily.journal import Queue
@@ -65,6 +80,8 @@ SIZE_MAX = 200  # mesh.link.MAX_PAYLOAD
 # Bytes of a forwarded test message's frame beyond its payload (§11): header
 # and tag, control, port, origin, sequence.
 FRAME_EXTRA = OVERHEAD + 6
+# The same on its first hop: no origin (first-hop compression, §11).
+FIRST_EXTRA = FRAME_EXTRA - 2
 # Configuration bound (`min_period_s`): the test traffic of LOAD_NODES nodes
 # through one relay within SHARE_PERCENT of its duty-cycle budget, the rest
 # left to retries, acknowledgements and the mesh's own traffic.
@@ -94,12 +111,19 @@ FIELDS = (
     "median_ms",  # latency above the best case, last period (None without samples)
     "p90_ms",
     "max_ms",
+    "offset_t",  # node's clock at the submission of the period's smallest offset
+    "offset_ms",  # that offset: reception - submission - time on air of the hops known
 )
 
 
 def frame_bytes(size):
     """Return the length of the frame of one forwarded test message of size bytes."""
     return FRAME_EXTRA + size
+
+
+def first_frame_bytes(size):
+    """Return the length of the frame of one test message of size bytes on its first hop."""
+    return FIRST_EXTRA + size
 
 
 def min_period_s(profile, sf, size, nodes=LOAD_NODES):
@@ -233,6 +257,9 @@ class Origin:
         self.samples = []  # reception minus submission time, this period
         self.minima = []  # smallest of each earlier period with samples
         self.latency = (0, None, None, None)  # samples, median, p90, max
+        self.low = None  # smallest offset of this period (module documentation)
+        self.low_t = None  # node's clock at the submission of its message
+        self.offset = (None, None)  # offset_t, offset_ms of the last period
 
     def expected(self):
         if self.boot is None:
@@ -261,6 +288,8 @@ class Origin:
         self.boots += 1
         self.samples = []
         self.minima = []
+        self.low = None
+        self.low_t = None
 
     def _number(self, seq):
         """Account number seq of the current boot; return True on a first reception."""
@@ -290,8 +319,9 @@ class Origin:
             self.lo = seq
         return True
 
-    def account(self, t, boot, seq, sent):
-        """Account message seq of boot, submitted at sent (node ms), received at t."""
+    def account(self, t, boot, seq, sent, air=0):
+        """Account message seq of boot, submitted at sent (node ms), received at
+        t; air: time on air (ms) of the hops known."""
         if self.boot is None or boot != self.boot:
             if self.boot is not None and (boot - self.boot) & 0xFFFF >= 0x8000:
                 self.stale += 1
@@ -299,11 +329,19 @@ class Origin:
             self._start(boot, seq)
         elif not self._number(seq):
             return
+        d = t - sent
         if len(self.samples) < SAMPLES_MAX:
-            self.samples.append(t - sent)
+            self.samples.append(d)
+        d -= air
+        if self.low is None or d < self.low:
+            self.low = d
+            self.low_t = sent
 
     def close(self):
         """End the latency period: compute its figures, start the next one."""
+        self.offset = (self.low_t, self.low)
+        self.low = None
+        self.low_t = None
         samples = self.samples
         if not samples:
             self.latency = (0, None, None, None)
@@ -334,30 +372,56 @@ class Origin:
             self.boots,
         ]
         row.extend(self.latency)
+        row.extend(self.offset)
         return row
 
 
 class Receiver:
-    """The gateway's accounting of the test traffic. clock: function() -> ms."""
+    """The gateway's accounting of the test traffic. clock: function() -> ms;
+    sf, profile (``mesh.profile``): the network's, for the time on air of
+    the clock offset (`air`); None: no time on air taken off."""
 
-    def __init__(self, clock, capacity=QUEUE_ITEMS):
+    def __init__(self, clock, capacity=QUEUE_ITEMS, sf=None, profile=None):
         self.clock = clock
         self.queue = Queue(capacity)
         self.origins = {}  # address -> Origin
         self.malformed = 0  # payloads shorter than the header
         self.overflow = 0  # messages of nodes beyond ORIGINS_MAX
+        self.sf = sf
+        self.profile = profile
+        self._air_size = None  # payload size of the last `air` computed
+        self._air = (0, 0)  # its (one hop, two hops) times on air, ms
 
     def handler(self, origin, msg, header):
         """Port handler (``LinkEngine.bind``), inside the mesh's step: queue only."""
         payload = msg.payload
-        if len(payload) < HEAD_SIZE:
+        size = len(payload)
+        if size < HEAD_SIZE:
             self.malformed += 1
             return
         boot, seq, sent = struct.unpack_from(HEAD, payload, 0)
-        self.queue.put((self.clock(), origin, boot, seq, sent))
+        self.queue.put((self.clock(), origin, boot, seq, sent, size, header.source == origin))
+
+    def air(self, size, direct):
+        """Return the time on air (ms, rounded down) of the hops known of a test
+        message of size bytes: its first-hop frame when direct (the link source
+        is the origin), that frame and a relay's (forwarded frame) otherwise.
+
+        The last size's figures are kept (one size per network): computed
+        again only when the size changes.
+        """
+        if self.sf is None:
+            return 0
+        if size != self._air_size:
+            p = self.profile
+            one = time_on_air_us(first_frame_bytes(size), self.sf, p.bandwidth_hz, p.coding_rate)
+            two = one + time_on_air_us(frame_bytes(size), self.sf, p.bandwidth_hz, p.coding_rate)
+            self._air = (one // 1000, two // 1000)
+            self._air_size = size
+        return self._air[0] if direct else self._air[1]
 
     def account(self, item):
-        """Account one queued item (t, origin, boot, seq, sent)."""
+        """Account one queued item (t, origin, boot, seq, sent, size, direct)."""
         origin = self.origins.get(item[1])
         if origin is None:
             if len(self.origins) >= ORIGINS_MAX:
@@ -365,7 +429,7 @@ class Receiver:
                 return
             origin = Origin(item[1])
             self.origins[item[1]] = origin
-        origin.account(item[0], item[2], item[3], item[4])
+        origin.account(item[0], item[2], item[3], item[4], self.air(item[5], item[6]))
 
     def drain(self):
         """Account every queued item; return how many."""

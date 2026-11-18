@@ -15,9 +15,12 @@ the access point) is not corrected.
 
 The RTC (``sily.hw``) keeps its time across a soft reset, ``machine.reset``
 and a watchdog reset, not across a power cut: it then restarts at
-2000-01-01 (measured on a board). A boot reads it into its ``boot`` record
-(``utc``) when `valid`; that reading anchors the boot until its first
-sample.
+2000-01-01 (measured on a board). Besides the anchors, ``make configure``
+sets it to the host's UTC before the reset that starts the application
+(``tools/box.py``: within a few ms of the host's clock). A boot reads it
+into its ``boot`` record (``utc``) when `valid`; that reading anchors the
+boot until its first sample. A node without anchor is placed through the
+gateway's clock offsets (``sily.traffic``, ``tools/survey.py``).
 
 The RTC is read and set through its calendar tuple (``machine.RTC().datetime``:
 year, month, day, weekday from 0 on Monday, hours, minutes, seconds,

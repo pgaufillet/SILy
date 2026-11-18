@@ -22,6 +22,7 @@ from test_sily_stack import FakeHw, peer_frame, probe_frame
 from test_sily_web import _get, _request, _split
 
 import sily
+from mesh.airtime import time_on_air_us
 from mesh.frame import DEST_OFFSET, ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.reports import FIRST_REPORT, NodeInfo, Presence
@@ -670,12 +671,21 @@ class Traffic(Console):
         key = bytes.fromhex(KEY)
         frame = peer_frame(1, ROOT, bytes(payload), key, traffic.PORT, 1)
 
+        delivered = []
+
         def deliver(a):
+            delivered.append(a.clock.now())
             a.stack.adapter.on_receive(frame, -70, 6.5)
 
         a, minute, status = self._run(hw, 1500, (_after(50, deliver),))
-        self.assertEqual(minute["tt"]["o"], [[1, 4, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0]])
+        row = minute["tt"]["o"][0]
+        self.assertEqual(row[:14], [1, 4, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1000])
         self.assertEqual((minute["tt"]["mal"], minute["tt"]["q"]), (0, 0))
+        # The clock offset less the time on air of its frame from the node
+        # (direct: link source 1, its origin) at the network's SF7.
+        air = time_on_air_us(traffic.first_frame_bytes(len(payload)), 7) // 1000
+        self.assertEqual(a.traffic.air(len(payload), True), air)
+        self.assertTrue(delivered[0] - 1000 - air <= row[14] <= minute["t"] - 1000 - air, row)
         node = status["traffic"]["nodes"][0]
         self.assertEqual((node["address"], node["boot"], node["delivery"]), (1, 4, 1.0))
 

@@ -254,7 +254,9 @@ class App:
         """Set up the test traffic (module documentation); return it or None."""
         engine = self.stack.engine
         if engine.is_root:
-            receiver = traffic.Receiver(self.clock.now)
+            receiver = traffic.Receiver(
+                self.clock.now, sf=self.stack.sf, profile=self.stack.profile
+            )
             engine.bind(traffic.PORT, receiver.handler)
             self.add_task(lambda app: traffic.receive(receiver))
             return receiver

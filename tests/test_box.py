@@ -148,7 +148,7 @@ class Templates(unittest.TestCase):
 
 
 class Push(unittest.TestCase):
-    def test_copy_then_guard_cleared_then_reset(self):
+    def test_copy_then_guard_cleared_then_rtc_read(self):
         cmd = box.push_commands("mpremote", "/dev/ttyACM0", "/tmp/x/config.json")
         self.assertEqual(cmd[:3], ["mpremote", "connect", "/dev/ttyACM0"])
         steps = " ".join(cmd[3:]).split(" + ")
@@ -157,6 +157,130 @@ class Push(unittest.TestCase):
             [
                 "fs cp /tmp/x/config.json :config.json",
                 "exec from sily import hw; hw.clear_guard()",
+                "exec " + box.read_code(),
+            ],
+        )
+
+    def test_rtc_set_relative_then_read_then_reset(self):
+        cmd = box.clock_commands("mpremote", "/dev/ttyACM0", -1234)
+        self.assertEqual(
+            cmd,
+            [
+                "mpremote",
+                "connect",
+                "/dev/ttyACM0",
+                "resume",
+                "exec",
+                "from sily import hw; hw.set_utc(hw.utc_ms() + (-1234))",
+                "+",
+                "exec",
+                box.read_code(),
+                "+",
                 "reset",
             ],
         )
+
+    def test_read_code_prints_the_readings(self):
+        lines = []
+        sleeps = []
+
+        class Hw:
+            t = T0
+
+            @classmethod
+            def utc_ms(cls):
+                cls.t += 1
+                return cls.t
+
+        class Time:
+            sleep_ms = sleeps.append
+
+        code = box.read_code(3, 37)
+        for head in ("from sily import hw\n", "import time\n"):
+            self.assertTrue(code.startswith(head), code)
+            code = code[len(head) :]
+        out = {"hw": Hw, "time": Time, "print": lambda *a: lines.append(" ".join(map(str, a)))}
+        exec(code, out)
+        self.assertEqual([box.reading(line) for line in lines], [T0 + 1, T0 + 2, T0 + 3])
+        self.assertEqual(sleeps, [37, 37, 37])
+        self.assertIsNone(box.reading("cp /tmp/x/config.json :config.json"))
+        self.assertIsNone(box.reading("RTC not a number"))
+
+
+T0 = 1763460000000  # 2025-11-18 10:00:00 UTC
+
+
+class Board:
+    """A board's RTC, error ms off the host's clock, read through mpremote:
+    each reading's line reaches the host delays[i] ms after the board read it.
+    ``set`` False: the board ignores the setting."""
+
+    def __init__(self, error, delays, set=True, status=0):
+        self.error = error
+        self.delays = delays
+        self.set = set
+        self.status = status
+        self.commands = []
+        self.now = T0  # the host's clock
+
+    def readings(self):
+        pairs = []
+        for d in self.delays:
+            pairs.append((self.now + d, self.now + self.error))
+            self.now += box.READING_GAP_MS
+        return pairs
+
+    def __call__(self, cmd):
+        self.commands.append(cmd)
+        if self.status:
+            return self.status, []
+        if "resume" in cmd:
+            code = cmd[cmd.index("exec") + 1]
+            delta = int(code.split("+ (")[1].split(")")[0])
+            if self.set:
+                self.error += delta
+            self.now += 1500  # the second call's start
+        return 0, self.readings()
+
+
+class Rtc(unittest.TestCase):
+    def configure(self, board):
+        self.lines = []
+        return box.configure("mpremote", "/dev/x", "/tmp/c.json", board, self.lines.append)
+
+    def test_set_to_the_host_within_the_shortest_transfer(self):
+        delays = [9, 4, 12, 2, 7, 11, 3, 6]
+        board = Board(946684805000 - T0, delays)  # not set since a power cut: 2000-01-01
+        self.assertEqual(self.configure(board), 0)
+        self.assertEqual(len(board.commands), 2)
+        self.assertEqual(board.commands[1][-1], "reset")
+        # Ahead of the host by the shortest transfer of the first readings.
+        self.assertEqual(board.error, min(delays))
+        self.assertEqual(len(self.lines), 1)
+        self.assertTrue(
+            self.lines[0].startswith("rtc: read 2000-01-01 00:00:05.000 UTC"), self.lines
+        )
+        self.assertTrue("check: +0 ms" in self.lines[0], self.lines)
+
+    def test_a_board_close_to_the_host(self):
+        board = Board(250, [5, 3, 8])
+        self.assertEqual(self.configure(board), 0)
+        self.assertEqual(board.error, 3)
+        self.assertTrue("(-247 ms)" in self.lines[0], self.lines)
+
+    def test_setting_ignored_fails(self):
+        board = Board(-60000, [2, 2, 2], set=False)
+        self.assertEqual(self.configure(board), 1)
+        self.assertTrue("check: +60002 ms" in self.lines[0], self.lines)
+        self.assertTrue(self.lines[1].startswith("rtc: check beyond 10 ms"), self.lines)
+
+    def test_no_reading_no_setting(self):
+        board = Board(0, [])
+        self.assertEqual(self.configure(board), 1)
+        self.assertEqual(len(board.commands), 1)
+        self.assertEqual(self.lines, ["rtc: no reading from the board: not set, not reset"])
+
+    def test_failed_copy_stops(self):
+        board = Board(0, [1], status=2)
+        self.assertEqual(self.configure(board), 2)
+        self.assertEqual(len(board.commands), 1)

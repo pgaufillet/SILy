@@ -319,9 +319,12 @@ class Traffic(unittest.TestCase):
         _clear(GATEWAY_DIR)
         boot = {"role": "gateway", "address": 0, "name": "base", "sf": 7, "version": "0.2"}
         minutes = [
-            [_row(3, 5, 6, [6, 100, 900, 900]), _row(4, 6, 6, [6, 0, 50, 50])],
-            [_row(3, 11, 12, [6, 300, 2000, 2000]), _row(4, 12, 12, [0, None, None, None])],
-            [_row(3, 17, 18, [6, 200, 500, 700]), _row(4, 15, 18, [6, 10, 80, 80], 2)],
+            [_row(3, 5, 6, [6, 100, 900, 900]), _row(4, 6, 6, [6, 0, 50, 50, 1000, 900])],
+            [
+                _row(3, 11, 12, [6, 300, 2000, 2000]),
+                _row(4, 12, 12, [0, None, None, None, None, None]),
+            ],
+            [_row(3, 17, 18, [6, 200, 500, 700]), _row(4, 15, 18, [6, 10, 80, 80, 7000, 901], 2)],
         ]
         lines = [(0, "boot", boot)]
         for i, rows in enumerate(minutes):
@@ -346,6 +349,8 @@ class Traffic(unittest.TestCase):
         )
         self.assertEqual((t[4]["medians"], t[4]["samples"]), ([0, 10], 12))
         self.assertEqual(t[4]["row"][8], 2)
+        # Rows written before the clock offsets (3), and with them (4).
+        self.assertEqual((t[3]["offsets"], t[4]["offsets"]), (0, 2))
 
     def test_gateway_lines(self):
         lines = journal_summary.report(self.gateway)
@@ -359,7 +364,13 @@ class Traffic(unittest.TestCase):
             " minute maxima 900 ms median, 2000 highest; 18 samples in 3 minutes" in lines,
             lines,
         )
-        self.assertTrue("from 4: 15/18 received (83.3 %)" in lines[-3], lines)
+        self.assertTrue("from 4: 15/18 received (83.3 %)" in lines[-4], lines)
+        self.assertEqual(
+            lines[-2],
+            "    clock offset to the gateway in 2 minutes (tools/survey.py --clocks places"
+            " the node's journal by them)",
+        )
+        self.assertEqual(sum([1 for line in lines if "clock offset" in line]), 1)  # not node 3
         self.assertTrue(lines[-1].startswith("  test traffic lost to the gateway: 2 malformed"))
 
     def test_node_counts(self):

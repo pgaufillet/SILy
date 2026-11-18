@@ -263,6 +263,170 @@ class Clock(unittest.TestCase):
         )
 
 
+def _offset_row(node, boot, offset_t, offset_ms):
+    # A gateway's ``tt`` row of node with a clock offset, columns `traffic.FIELDS`.
+    return [node, boot, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, offset_t, offset_ms]
+
+
+def _box(address, name, role, runs):
+    return {"address": address, "name": name, "role": role, "runs": runs, "bad": 0}
+
+
+G0 = 100000  # the gateway's clock when the node boots
+STEP = 120000  # the node's messages: one per 2 minutes of the gateway's clock
+STEPS = 31  # an hour
+JITTER = (0, 7, 3, 0, 12, 5, 0, 30, 2)  # ms above the fastest delivery, in turn
+PAGE_K = 5  # the node's page opened at its k-th message
+
+
+def _node_t(k):
+    # The node's clock at its k-th message: 25 ppm fast (3 ms per 2 minutes).
+    return STEP * k + 3 * k
+
+
+def _rate_runs(page_ms=30):
+    """A gateway set at boot by the host (UTC T0 at t 0) and a node booted at
+    its G0 whose clock runs 25 ppm fast; the fastest delivery's remaining
+    delay 4 ms, plus JITTER. The node's page opened at its PAGE_K-th
+    message, the phone's time page_ms behind (the poll's delay)."""
+    gateway = [_record(2, 0, "boot", {"utc": T0})]
+    for k in range(STEPS):
+        offset_ms = G0 + 4 + JITTER[k % len(JITTER)] - 3 * k
+        tt = {"o": [_offset_row(3, 1, _node_t(k), offset_ms)], "mal": 0, "q": 0, "ovf": 0}
+        gateway.append(_record(2, G0 + STEP * k + 30000, "min", {"tt": tt}))
+    node = [_record(1, 0, "boot", {"utc": None})]
+    node.append(_record(1, _node_t(PAGE_K), "clock", {"utc": T0 + G0 + STEP * PAGE_K - page_ms}))
+    for k in range(STEPS):
+        node.append(_record(1, _node_t(k) + 50000, "min", {"nb": []}))
+    return {
+        0: _box(0, "base", "gateway", [gateway]),
+        3: _box(3, "box3", "node", [node]),
+    }
+
+
+class Offsets(unittest.TestCase):
+    """A node's clock placed by the gateway's offsets (``sily.traffic``)."""
+
+    def test_rows_of_a_node_boot(self):
+        tt1 = {
+            "o": [
+                _offset_row(3, 1, 40000, 25000),
+                _offset_row(3, 2, 41000, 9000),  # another boot of the node
+                _offset_row(5, 1, 42000, 8000),  # another node
+                _offset_row(3, 1, None, None),  # no sample in the period
+                _offset_row(3, 1, 0, 0)[:13],  # written before the offsets
+            ]
+        }
+        tt2 = {"o": [_offset_row(3, 1, 100000, 25010)]}
+        run = [
+            _record(2, 0, "boot", {"utc": T0}),
+            _record(2, 60000, "min", {"tt": tt1}),
+            # The gateway's page, after the node's submission (its t 100000)
+            # and before the reception: the gateway's anchor at the latter.
+            _record(2, 110000, "clock", {"utc": T0 + 110100}),
+            _record(2, 120000, "min", {"tt": tt2}),
+        ]
+        unanchored = [_record(3, 0, "boot", {"utc": None}), _record(3, 60000, "min", {"tt": tt2})]
+        gateway = _box(0, "base", "gateway", [run, unanchored])
+        expected = [(40000, T0 + 25000), (100000, T0 + 100 + 25010)]
+        self.assertEqual(survey.offsets(gateway, 3, 1), expected)
+        self.assertEqual(survey.offsets(gateway, 3, 65537), expected)  # 16 bits on the air
+        self.assertEqual(survey.offsets(gateway, 3, 3), [])
+
+    def test_steady_rate_through_the_fastest(self):
+        boards = _rate_runs()
+        points = survey.offsets(boards[0], 3, 1)
+        env = survey.envelope(points)
+        # On the fastest deliveries' line whatever the jitter of the others.
+        self.assertEqual(env, [(_node_t(k), T0 + G0 + 4 - 3 * k) for k in range(STEPS)])
+        self.assertEqual("%.2f" % survey._rate(env), "25.00")
+
+    def test_window_bounds_a_rate_change(self):
+        # 50 ppm (3 ms a minute) for 40 minutes, then none: the hull of the
+        # whole run would cut 60 ms below at the change, the window 22.5.
+        points = [(60000 * k, 3 * min(k, 40)) for k in range(81)]
+        env = survey.envelope(points)
+        for (t, e), (_, d) in zip(env, points):
+            self.assertTrue(d - 23 <= e <= d, (t, e, d))
+        self.assertEqual(env[40], (2400000, 97))
+        self.assertEqual(survey.envelope(points, 10**9)[40], (2400000, 60))
+
+    def test_same_time_keeps_the_lowest(self):
+        env = survey.envelope([(0, 10), (60000, 5), (60000, 9), (120000, 10)])
+        self.assertEqual(env, [(0, 10), (60000, 5), (120000, 10)])
+
+    def test_between_and_beyond_the_points(self):
+        line = [(0, 10), (60000, 16), (120000, 4)]
+        self.assertEqual(survey._line(line, -5000), 10)
+        self.assertEqual(survey._line(line, 30000), 13)
+        self.assertEqual(survey._line(line, 90000), 10)
+        self.assertEqual(survey._line(line, 500000), 4)
+
+    def test_gateway_offsets_win(self):
+        boards = _rate_runs()
+        node = boards[3]
+        clock = survey.boot_clock(node, node["runs"][0], boards[0])
+        self.assertEqual(clock.source, "gateway")
+        # Placed 4 ms late (the fastest delivery's delay left), whatever its page.
+        for k in (0, PAGE_K, STEPS - 1):
+            self.assertEqual(clock.utc(_node_t(k)), T0 + G0 + STEP * k + 4)
+        # Held beyond the last point: the node's clock counted from it.
+        last = STEP * (STEPS - 1) + 4
+        self.assertEqual(clock.utc(_node_t(STEPS - 1) + 180003), T0 + G0 + last + 180003)
+        own = survey.boot_clock(node, node["runs"][0], None)
+        self.assertEqual(own.source, "anchors")
+        self.assertEqual(own.utc(_node_t(PAGE_K)), T0 + G0 + STEP * PAGE_K - 30)
+        gw = survey.boot_clock(boards[0], boards[0]["runs"][0], boards[0])
+        self.assertEqual((gw.source, gw.utc(1000)), ("anchors", T0 + 1000))
+        lost = [_record(4, 0, "boot", {"utc": None}), _record(4, 60000, "min")]
+        self.assertIsNone(survey.boot_clock(node, lost, boards[0]).source)
+
+    def test_page_against_the_gateway(self):
+        boards = _rate_runs(page_ms=30)
+        reference, rows = survey.differences(boards[3], boards[3]["runs"][0], boards[0])
+        page_t = _node_t(PAGE_K)
+        self.assertEqual(reference, "gateway")
+        self.assertEqual(
+            rows,
+            [(page_t, "clock", T0 + G0 + STEP * PAGE_K - 30, T0 + G0 + STEP * PAGE_K + 4)],
+        )
+        # The gateway: its page against its boot record's RTC (the host's).
+        run = boards[0]["runs"][0] + [_record(2, 3600000, "clock", {"utc": T0 + 3600090})]
+        self.assertEqual(
+            survey.differences(boards[0], run, boards[0]),
+            ("boot", [(3600000, "clock", T0 + 3600090, T0 + 3600000)]),
+        )
+
+    def test_clock_lines(self):
+        lines = survey.clock_lines(_rate_runs(page_ms=30))
+        self.assertEqual(
+            lines,
+            [
+                "",
+                "base (0), boot 2: by its own anchors (1).",
+                "",
+                "box3 (3), boot 1: by the gateway's clock offsets, 31 minute records over"
+                " 1:00:00, rate +25.0 ppm.",
+                "",
+                "| t (s) | anchor | its UTC | by the gateway's offsets | difference (ms) |",
+                "|---|---|---|---|---|",
+                "| 600.015 | clock | 2026-11-18 10:11:39.970 | 2026-11-18 10:11:40.004 | +34 |",
+            ],
+        )
+
+    def test_survey_places_a_node_without_anchor(self):
+        boards = _rate_runs()
+        boards[3]["runs"][0] = [r for r in boards[3]["runs"][0] if r["k"] != "clock"]
+        track = [(T0 + G0 + 10000 * k, 0.00001 * k, 0.0) for k in range(400)]
+        rows, counts = survey.survey(boards, track, 3, {0: GATEWAY})
+        self.assertEqual((counts[3]["placed"], counts[3]["no anchor"]), (STEPS, 0))
+        down = [r for r in rows if r["direction"] == "down"]
+        # The windows' middles at node t 25000 and 110001: 24999.4 and
+        # 109998.3 ms of the gateway's clock, placed 4 ms late (rounded down).
+        self.assertEqual(down[0]["utc"], T0 + G0 + 25003)
+        self.assertEqual(down[1]["utc"], T0 + G0 + 110002)
+
+
 class Windows(unittest.TestCase):
     def test_columns(self):
         fields = record.NEIGHBOUR_FIELDS
@@ -671,6 +835,34 @@ class CommandLine(unittest.TestCase):
         out = []
         status = survey.main(["survey.py"] + args, out.append)
         return status, out[0]
+
+    def test_clocks(self):
+        out = []
+        status = survey.main(["survey.py", "--clocks", CLI_WALKER, CLI_GATEWAY], out.append)
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            out,
+            [
+                "# Clocks",
+                "",
+                "base (0), boot 1: not placed.",
+                "",
+                "box3 (3), boot 1: not placed.",
+            ],
+        )
+        only = "--clocks takes journal directories only"
+        for args, message in (
+            (["--clocks"], "no journal directory"),
+            (["--clocks", "--gpx", "t.gpx", CLI_WALKER], only),
+            (["--clocks", "--walker", "3", CLI_WALKER], only),
+            (["--clocks", "--at", "0=0.0,0.0", CLI_WALKER], only),
+            (["--clocks", "--band", "20", CLI_WALKER], only),
+        ):
+            self.assertEqual(self._main(args), (2, "survey: " + message), args)
+        self.assertEqual(
+            self._main(["--clocks", CLI_WALKER, CLI_WALKER]),
+            (1, "survey: " + CLI_WALKER + ": a second journal of 3"),
+        )
 
     def test_usage_errors(self):
         base = ["--gpx", "t.gpx", "--walker", "3", "--at", "0=0.0,0.0", "j"]
