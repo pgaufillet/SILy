@@ -445,9 +445,20 @@ the turnaround of its immediate replies, timed as the bench's `timed` does
 but with the journal, display, test traffic and web server running
 (`src/sily/turn.py`, `tr`: replies, median, 90th percentile and maximum,
 in 0.1 ms, from the RxDone interrupt of the frame answered to the start of
-the reply). A `clock` line anchors the board's clock to UTC (`utc`, ms
-since the Unix epoch): a phone showing the box's status page sends its own
-time with each poll (below); the first poll of a boot is journaled, then
+the reply). On every box, the `min` record carries the lateness of the
+application's asyncio loop (`src/sily/lateness.py`, `lp`): a task
+sleeping 20 ms measures how late each of its wakes comes, whoever held
+the loop (a journal write or sync, a display refresh, the web server, a
+garbage collection: their own figures tell which); per minute, its wakes,
+the longest lateness and the `t` of that wake, the wakes later than 30 ms
+(what an immediate reply absorbs at SF7: the 52 ms slot less the 21 ms
+turnaround) and their lateness beyond it summed (the deaf time), then
+these two since boot; the `boot` record gives the period and the bound
+(`probe_ms`). An idle board's wakes come on its 10 ms FreeRTOS tick: a
+lateness below 10 ms is no stall. A `clock` line anchors the board's
+clock to UTC (`utc`, ms since the Unix epoch): a phone showing the box's
+status page sends its own time with each poll (below); the first poll of
+a boot is journaled, then
 one every 10 minutes at most while the polls go on, and at once a poll
 whose time departs by more than 2 s from the last anchor's estimate (the
 phone's clock changed). Each anchor also sets the board's RTC, which keeps
@@ -475,8 +486,8 @@ end, clock (the UTC of the first line, the `clock` lines, the largest
 departure between consecutive anchors), attach time, parent changes,
 DODAG versions and root sequence,
 margins per link, frames dropped on purpose, counters, battery, write and
-sync stalls; display, access point and web server; reply turnaround; test
-traffic; safe mode's reasons).
+sync stalls; display, access point and web server; reply turnaround; loop
+lateness, with its worst minutes; test traffic; safe mode's reasons).
 Times are per boot (`t`, ms since the board started); an analysis maps
 `t` to UTC by the latest anchor before it (`clock` line, else the `boot`
 record's `utc`): `utc + t - t_anchor`, the poll's one-way delay (tens of

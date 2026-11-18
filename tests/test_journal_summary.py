@@ -226,6 +226,50 @@ class Summary(unittest.TestCase):
             lines,
         )
 
+    def test_loop_lateness(self):
+        s = journal_summary.summarise(self.runs[0])  # a journal without the probe
+        self.assertIsNone(s["lateness"])
+        self.assertFalse(any("lateness" in line for line in journal_summary.report(s)))
+        run = [{"b": 9, "t": 1000, "k": "boot", "role": "gateway", "probe_ms": [20, 30]}]
+        for t, lp in (
+            (61000, [2950, 12, 30500, 0, 0, 0, 0]),
+            (121000, [2900, 640, 61270, 2, 700, 2, 700]),
+            (181000, [2400, 1932, 150003, 1, 1902, 3, 2602]),
+            (241000, [2950, 45, 200000, 1, 15, 4, 2617]),
+            (301000, [2950, 640, 290000, 2, 700, 6, 3317]),
+        ):
+            run.append({"b": 9, "t": t, "k": "min", "lp": lp})
+        run.append({"b": 9, "t": 302000, "k": "stop"})
+        s = journal_summary.summarise(run)
+        # The worst minutes: most deaf time, then longest, then earliest.
+        worst = [(181000, 1, 1902, 1932, 150003), (121000, 2, 700, 640, 61270)]
+        worst.append((301000, 2, 700, 640, 290000))
+        expected = {"probe": [20, 30], "longest": (1932, 150003), "over": 6, "deaf_ms": 3317}
+        expected.update(span_ms=300000, worst=worst)
+        self.assertEqual(s["lateness"], expected)
+        lines = journal_summary.report(s)
+        first = lines.index(
+            "  loop lateness (probe every 20 ms, bound 30 ms): longest 1932 ms at t=150003;"
+            " 6 wakes over the bound, 3317 ms deaf (1.11 % of 0:05:00)"
+        )
+        self.assertEqual(
+            lines[first + 1 : first + 4],
+            [
+                "    minute to t=181000: 1 over the bound, 1902 ms deaf, longest 1932 ms"
+                " at t=150003",
+                "    minute to t=121000: 2 over the bound, 700 ms deaf, longest 640 ms at t=61270",
+                "    minute to t=301000: 2 over the bound, 700 ms deaf, longest 640 ms"
+                " at t=290000",
+            ],
+        )
+        # No wake late, no boot record (the probe's figures unknown): no minute listed.
+        lp = [5, 0, None, 0, 0, 0, 0]
+        s = journal_summary.summarise([{"b": 9, "t": 0, "k": "min", "lp": lp}])
+        self.assertEqual(
+            journal_summary.report(s)[-1],
+            "  loop lateness: longest 0 ms; 0 wakes over the bound, 0 ms deaf",
+        )
+
     def test_drops(self):
         s = journal_summary.summarise(self.runs[0])  # no drop rates
         self.assertIsNone(s["drops"])

@@ -46,6 +46,15 @@ lines of one boot number, in order):
   (``tr`` of the minute records, ``sily.turn``): the replies timed, the
   median of the per-minute medians, the worst minute's 90th percentile
   and the highest maximum (ms);
+- the loop's lateness (``lp`` of the minute records, ``sily.lateness``;
+  the probe's period and bound from the ``boot`` record): the longest
+  lateness and the ``t`` of its wake, the wakes over the bound and the deaf
+  time since the probe's start (the last record's totals; the deaf time
+  also as a share of the time from the first line to that record), then
+  the worst minutes (those with a wake over the bound, the most deaf time
+  first, then the longest lateness, then the earliest; at most `WORST`):
+  the ``t`` of the record, to read beside its ``jw``, ``js``, ``ow``,
+  ``or``, ``web``, and of its longest lateness;
 - the test traffic (``sily.traffic``, the ``tt`` field of the minute
   records): on a node, its messages submitted, accepted, refused and
   failed (per reason: the codes of ``mesh.link`` refusals, negative, and
@@ -74,6 +83,7 @@ sys.path.insert(0, _parent(_parent(__file__)) + "/src")
 from sily import journal, utc  # noqa: E402
 
 COUNTER_GROUPS = ("link", "rt", "radio")
+WORST = 3  # minutes listed for the loop's lateness
 OFFSET_MS = 14  # column of a node's row at the gateway (``sily.traffic.FIELDS``)
 
 
@@ -165,6 +175,7 @@ def summarise(run):
                 o["bat"] = r["bat"]
     s["origins"] = origins
     s["turnaround"] = turnaround(minutes)
+    s["lateness"] = lateness(minutes, boot, t0)
     s["traffic"] = traffic(minutes)
     return s
 
@@ -250,6 +261,35 @@ def turnaround(minutes):
     )
 
 
+def lateness(minutes, boot, t0):
+    """Return the summary (a dict) of the minute records' ``lp``, None without one.
+
+    boot: the boot record (its ``probe_ms``) or None; t0: the time of the
+    boot's first line. Keys: ``probe`` [period, bound] or None, ``longest``
+    (ms, t), ``over`` and ``deaf_ms`` (the last record's totals), ``span_ms``
+    (from t0 to that record), ``worst`` [(record t, over, deaf ms, longest
+    ms, t)].
+    """
+    rows = [(m["t"], m["lp"]) for m in minutes if m.get("lp")]
+    if not rows:
+        return None
+    longest = (0, None)
+    for _, lp in rows:
+        if lp[1] > longest[0]:
+            longest = (lp[1], lp[2])
+    late = [(lp[4], lp[1], t, lp) for t, lp in rows if lp[3]]
+    late.sort(key=lambda item: (item[0], item[1], -item[2]), reverse=True)
+    final_t, final = rows[-1]
+    return {
+        "probe": None if boot is None else boot.get("probe_ms"),
+        "longest": longest,
+        "over": final[5],
+        "deaf_ms": final[6],
+        "span_ms": final_t - t0,
+        "worst": [(t, lp[3], lp[4], lp[1], lp[2]) for _, _, t, lp in late[:WORST]],
+    }
+
+
 def traffic(minutes):
     """Return the test traffic's summary of the minute records, None without one."""
     with_tt = [m["tt"] for m in minutes if m.get("tt")]
@@ -320,6 +360,34 @@ def _traffic_lines(t):
         lines.append(
             "  test traffic lost to the gateway: %s malformed, %s queue overflows,"
             " %s beyond the node bound" % (lost["mal"], lost["q"], lost["ovf"])
+        )
+    return lines
+
+
+def _lateness_lines(late):
+    if late is None:
+        return []
+    probe = ""
+    if late["probe"] is not None:
+        probe = " (probe every %d ms, bound %d ms)" % tuple(late["probe"])
+    ms, t = late["longest"]
+    longest = "longest %d ms" % ms
+    if t is not None:
+        longest += " at t=%d" % t
+    share = ""
+    if late["span_ms"] > 0:
+        share = " (%.2f %% of %s)" % (
+            100 * late["deaf_ms"] / late["span_ms"],
+            _duration(late["span_ms"] / 1000),
+        )
+    lines = [
+        "  loop lateness%s: %s; %d wakes over the bound, %d ms deaf%s"
+        % (probe, longest, late["over"], late["deaf_ms"], share)
+    ]
+    for record_t, over, deaf, ms, t in late["worst"]:
+        lines.append(
+            "    minute to t=%d: %d over the bound, %d ms deaf, longest %d ms at t=%s"
+            % (record_t, over, deaf, ms, t)
         )
     return lines
 
@@ -470,6 +538,7 @@ def report(s):
             " %.1f ms, worst minute p90 %.1f ms, max %.1f ms"
             % (replies, minutes, median / 10, p90 / 10, top / 10)
         )
+    lines.extend(_lateness_lines(s["lateness"]))
     lines.extend(_traffic_lines(s["traffic"]))
     return lines
 

@@ -66,10 +66,12 @@ in the view of the mesh (``sily.nodes``, `App.mesh`, for the web page).
 The minute record carries the test traffic's figures (``tt``) when there
 are some, the display's longest row write and refresh (``ow``, ``or``)
 when it wrote, the web server's figures with the stations joined
-(``web``) while it runs and, on the gateway, the turnaround of its
+(``web``) while it runs, on the gateway, the turnaround of its
 immediate replies when it made some (``tr``, ``sily.turn``: a radio
 wrapper beside the tap, timing each reply from the adapter's
-timestamps). The journal is synced after the boot record, every
+timestamps) and, on every box, the loop's lateness (``lp``,
+``sily.lateness``: a task started with the mesh's, its period and bound
+in the boot record). The journal is synced after the boot record, every
 ``journal.sync_s`` and at stop and crash. The mesh core's callbacks (report
 handler, failure callback, presence extension) run inside its step, on the
 root's reply path: they only queue an item or return cached bytes; a task
@@ -83,7 +85,20 @@ import sys
 
 import sily
 from mesh.runner import Clock
-from sily import config, display, guard, journal, nodes, record, traffic, turn, utc, watchdog, web
+from sily import (
+    config,
+    display,
+    guard,
+    journal,
+    lateness,
+    nodes,
+    record,
+    traffic,
+    turn,
+    utc,
+    watchdog,
+    web,
+)
 from sily.stack import Stack
 from sily.tap import Tap
 
@@ -172,6 +187,7 @@ class App:
         self.stack = None
         self.tap = None
         self.turn = None  # turn.Turn on the gateway: its replies timed
+        self.probe = None  # lateness.Probe once the mesh's tasks start
         self.journal = None
         self.queue = journal.Queue(QUEUE_ITEMS)
         self.boot = None
@@ -380,12 +396,15 @@ class App:
                 sily.build_id(),
                 watchdog.TIMEOUT_MS,
                 rtc,
+                [lateness.PERIOD_MS, lateness.BOUND_MS],
             )
             self.journal.write(now, "boot", fields)
             self.anchor.start(now, rtc)
             self.journal.sync()
             self.display = self._display()
             await self._wifi()
+            self.probe = lateness.Probe(self.clock.now)
+            asyncio.create_task(self.probe.run())
             asyncio.create_task(stack.adapter.run())
             asyncio.create_task(self._monitor())
             asyncio.create_task(self._minutes())
@@ -476,6 +495,8 @@ class App:
             tr = self.turn.minute()
             if tr is not None:
                 fields["tr"] = tr
+        if self.probe is not None:
+            fields["lp"] = self.probe.minute()
         j.write(now, "min", fields)
 
     async def _minutes(self):

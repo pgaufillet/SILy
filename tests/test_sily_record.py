@@ -198,15 +198,16 @@ class Neighbours(unittest.TestCase):
         rows, _ = record.neighbours(table, 99000, tap)  # ages of 99 s
         self.assertEqual(len(rows), 64)
         # A whole minute record (the node of the simulator, radio and
-        # application figures and the most drop rates added) fits the
-        # smallest segment (journal.segment_kb 4): no record needs a segment
-        # of its own.
+        # application figures, the loop's lateness and the most drop rates
+        # added) fits the smallest segment (journal.segment_kb 4): no record
+        # needs a segment of its own.
         net, _, board = _attached()
         rec = _minute(Node(board), net.now)
         rec["nb"] = rows
         rec["radio"] = {key: 999999 for key, _ in record.RADIO}
         rec.update(noise=-110.5, bat=4200, heap=8000000, jw=999, js=999, jq=999, je=999)
         rec.update(b=99999, t=86400000, k="min", fil=99999, tov=99999)
+        rec["lp"] = [99999, 99999, 86400000, 9999, 999999, 999999, 99999999]
         rec["drp"] = [[ADDRESS_MAX - a, 9999999] for a in range(DROP_MAX)]
         line = json.dumps(rec, separators=(",", ":"))
         self.assertTrue(len(line) < 4096, len(line))

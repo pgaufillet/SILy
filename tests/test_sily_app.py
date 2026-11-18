@@ -15,7 +15,7 @@ import socket
 import struct
 import sys
 import unittest
-from time import ticks_diff, ticks_us
+from time import sleep_ms, ticks_diff, ticks_us
 
 from test_sily_journal import Clock, MemFs
 from test_sily_stack import FakeHw, peer_frame, probe_frame
@@ -26,7 +26,7 @@ from mesh.airtime import time_on_air_us
 from mesh.frame import DEST_OFFSET, ROOT
 from mesh.ports import NODE_INFO, PRESENCE, TOPOLOGY
 from mesh.reports import FIRST_REPORT, NodeInfo, Presence
-from sily import app, guard, journal, record, traffic, utc, watchdog
+from sily import app, guard, journal, lateness, record, traffic, utc, watchdog
 from sily.config import check
 
 DIR = "build/test_sily_app"  # relative to the repository root, where the tests run
@@ -477,13 +477,14 @@ class Journal(Console):
         self.assertEqual((boot["role"], boot["address"], boot["sf"]), ("gateway", 0, 7))
         self.assertEqual((boot["reset"], boot["crashes"], boot["b"]), ("hard", 0, 1))
         self.assertEqual(boot["watchdog_s"], watchdog.TIMEOUT_MS // 1000)
+        self.assertEqual(boot["probe_ms"], [lateness.PERIOD_MS, lateness.BOUND_MS])
         self.assertEqual((boot["version"], boot["build"]), (sily.__version__, None))
         self.assertEqual(boot["random_restart"], 1)  # a fresh frame counter store
         self.assertTrue(0 <= boot["counter"] < a.stack.engine.security.counter.peek())
         minute = records[kinds.index("min")]
         self.assertEqual((minute["att"], minute["rank"], minute["bat"]), (1, 0, 3870))
         self.assertTrue(minute["t"] - boot["t"] >= 1000)
-        for key in ("jw", "js", "jq", "je", "link", "rt", "radio", "nb", "heap"):
+        for key in ("jw", "js", "jq", "je", "link", "rt", "radio", "nb", "heap", "lp"):
             self.assertTrue(key in minute, key)
         self.assertEqual(a.journal.syncs, 2)  # after the boot record and at the stop
 
@@ -799,6 +800,38 @@ class Turnaround(OneMinute):
         self.assertIs(a.stack.runner.radio, a.tap)
         self.assertFalse("tr" in minute)
         self.assertFalse("turnaround" in status)
+
+
+class Lateness(OneMinute):
+    """The loop's lateness probe in the application (``sily.lateness``)."""
+
+    STALL_MS = 250
+
+    def test_a_stall_of_the_loop_shows(self):
+        marks = []
+
+        def stall(a):
+            marks.append(a.clock.now())
+            sleep_ms(self.STALL_MS)  # the whole process blocked: the loop with it
+            marks.append(a.clock.now())
+
+        a, minute, _ = self._run(FakeHw(), (_after(300, stall),))
+        wakes, longest, t, over, deaf, over_total, deaf_total = minute["lp"]
+        self.assertTrue(wakes > 1, minute["lp"])
+        # Asleep for part of the stall: late by at least the stall less a period.
+        least = self.STALL_MS - lateness.PERIOD_MS
+        self.assertTrue(longest >= least, minute["lp"])
+        self.assertTrue(t >= marks[1], (minute["lp"], marks))  # the wake that ended it
+        self.assertTrue(over >= 1, minute["lp"])
+        self.assertTrue(deaf >= least - lateness.BOUND_MS, minute["lp"])
+        self.assertEqual((over_total, deaf_total), (over, deaf))  # the first record
+
+    def test_on_a_node(self):
+        a, minute, _ = self._run(FakeHw(), role="node", address=3)
+        self.assertIsNotNone(a.probe)
+        lp = minute["lp"]
+        self.assertEqual(len(lp), 7)
+        self.assertTrue(lp[0] > 1, lp)
 
 
 class Drops(OneMinute):

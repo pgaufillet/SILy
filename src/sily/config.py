@@ -71,7 +71,7 @@ from sily import traffic
 VERSION = 1
 ADDRESS_MAX = 65534  # 0xFFFF is the broadcast address
 NAME_MAX = 16  # bytes (mesh.reports.NAME_MAX)
-DROP_MAX = 8  # sources with a drop rate (the minute record within a 4 KB segment)
+DROP_MAX = 6  # sources with a drop rate (the minute record within a 4 KB segment)
 SSID_MAX = 32  # bytes
 GATEWAY = "gateway"
 NODE = "node"

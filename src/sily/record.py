@@ -10,7 +10,8 @@ since the board's boot) and ``k``, its kind:
   access point configured or null, ``watchdog_s`` the hardware watchdog's
   timeout, ``utc`` the RTC's time at the line's ``t`` in ms since the Unix
   epoch when it reads 2025-01-01 or later, else null: set by a page or by
-  ``make configure`` since the last power-on, ``sily.utc``);
+  ``make configure`` since the last power-on, ``sily.utc``; ``probe_ms``
+  [period, bound] of the loop lateness probe, ``sily.lateness``);
 - ``clock``: ``utc``, a phone's time in ms since the Unix epoch, sent with
   a poll of the page and taken at the line's ``t``; the anchors of the
   application's clock to UTC (``sily.utc``: the first of a boot, then one
@@ -32,7 +33,13 @@ since the board's boot) and ``k``, its kind:
   (``sily.turn``): [replies, median, 90th percentile, maximum] of their
   turnaround, from the RxDone IRQ of the frame answered to the start of
   the reply, in 0.1 ms, the median and percentile of the first 256 when
-  more came);
+  more came; ``lp`` the loop's lateness (``sily.lateness``): [wakes of
+  the probe, longest lateness in ms, the ``t`` of that wake (null when
+  none was late), wakes later than the bound, deaf ms (their lateness
+  beyond the bound, summed): since the last record; wakes later than the
+  bound, deaf ms: totals since the probe's start] (a stall of this
+  record's own write shows in the next one, its wake just after this
+  ``t``);
 - ``ev``: ``e`` names the event: ``attach``, ``detach``, ``parent``,
   ``rank``, ``grounded``, ``ungrounded`` (`transitions`, from the state
   polled once a second; each with the parent set's counters ``sw``,
@@ -282,9 +289,10 @@ def _noise(adapter):
     return stats, (None if stats is None else stats.get("noise"))
 
 
-def boot(cfg, stack, reset, crashes, version, build, watchdog_ms, utc=None):
+def boot(cfg, stack, reset, crashes, version, build, watchdog_ms, utc=None, probe=None):
     """Return the fields of the ``boot`` record of configuration cfg and its
-    stack; utc: the RTC's time (ms since the Unix epoch) when valid, else None."""
+    stack; utc: the RTC's time (ms since the Unix epoch) when valid, else None;
+    probe: [period, bound] of the loop lateness probe (ms, ``sily.lateness``)."""
     engine = stack.engine
     counter = engine.security.counter
     routing = stack.routing
@@ -310,6 +318,7 @@ def boot(cfg, stack, reset, crashes, version, build, watchdog_ms, utc=None):
         "ap": None if ap is None else ap_ssid(ap["prefix"], cfg["name"]),
         "watchdog_s": watchdog_ms // 1000,
         "utc": utc,
+        "probe_ms": probe,
     }
 
 
