@@ -541,7 +541,7 @@ class Page(unittest.TestCase):
     def test_page_file(self):
         self.assertTrue(web.PAGE.endswith("/sily/page.html"))
         # Sent whole at each load, by CHUNK bytes from flash: kept lean (no library).
-        self.assertLessEqual(os.stat(web.PAGE)[6], 28 * 1024)
+        self.assertLessEqual(os.stat(web.PAGE)[6], 32 * 1024)
         with open(web.PAGE) as f:
             text = f.read()
         self.assertIn("/status.json", text)

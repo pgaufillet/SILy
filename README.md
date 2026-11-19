@@ -622,8 +622,10 @@ epoch>`), which anchors the box's journal to UTC (`clock` lines, above);
 the page shows the box's clock in the phone's time zone, with its offset
 from UTC (`clock 16:30:00 UTC+1`, or `not set`).
 The page is one file without library (no internet on the access point),
-laid out for a phone held outdoors (large dark text, no horizontal
-scrolling) and in two columns on a screen 900 px wide or more. Its script
+laid out for a phone held outdoors (large high-contrast text, no
+horizontal scrolling, the header and its freshness mark kept on top) and
+in two columns on a screen 900 px wide or more; it follows the phone's
+light or dark setting. Its script
 keeps one state, updated by each answer, from which every part of the page
 is drawn again; all the figures below are derived in the browser from
 `/status.json` as it was. Every box opens with a banner, then the event

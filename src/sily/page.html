@@ -6,59 +6,91 @@
 <link rel=icon href="data:,">
 <title>SILy</title>
 <style>
+:root{--bg:#f2f4f7;--card:#fff;--ink:#141a22;--mute:#5a6472;--line:#dde2e8;--head:#eef1f5;--good:#1e8e4f;--warn:#b26a00;
+--bad:#c62828;--wt:#fff5df;--bt:#fdecec;--e0:#2b333d;--e1:#7f8a99;--e2:#c5ccd5;--sh:0 1px 2px #1018280f,0 1px 3px #10182814}
+.ok{--c:var(--good);--t:#dbf2e4}.late{--c:var(--warn);--t:#fdebc4}.silent{--c:#6b7480;--t:#e5e8ec}.unreachable{--c:var(--bad);--t:#fcdede}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1217;--card:#171d25;--ink:#e6ebf1;--mute:#98a3b1;--line:#29313c;--head:#1f2731;
+--good:#45c27e;--warn:#eaa840;--bad:#ff6b6b;--wt:#33290f;--bt:#3b1a1c;--e0:#cdd5df;--e1:#7d8896;--e2:#3a4452;--sh:0 0 #0000}
+.ok{--t:#163625}.late{--t:#3a2c10}.silent{--t:#283039}.unreachable{--t:#421b1d}}
 *{box-sizing:border-box}
-body{font:16px/1.35 system-ui,sans-serif;margin:0 auto;padding:8px;max-width:1400px;color:#000;background:#fff}
-h1{font-size:20px;margin:0}
-h2,summary{font-size:17px;font-weight:700;margin:12px 0 4px}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%}
+header{position:sticky;top:0;z-index:1;background:var(--card);border-bottom:1px solid var(--line);box-shadow:var(--sh);
+padding:8px 14px;display:flex;flex-wrap:wrap;align-items:center;gap:2px 12px}
+h1{font-size:18px;margin:0;letter-spacing:-.01em}
+#sub{flex:1 1 100%;margin:0;color:var(--mute);font-size:13px}
+#up{font-size:12px;font-weight:600;color:var(--mute);background:var(--head);border-radius:99px;padding:2px 10px}
+#up::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--e1);margin-right:6px;vertical-align:1px}
+#up.live::before{background:var(--good)}
+#up.bad{color:#fff;background:var(--bad)}#up.bad::before{background:#fff}
+main{max-width:1400px;margin:0 auto;padding:12px}
+h2{font-size:15px;margin:14px 0 6px}
 p,ul{margin:4px 0}
-#up{color:#333}
-#up.bad{color:#fff;background:#b00020;padding:2px 6px;font-weight:700}
-.ok{--c:#7fd48e}.late{--c:#ffc247}.silent{--c:#c4c4c4}.unreachable{--c:#ff8585}
-.k{display:inline-block;background:var(--c);border:1px solid #000;border-radius:4px;padding:0 6px;margin:2px 6px 2px 0;font-weight:700}
-.ban{border:3px solid #1a7f37;background:#e6f7ea;padding:4px 8px;margin:6px 0}
-.ban.l1{border-color:#a35f00;background:#fff1cc}
-.ban.l2{border-color:#b00020;background:#ffe0e0}
-.al{padding-left:22px;font-weight:700}
-.al .l2{color:#b00020}
-.w{overflow-x:auto}
-table{border-collapse:collapse;font-size:14px}
-td,th{padding:3px 6px;text-align:right;white-space:nowrap;border-bottom:1px solid #bbb}
-th{background:#e8e8e8}
-tr>:first-child{text-align:left}
-tr:not(.ok) td{background:var(--c)}
-#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:6px}
-.card{border:1px solid #666;border-left:10px solid var(--c);padding:3px 6px;font-size:14px}
-.card i{color:#b00020;font-style:normal;font-weight:700}
-svg{display:block;width:100%;max-width:640px;height:auto;font:13px system-ui,sans-serif}
-svg text{text-anchor:middle}
+.pan,.ban,#gr,.card{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--sh)}
+.pan{padding:10px 12px;margin:0 0 12px}
+.pan>h2{display:flex;align-items:center;justify-content:space-between;margin:0 0 8px;font-size:16px}
+.ban{--l:var(--good);padding:10px 12px 10px 16px;margin:0 0 12px;box-shadow:inset 5px 0 0 var(--l),var(--sh)}
+.ban.l1{--l:var(--warn)}.ban.l2{--l:var(--bad)}
+.ban>p:last-child{color:var(--mute)}
+.al{list-style:none;padding:0;margin:8px 0 2px}
+.al li{position:relative;padding:3px 0 3px 18px;font-weight:600}
+.al li::before{content:"";position:absolute;left:2px;top:.6em;width:9px;height:9px;border-radius:50%;background:var(--warn)}
+.al li.l2{color:var(--bad)}.al li.l2::before{background:var(--bad)}
+.k{display:inline-flex;align-items:center;gap:6px;background:var(--t);border-radius:99px;padding:2px 10px 2px 8px;
+margin:2px 6px 2px 0;font-size:14px;font-weight:600}
+.k::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--c)}
+#gr{padding:10px;margin:0 0 12px}#gr:empty,#cards:empty{display:none}
+#gr p{margin:6px 0 0;color:var(--mute);font-size:12px}#gr .k{font-size:12px}
+svg{display:block;width:100%;max-width:640px;height:auto;margin:0 auto;font:13px system-ui,sans-serif}
+svg text{text-anchor:middle;fill:var(--ink)}
 svg .s{text-anchor:start}
-.n circle,.n rect{fill:var(--c);stroke:#000;stroke-width:1.5}
-.n.silent circle{stroke-dasharray:4 2}
-.n .x{fill:#b00020;stroke:#fff}
-.n .xt{fill:#fff;font-weight:700}
-.nm{font-size:12px}
-.e0{stroke:#000;stroke-width:2.5}
-.e1{stroke:#000;stroke-width:1.4;stroke-dasharray:6 4;fill:none}
-.e2{stroke:#9a9a9a;stroke-width:1;fill:none}
-.el{font-size:12px;font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:4px}
-.ap{fill:none;stroke:#b00020;stroke-dasharray:6 4}
-#log{list-style:none;padding:0;max-height:50vh;overflow-y:auto;font-size:14px;border:1px solid #bbb}
-#log li{padding:2px 6px;border-bottom:1px solid #ddd}
-#log .l1{background:#fff1cc}
-#log .l2{background:#ffe0e0;font-weight:700}
-button{font:inherit;font-size:14px;margin-left:8px}
-@media(min-width:900px){#m{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px}#log{max-height:80vh}}
-@media(max-width:600px){.nb td:nth-child(n+7),.nb th:nth-child(n+7){display:none}}
+.n circle,.n rect{fill:var(--t);stroke:var(--c);stroke-width:2}
+.n.silent circle{stroke-dasharray:4 3}
+.n .x{fill:var(--bad);stroke:var(--card);stroke-width:1.5}
+.n .xt{fill:#fff;font-weight:700;font-size:11px}
+svg .nm{font-size:12px;fill:var(--mute)}
+.e0{stroke:var(--e0);stroke-width:2.5;stroke-linecap:round}
+.e1{stroke:var(--e1);stroke-width:1.5;stroke-dasharray:5 4;fill:none}
+.e2{stroke:var(--e2);stroke-width:1.2;fill:none}
+svg .el{font-size:12px;font-weight:700;paint-order:stroke;stroke:var(--card);stroke-width:4px;stroke-linejoin:round}
+.ap{fill:none;stroke:var(--bad);stroke-dasharray:5 4}svg .apt{fill:var(--bad);font-size:12px}
+#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin:0 0 12px}
+.card{padding:8px 10px 8px 15px;font-size:13px;line-height:1.5;color:var(--mute);box-shadow:inset 5px 0 0 var(--c),var(--sh)}
+.card b{font-size:15px;color:var(--ink)}
+.card i{background:var(--bad);color:#fff;font-style:normal;font-weight:700;font-size:11px;border-radius:4px;padding:1px 5px;margin-left:4px;vertical-align:2px}
+.w{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;font-size:13px;width:100%}
+td,th{padding:5px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
+th{background:var(--head);color:var(--mute);font-size:12px;font-weight:600}
+tr:last-child td{border-bottom:0}
+tr>:first-child{text-align:left}
+tr:not(.ok) td{background:var(--t)}
+details.pan{padding:0}
+summary{cursor:pointer;list-style:none;padding:10px 12px;font-size:16px;font-weight:700}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"\25B8";display:inline-block;width:1.1em;color:var(--mute);transition:transform .15s}
+details[open]>summary::before{transform:rotate(90deg)}
+details>div{padding:0 12px 12px}details>div>h2:first-child{margin-top:0}
+#log{list-style:none;padding:0;margin:0;max-height:50vh;overflow-y:auto;font-size:13px;border:1px solid var(--line);border-radius:10px}
+#log li{padding:5px 8px 5px 12px;border-bottom:1px solid var(--line);box-shadow:inset 3px 0 0 var(--e2)}
+#log li:last-child{border-bottom:0}
+#log .l1{background:var(--wt);box-shadow:inset 3px 0 0 var(--warn)}
+#log .l2{background:var(--bt);box-shadow:inset 3px 0 0 var(--bad);font-weight:600}
+.tm{color:var(--mute);margin-right:6px}
+button{font:inherit;font-size:12px;font-weight:600;color:var(--mute);background:var(--head);border:1px solid var(--line);
+border-radius:99px;padding:3px 12px;cursor:pointer}
+@media(min-width:900px){#m{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px;align-items:start}#log{max-height:75vh}}
+@media(max-width:600px){main{padding:8px}.nb td:nth-child(n+7),.nb th:nth-child(n+7){display:none}}
 </style>
 </head>
 <body>
-<h1 id=hd>SILy</h1>
-<p id=sub></p>
-<p id=up>waiting for the box</p>
+<header><h1 id=hd>SILy</h1><span id=up>waiting for the box</span><p id=sub></p></header>
+<main>
 <div id=m><div><div id=sum></div><div id=gr></div><div id=cards></div></div>
-<div><h2>Events, local time <button id=clr>clear</button></h2><ol id=log></ol></div></div>
-<details id=tbd hidden><summary>Nodes in detail</summary><div id=tb></div></details>
-<details id=ownd><summary>This box</summary><div id=own></div></details>
+<section class=pan><h2>Events, local time <button id=clr>clear</button></h2><ol id=log></ol></section></div>
+<details id=tbd class=pan hidden><summary>Nodes in detail</summary><div id=tb></div></details>
+<details id=ownd class=pan><summary>This box</summary><div id=own></div></details>
+</main>
 <script id=logic>
 "use strict";
 // Thresholds of the summary and alarms; README, status page, gives their sources.
@@ -344,7 +376,7 @@ function graph(V, A) {
   const {pos, top, h} = layout(V), E = edges(V, pos), bad = {}, out = [], labs = [];
   for (const x of A) if (x.a != null) bad[x.a] = 1;
   if (top != null) out.push("<rect class=ap x=3 y=" + top + " width=" + (GW - 6) + " height=" + (h - top - 4) +
-    " /><text x=" + GW / 2 + " y=" + (top + 13) + ">not reaching the gateway</text>");
+    " rx=8 /><text class=apt x=" + GW / 2 + " y=" + (top + 14) + ">not reaching the gateway</text>");
   for (const [t, lab, a, c] of Object.values(E).sort((p, q) => q[0] - p[0])) {
     const [x1, y1] = pos[c], [x2, y2] = pos[a];
     if (t) {
@@ -359,7 +391,7 @@ function graph(V, A) {
   for (const [x, y, lab, side] of labs)
     out.push('<text class="el' + (side ? ' s"' : '"') + " x=" + Math.round(x) + " y=" + Math.round(y) + ">" + esc(lab) + "</text>");
   const dot = (a, x, y, c, name, tip, gw) => out.push('<g class="n ' + c + '"><title>' + esc(tip) + "</title>" +
-    (gw ? "<rect x=" + (x - 20) + " y=" + (y - 13) + " width=40 height=26 />" : "<circle cx=" + x + " cy=" + y + " r=" + R + " />") +
+    (gw ? "<rect x=" + (x - 20) + " y=" + (y - 13) + " width=40 height=26 rx=6 />" : "<circle cx=" + x + " cy=" + y + " r=" + R + " />") +
     "<text x=" + x + " y=" + (y + 5) + ">" + esc(a) + "</text><text " + (gw ? 'class="nm s" x=' + (x + 24) + " y=" + (y + 5) : "class=nm x=" + x + " y=" + (y + R + 13)) + ">" +
     esc(String(name || "").slice(0, 9)) + "</text>" + (bad[a] ? "<circle class=x cx=" + (x + 13) + " cy=" + (y - 12) +
     " r=6 /><text class=xt x=" + (x + 13) + " y=" + (y - 8) + ">!</text>" : "") + "</g>");
@@ -377,7 +409,7 @@ function graph(V, A) {
 
 function logHtml(log) {
   const today = day(Date.now());
-  return log.map(e => "<li class=l" + e[1] + ">" + (day(e[0]) == today ? "" : day(e[0]) + " ") + hms(e[0]) + " " +
+  return log.map(e => "<li class=l" + e[1] + "><span class=tm>" + (day(e[0]) == today ? "" : day(e[0]) + " ") + hms(e[0]) + "</span>" +
     esc(e[2])).join("") || "<li>no event yet";
 }
 
@@ -431,7 +463,7 @@ let error = "", next = null, shown = false;
 
 function tick() {
   const s = Math.round((Date.now() - (S.t || start)) / 1000), e = $("up"), bad = s >= STALE_S;
-  e.className = bad ? "bad" : "";
+  e.className = bad ? "bad" : S.t ? "live" : "";
   e.textContent = bad ? "no answer for " + s + " s" + (error ? " (" + error + ")" : "") :
     S.t ? "updated " + s + " s ago" : "waiting for the box";
 }

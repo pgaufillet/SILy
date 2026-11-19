@@ -419,9 +419,9 @@ G.html = {
   log_dates() {
     const now = Date.now(), h = P.logHtml([[now, 1, "x"], [Date.UTC(2020, 0, 2, 3, 4, 5), 0, "y"],
       [Date.UTC(2020, 6, 1, 22, 30, 0), 2, "z"]]);
-    assert.ok(h.startsWith("<li class=l1>" + new Date(now).toTimeString().slice(0, 8) + " x"));
-    assert.ok(h.includes("<li class=l0>01-02 04:04:05 y"));
-    assert.ok(h.includes("<li class=l2>07-02 00:30:00 z")); // the local date, past midnight in summer
+    assert.ok(h.startsWith("<li class=l1><span class=tm>" + new Date(now).toTimeString().slice(0, 8) + "</span>x"));
+    assert.ok(h.includes("<li class=l0><span class=tm>01-02 04:04:05</span>y"));
+    assert.ok(h.includes("<li class=l2><span class=tm>07-02 00:30:00</span>z")); // the local date, past midnight in summer
     assert.strictEqual(P.logHtml([]), "<li>no event yet");
   },
   header_and_node_banner() {
