@@ -540,12 +540,13 @@ class Server(unittest.TestCase):
 class Page(unittest.TestCase):
     def test_page_file(self):
         self.assertTrue(web.PAGE.endswith("/sily/page.html"))
-        self.assertLessEqual(os.stat(web.PAGE)[6], 12 * 1024)
+        # Sent whole at each load, by CHUNK bytes from flash: kept lean (no library).
+        self.assertLessEqual(os.stat(web.PAGE)[6], 28 * 1024)
         with open(web.PAGE) as f:
             text = f.read()
         self.assertIn("/status.json", text)
         self.assertIn('fetch("/status.json?now=" + Date.now(),', text)  # the phone's time
-        self.assertIn('"clock " + utc(b.utc)', text)
+        self.assertIn('"clock " + local(b.utc)', text)
         self.assertIn('<link rel=icon href="data:,">', text)
         for scheme in ("http://", "https://"):
             self.assertFalse(scheme in text, scheme)

@@ -136,7 +136,9 @@ make journal PORT=/dev/ttyACM0 OUT=build/box3  # copy the box's journal, reset i
 
 Host tests use micropython-lib's `unittest` from the MicroPython tree (through
 `MICROPYPATH`, nothing installed). `make test` fails if a test fails, a test
-module cannot be imported, or no test runs.
+module cannot be imported, or no test runs. The status page's script is
+tested under Node.js (`tests/page_test.js`, run by `test_sily_page.py`;
+those tests are skipped when `node` is not on the PATH).
 
 ## Large-network suite
 
@@ -617,18 +619,82 @@ stay connected) and opens http://192.168.4.1/: the page asks the box for
 `/status.json` every 5 s (none while hidden) and says how old its data is.
 Each poll carries the phone's time (`/status.json?now=<ms since the Unix
 epoch>`), which anchors the box's journal to UTC (`clock` lines, above);
-the page shows the box's clock (`clock 15:30:00 UTC`, or `not set`).
-Every box shows its own view: state (attached, parent, rank), duty cycle,
-queue, heap, journal, frames; its neighbours (margin, ETX, d_in, age, RSSI,
-SNR; parents first); its test traffic, the gateway's reply turnaround
-of the last minute and the web server's counters. The gateway adds the
-view of the mesh from the reports it receives: the parent
-tree in text (each node with its state when not ok, battery, uplink margin
-and delivery, parent changes; nodes whose chain does not reach the gateway
-under `?`), then one row per node: state (`late` after 2.5 presence periods
-without a presence, `silent` after 4.5), last heard, parent, hops, rank (the
-gateway's neighbours), battery, mode, report flags, links, test traffic
-received and its latency, presences and restarts, parent changes, firmware.
+the page shows the box's clock in the phone's time zone, with its offset
+from UTC (`clock 16:30:00 UTC+1`, or `not set`).
+The page is one file without library (no internet on the access point),
+laid out for a phone held outdoors (large dark text, no horizontal
+scrolling) and in two columns on a screen 900 px wide or more. Its script
+keeps one state, updated by each answer, from which every part of the page
+is drawn again; all the figures below are derived in the browser from
+`/status.json` as it was. Every box opens with a banner, then the event
+log, then its own view (folded on a phone at the gateway): state
+(attached, parent, rank), duty cycle, queue, heap, journal, frames; its
+neighbours (margin, ETX, d_in, age, then the last margin, RSSI and SNR,
+hidden on a phone; parents first); its test traffic, the gateway's reply
+turnaround of the last minute and the web server's counters. A node's
+banner gives its attachment, parent, battery, duty cycle and queue, and
+its alarms (detached, battery, duty cycle). The gateway's banner gives the
+nodes ok, late (no presence for 2.5 presence periods, judged by the
+gateway, `sily.nodes`), silent (4.5 periods) and unreachable (their
+parent chain does not reach the gateway: no hops); the recent delivery of
+the test traffic (the received and expected counts' increase between the
+answers of the last 5 minutes, beside the total); the weakest uplink
+margin (a node's topology entry for its preferred parent and, below the
+gateway, the gateway's own reading of the node: the lower one); the lowest
+battery and the gateway's duty cycle; then the alarms, the red ones
+first: a node silent or unreachable; report flags D (duty cycle above
+80 %), Q (queue overflow), R (rank errors), A (address conflict, red), K
+(authentication failures, red); a node's uplink margin, recent delivery or
+battery below its threshold (silent nodes left out: their figures are
+old); the recent delivery of all nodes; the gateway's battery and duty
+cycle (red); reports of nodes beyond the bound of 64. The thresholds are
+constants at the top of the page's script:
+
+- uplink margin 10 dB: the margin M every link of a route should keep
+  (MESH_DESIGN §5, forest, bodies, rain, antenna orientation);
+- recent delivery 95 %, judged on at least 20 expected messages (one loss
+  alone, 95 %, never raises it), over a sliding window of 5 minutes: no
+  target is documented, class 1 retries should deliver nearly every
+  message;
+- battery 3.50 V: one Li-ion cell, empty at about 3.0 V
+  (`docs/hardware.md`), has little charge left below about 3.5 V;
+- duty cycle 80 % of the budget: the threshold of the presence flag D
+  (`DUTY_HIGH_PERCENT`, `src/mesh/link.py`);
+- late and silent: the gateway's states (`sily.nodes`; the silent limit is
+  the root's "node silent" alarm, MESH_DESIGN §13);
+- no answer for 20 s: the data marked old, and a gap in the event log.
+
+An alarm raised clears only past its threshold plus a margin (1 dB, 2
+points of delivery, 60 mV, 5 points of duty cycle), so that a figure
+hovering at its threshold does not fill the log. Below the banner, the
+gateway draws the network: itself on top, the nodes in rows by hop count
+(six per row at most), the unreachable ones apart below; the preferred
+parent links solid, labelled with the uplink margin (and the link's
+delivery when below 95 %), the other links of the parent sets dashed, the
+other links heard thin (from the nodes' topology reports
+and the gateway's neighbours); each node coloured by state, marked `!`
+with an alarm (its links and their margins in its tooltip). Then one card per node (state, hops, uplink margin and
+link delivery, test traffic recent and total, battery and mode, flags,
+restarts and parent changes), and the detailed table (folded on a phone,
+open on a wide screen): state, last heard, parent, hops, rank (the
+gateway's neighbours), uplink margin, battery, mode, report flags, links,
+test traffic received, its delivery in total and recent, its latency,
+presences and restarts, parent changes, firmware. The event log, in the
+phone's local time and newest first, comes from comparing each answer
+with the previous one: the start of the watch, a node heard, turning
+late, silent, unreachable or ok again, restarting (its restart count
+rising), changing parent, an alarm raised or cleared (flags included), the
+box rebooting (its boot number changing) and, on a node, its own
+attachment and parent; a gap when no answer came for more than 20 s, with
+its reason (no answer, page hidden or phone locked, page closed, another
+box watched), so that the log never implies what it did not see. The
+DODAG version is not shown: the root issues one at its boot and, for 4
+presence periods after it, when it follows a network ahead of it, both
+covered by the gateway's reboot. The log keeps 200 entries and, with the
+last state compared, is kept in the browser's `localStorage` per box
+(every box answers at 192.168.4.1): a reload, or a phone moving between
+access points, keeps it; the page works without it (private window,
+storage refused). The `clear` button empties it.
 The page is read-only and carries no key, fingerprint nor password. The
 server shares the loop with the mesh: the JSON is sent in 512-byte pieces,
 at most 3 connections at once, every request and response bounded in time;

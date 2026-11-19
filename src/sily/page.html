@@ -6,101 +6,379 @@
 <link rel=icon href="data:,">
 <title>SILy</title>
 <style>
-body{font:15px/1.4 system-ui,sans-serif;margin:8px;color:#111;background:#fff}
-h1{font-size:18px;margin:0}
-h2{font-size:15px;margin:14px 0 4px}
-p{margin:4px 0}
-#up{color:#555}
-#up.bad{color:#fff;background:#c00;padding:2px 6px}
+*{box-sizing:border-box}
+body{font:16px/1.35 system-ui,sans-serif;margin:0 auto;padding:8px;max-width:1400px;color:#000;background:#fff}
+h1{font-size:20px;margin:0}
+h2,summary{font-size:17px;font-weight:700;margin:12px 0 4px}
+p,ul{margin:4px 0}
+#up{color:#333}
+#up.bad{color:#fff;background:#b00020;padding:2px 6px;font-weight:700}
+.ok{--c:#7fd48e}.late{--c:#ffc247}.silent{--c:#c4c4c4}.unreachable{--c:#ff8585}
+.k{display:inline-block;background:var(--c);border:1px solid #000;border-radius:4px;padding:0 6px;margin:2px 6px 2px 0;font-weight:700}
+.ban{border:3px solid #1a7f37;background:#e6f7ea;padding:4px 8px;margin:6px 0}
+.ban.l1{border-color:#a35f00;background:#fff1cc}
+.ban.l2{border-color:#b00020;background:#ffe0e0}
+.al{padding-left:22px;font-weight:700}
+.al .l2{color:#b00020}
 .w{overflow-x:auto}
-table{border-collapse:collapse;font-size:13px}
-td,th{padding:2px 6px;text-align:right;white-space:nowrap;border-bottom:1px solid #ddd}
-th{background:#eee}
+table{border-collapse:collapse;font-size:14px}
+td,th{padding:3px 6px;text-align:right;white-space:nowrap;border-bottom:1px solid #bbb}
+th{background:#e8e8e8}
 tr>:first-child{text-align:left}
-tr.late td{background:#fd8}
-tr.silent td{color:#999}
-pre{font-size:13px;margin:0;overflow-x:auto}
+tr:not(.ok) td{background:var(--c)}
+#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:6px}
+.card{border:1px solid #666;border-left:10px solid var(--c);padding:3px 6px;font-size:14px}
+.card i{color:#b00020;font-style:normal;font-weight:700}
+svg{display:block;width:100%;max-width:640px;height:auto;font:13px system-ui,sans-serif}
+svg text{text-anchor:middle}
+svg .s{text-anchor:start}
+.n circle,.n rect{fill:var(--c);stroke:#000;stroke-width:1.5}
+.n.silent circle{stroke-dasharray:4 2}
+.n .x{fill:#b00020;stroke:#fff}
+.n .xt{fill:#fff;font-weight:700}
+.nm{font-size:12px}
+.e0{stroke:#000;stroke-width:2.5}
+.e1{stroke:#000;stroke-width:1.4;stroke-dasharray:6 4;fill:none}
+.e2{stroke:#9a9a9a;stroke-width:1;fill:none}
+.el{font-size:12px;font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:4px}
+.ap{fill:none;stroke:#b00020;stroke-dasharray:6 4}
+#log{list-style:none;padding:0;max-height:50vh;overflow-y:auto;font-size:14px;border:1px solid #bbb}
+#log li{padding:2px 6px;border-bottom:1px solid #ddd}
+#log .l1{background:#fff1cc}
+#log .l2{background:#ffe0e0;font-weight:700}
+button{font:inherit;font-size:14px;margin-left:8px}
+@media(min-width:900px){#m{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px}#log{max-height:80vh}}
+@media(max-width:600px){.nb td:nth-child(n+7),.nb th:nth-child(n+7){display:none}}
 </style>
 </head>
 <body>
 <h1 id=hd>SILy</h1>
 <p id=sub></p>
 <p id=up>waiting for the box</p>
-<div id=gw></div>
-<div id=own></div>
-<script>
+<div id=m><div><div id=sum></div><div id=gr></div><div id=cards></div></div>
+<div><h2>Events, local time <button id=clr>clear</button></h2><ol id=log></ol></div></div>
+<details id=tbd hidden><summary>Nodes in detail</summary><div id=tb></div></details>
+<details id=ownd><summary>This box</summary><div id=own></div></details>
+<script id=logic>
 "use strict";
-const $ = i => document.getElementById(i);
-const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, c => "&#" + c.charCodeAt(0) + ";");
+// Thresholds of the summary and alarms; README, status page, gives their sources.
+const MARGIN_DB = 10, MARGIN_HYST = 1; // uplink margin, dB
+const DELIVERY_MIN = 0.95, DELIVERY_HYST = 0.02, DELIVERY_N = 20; // recent test traffic, judged from N messages
+const WINDOW_S = 300; // recent delivery: sliding window
+const BATTERY_MV = 3500, BATTERY_HYST = 60;
+const DUTY_MAX = 0.8, DUTY_HYST = 0.05; // fraction of the duty-cycle budget
+const STALE_S = 20; // data older: stale; answers further apart: a gap in the log
+const LOG_MAX = 200; // log entries kept
+const CATS = ["ok", "late", "silent", "unreachable"];
+
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => "&#" + c.charCodeAt(0) + ";");
 const dash = v => (v == null ? "-" : v);
 const tenths = v => (v == null ? "-" : (v / 10).toFixed(1));
 const volts = mv => (mv == null ? "-" : (mv / 1000).toFixed(2) + " V");
+const pct = (x, y) => (y ? (100 * x / y).toFixed(1) + " %" : "-");
 const ago = s => (s == null ? "-" : s < 120 ? s + " s" : s < 7200 ? Math.floor(s / 60) + " min" : Math.floor(s / 3600) + " h");
 const two = n => String(n).padStart(2, "0");
 const uptime = s => (s == null ? "-" : Math.floor(s / 3600) + ":" + two(Math.floor(s / 60) % 60) + ":" + two(s % 60));
-const utc = ms => (ms == null ? "not set" : new Date(ms).toISOString().slice(11, 19) + " UTC");
+// Times in the phone's time zone; the journals stay in UTC, hence the offset shown with the clock.
+const hms = t => (d => two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds()))(new Date(t));
+const day = t => (d => two(d.getMonth() + 1) + "-" + two(d.getDate()))(new Date(t));
+const zone = t => (o => "UTC" + (o < 0 ? "-" : "+") + Math.floor(Math.abs(o) / 60) +
+  (o % 60 ? ":" + two(Math.abs(o) % 60) : ""))(-new Date(t).getTimezoneOffset());
+const local = ms => (ms == null ? "not set" : hms(ms) + " " + zone(ms));
 const row = (cells, cls) => "<tr" + (cls ? " class=" + cls : "") + "><td>" + cells.map(esc).join("<td>");
-const table = (head, rows) => '<div class="w"><table><tr><th>' + head.join("<th>") + rows.join("") + "</table></div>";
-const FLAGS = [[4, "D"], [2, "Q"], [16, "R"], [32, "A"], [64, "K"], [1, "B"]];
+const table = (head, rows, cls) => '<div class="w ' + (cls || "") + '"><table><tr><th>' + head.join("<th>") + rows.join("") + "</table></div>";
+// Presence flags: bit, letter, alarm level (0: none), meaning.
+const FLAGS = [[4, "D", 1, "duty > 80 %"], [2, "Q", 1, "queue overflow"], [16, "R", 1, "rank errors"],
+  [32, "A", 2, "address conflict"], [64, "K", 2, "authentication failures"], [1, "B", 0, "first report since boot"]];
 const flags = f => (f == null ? "-" : FLAGS.filter(x => f & x[0]).map(x => x[1]).join(""));
 const db = m => (m == -128 ? "?" : m);
 const label = n => n.address + (n.name ? " " + n.name : "");
 const links = l => l.map(e => (e[2] ? "*" : "") + e[0] + ":" + db(e[1]) + "/" + e[3] + "%").join(" ");
+const plural = (n, w) => n + " " + w + (n == 1 ? "" : "s");
 
-function header(b) {
-  $("hd").textContent = document.title = (b.role == "gateway" ? "Gateway " : "Node ") + label(b);
-  $("sub").textContent = [volts(b.battery), dash(b.mode), "up " + uptime(b.time_s), "boot " + dash(b.boot),
-    "clock " + utc(b.utc)].join(" · ");
+// A node's category: silent, else unreachable (its parent chain does not reach the gateway), else ok or late.
+const cat = n => (n.state == "silent" ? "silent" : n.hops == null ? "unreachable" : n.state);
+
+// Margin (dB) of the link to the preferred parent: the node's topology entry and,
+// below the gateway, the gateway's own reading of the node; the lower one.
+function uplink(n, nb) {
+  const e = n.links.find(e => e[0] == n.parent), g = n.parent === 0 && nb[n.address];
+  const m = [e && e[1] != -128 ? e[1] : null, g && g.margin != null ? Math.round(g.margin / 10) : null]
+    .filter(x => x != null);
+  return m.length ? Math.min(...m) : null;
 }
 
-// The gateway's view: the parent tree, then one row per node.
-function mesh(b, m) {
-  const nodes = m.nodes || [], kids = {}, tt = {}, rank = {}, seen = {};
-  for (const n of nodes) (kids[n.parent] = kids[n.parent] || []).push(n);
-  for (const t of (b.traffic || {}).nodes || []) tt[t.address] = t;
-  for (const n of b.neighbours || []) rank[n.address] = n.rank;
-  const line = n => {
-    let s = label(n);
-    if (n.state != "ok") s += " [" + n.state + " " + ago(n.age_s == null ? n.heard_s : n.age_s) + "]";
-    s += " " + volts(n.battery);
-    const up = n.links.find(e => e[0] == n.parent);
-    if (up) s += " up " + db(up[1]) + " dB " + up[3] + "%";
-    if (n.parent_changes) s += " " + n.parent_changes + " parent changes";
-    return s;
-  };
-  const lines = [label(b)];
-  const walk = (a, depth) => {
-    for (const n of kids[a] || []) {
-      if (seen[n.address]) continue;
-      seen[n.address] = 1;
-      lines.push("  ".repeat(depth) + line(n));
-      walk(n.address, depth + 1);
+// The view of one answer; S.hist keeps [t, {address: [received, expected]}] over WINDOW_S
+// for the recent delivery of the test traffic.
+function derive(S, j, now) {
+  const b = j.box, m = j.mesh, t = b.traffic, nb = {}, tt = {}, cur = {}, rec = {}, tot = [0, 0];
+  for (const x of b.neighbours || []) nb[x.address] = x;
+  for (const x of (t && t.role == "receiver" && t.nodes) || []) {
+    tt[x.address] = x;
+    cur[x.address] = [x.received, x.expected];
+  }
+  S.hist = S.hist.filter(h => h[0] <= now && now - h[0] <= WINDOW_S * 1000);
+  for (const a in cur) {
+    const o = S.hist.find(h => h[1][a]);
+    if (!o) continue;
+    const rx = cur[a][0] - o[1][a][0], exp = cur[a][1] - o[1][a][1];
+    if (rx >= 0 && exp >= 0) {
+      rec[a] = [rx, exp];
+      tot[0] += rx;
+      tot[1] += exp;
     }
-  };
-  walk(0, 1);
-  const lost = nodes.filter(n => !seen[n.address]);
-  if (lost.length) lines.push("?");
-  for (const n of lost) lines.push("  " + line(n) + " (parent " + dash(n.parent) + ")");
-  const rows = nodes.map(n => {
-    const t = tt[n.address];
-    return row([label(n), n.state + " " + ago(n.age_s), ago(n.heard_s), dash(n.parent), dash(n.hops),
-      dash(rank[n.address]), volts(n.battery), dash(n.mode), flags(n.flags),
+  }
+  const span = S.hist.length ? Math.round((now - S.hist[0][0]) / 1000) : 0;
+  S.hist.push([now, cur]);
+  const nodes = ((m && m.nodes) || []).map(n =>
+    Object.assign({}, n, {c: cat(n), up: uplink(n, nb), tt: tt[n.address], rec: rec[n.address]}));
+  return {b, m, gw: !!m, nodes, rec: tot, span, tt: t && t.nodes ? t.nodes : []};
+}
+
+function summary(V) {
+  const c = V.b.counters || {}, s = {ok: 0, late: 0, silent: 0, unreachable: 0, up: null, bat: null, all: [0, 0],
+    duty: c.duty_budget_ms ? c.duty_ms / c.duty_budget_ms : null};
+  if (V.b.battery != null) s.bat = [V.b.battery, V.b];
+  for (const n of V.nodes) {
+    s[n.c]++;
+    if (n.c == "silent") continue;
+    if (n.up != null && (!s.up || n.up < s.up[0])) s.up = [n.up, n];
+    if (n.battery != null && (!s.bat || n.battery < s.bat[0])) s.bat = [n.battery, n];
+  }
+  for (const x of V.tt) (s.all[0] += x.received), (s.all[1] += x.expected);
+  return s;
+}
+
+// Alarms {k: key, l: level 1 or 2, a: address or null, t: topic, v: value, st: shown by
+// the state events}; prev: the keys raised at the last answer, for the hysteresis.
+function alarms(V, prev) {
+  const out = [], b = V.b, s = summary(V), on = k => !!(prev && prev[k]);
+  const add = (k, l, a, t, v, st) => out.push({k, l, a, t, v: v || "", st: st ? 1 : 0});
+  const low = (k, v, lim, h) => v != null && v < lim + (on(k) ? h : 0);
+  const me = V.gw ? 0 : null;
+  if (!V.gw && !b.attached) add("det", 2, me, "this box detached", "", 1);
+  if (s.duty != null && s.duty > DUTY_MAX - (on("duty") ? DUTY_HYST : 0))
+    add("duty", V.gw ? 2 : 1, me, (V.gw ? "gateway" : "this box") + " duty cycle", pct(s.duty, 1) + " of budget");
+  if (low("bat", b.battery, BATTERY_MV, BATTERY_HYST)) add("bat", 1, me, (V.gw ? "gateway" : "this box") + " battery", volts(b.battery));
+  if (V.m && V.m.beyond) add("beyond", 1, null, "reports of nodes beyond the bound", V.m.beyond);
+  if (V.rec[1] >= DELIVERY_N && low("rec", V.rec[0] / V.rec[1], DELIVERY_MIN, DELIVERY_HYST))
+    add("rec", 1, null, "test traffic delivery", pct(V.rec[0], V.rec[1]) + " over " + ago(V.span));
+  for (const n of V.nodes) {
+    const a = n.address, L = "node " + label(n), r = n.rec;
+    if (n.c == "silent") add("s" + a, 2, a, L + " silent", "for " + ago(n.age_s == null ? n.heard_s : n.age_s), 1);
+    else {
+      if (n.c == "unreachable") add("u" + a, 2, a, L + " unreachable:", "parent " + dash(n.parent) + " not reaching the gateway", 1);
+      if (low("m" + a, n.up, MARGIN_DB, MARGIN_HYST)) add("m" + a, 1, a, L + " uplink margin", n.up + " dB");
+      if (r && r[1] >= DELIVERY_N && low("d" + a, r[0] / r[1], DELIVERY_MIN, DELIVERY_HYST))
+        add("d" + a, 1, a, L + " test delivery", pct(r[0], r[1]) + " (" + r[0] + "/" + r[1] + ")");
+      if (low("b" + a, n.battery, BATTERY_MV, BATTERY_HYST)) add("b" + a, 1, a, L + " battery", volts(n.battery));
+    }
+    for (const f of FLAGS) if (f[2] && n.flags & f[0]) add("f" + a + f[1], f[2], a, L + " flag " + f[1], f[3]);
+  }
+  return out.sort((x, y) => y.l - x.l);
+}
+
+// Events [level, text] from snapshot P (the last answer's, null: none) to view V and
+// alarms A; returns [events, the new snapshot].
+function diff(P, V, A) {
+  const b = V.b, ev = [], who = V.gw ? "gateway" : "box", al = {}, ns = {};
+  for (const x of A) al[x.k] = [x.l, x.t, x.st];
+  for (const n of V.nodes) ns[n.address] = [n.c, n.restarts, n.parent];
+  const Q = {boot: b.boot, att: b.attached, par: b.parent, n: ns, al};
+  if (!P) return [[[0, "watching " + who + " " + label(b) + (V.gw ? ", " + plural(V.nodes.length, "node") : "")]], Q];
+  if (P.boot != b.boot) {
+    ev.push([2, who + " rebooted (boot " + P.boot + " to " + b.boot + ")"]);
+    P = {n: {}, al: {}, att: b.attached, par: b.parent};
+  }
+  if (P.att != b.attached) ev.push(b.attached ? [0, "attached, parent " + b.parent] : [2, "detached"]);
+  else if (b.attached && P.par != b.parent) ev.push([0, "parent " + P.par + " to " + b.parent]);
+  for (const n of V.nodes) {
+    const o = P.n[n.address], L = "node " + label(n);
+    if (!o) {
+      ev.push([0, L + " heard, " + n.c + (n.hops == null ? "" : ", " + plural(n.hops, "hop"))]);
+      continue;
+    }
+    if (o[0] != n.c) ev.push([CATS.indexOf(n.c) > 1 ? 2 : +(n.c == "late"), L + (n.c == "ok" ? " ok again" : " " + n.c)]);
+    if (n.restarts > o[1]) ev.push([1, L + " restarted" + (n.restarts - o[1] > 1 ? " " + (n.restarts - o[1]) + " times" : "")]);
+    if (o[2] != null && n.parent != o[2]) ev.push([0, L + " parent " + o[2] + " to " + dash(n.parent)]);
+  }
+  for (const k in al) if (!al[k][2] && !P.al[k]) ev.push([al[k][0], "alarm: " + al[k][1] + " " + A.find(x => x.k == k).v]);
+  for (const k in P.al) if (!P.al[k][2] && !al[k]) ev.push([0, "cleared: " + P.al[k][1]]);
+  return [ev, Q];
+}
+
+const fresh = () => ({id: "", t: 0, p: null, hist: [], log: [], v: null, a: [], why: ""});
+
+// The log and the last snapshot of a box, kept in the browser (store: localStorage,
+// null without); every access may throw, the page works without them.
+function load(store, id) {
+  try {
+    const o = JSON.parse(store.getItem("sily:" + id));
+    if (o && Array.isArray(o.log))
+      return {t: +o.t || 0, p: o.p && o.p.n && o.p.al ? o.p : null, log: o.log.slice(0, LOG_MAX), why: "page closed"};
+  } catch (e) {}
+  return {};
+}
+
+function save(store, S) {
+  try {
+    store.setItem("sily:" + S.id, JSON.stringify({t: S.t, p: S.p, log: S.log}));
+  } catch (e) {}
+}
+
+// One answer j at now (ms, the phone's clock): the state S updated, the new events logged.
+function step(S, j, now, store) {
+  const b = j.box, id = (b.role == "gateway" ? "g" : "n") + b.address, ev = [];
+  if (S.id != id) {
+    const was = S.id;
+    if (was) save(store, S);
+    Object.assign(S, fresh(), load(store, id), {id});
+    if (was) S.why = "another box watched";
+  }
+  if (S.t && now - S.t > STALE_S * 1000) ev.push([1, "gap: no data since " + hms(S.t) + " (" + (S.why || "no answer") + ")"]);
+  if (S.p && S.p.boot != b.boot) S.hist = [];
+  const V = derive(S, j, now), A = alarms(V, S.p && S.p.al), d = diff(S.p, V, A);
+  S.log = ev.concat(d[0]).reverse().map(e => [now, e[0], e[1]]).concat(S.log).slice(0, LOG_MAX);
+  Object.assign(S, {v: V, a: A, p: d[1], t: now, why: ""});
+  save(store, S);
+  return S;
+}
+
+// --- Views: HTML text from the state ------------------------------------------------
+
+function header(b) {
+  return [(b.role == "gateway" ? "Gateway " : "Node ") + label(b), [volts(b.battery), dash(b.mode), "up " + uptime(b.time_s),
+    "boot " + dash(b.boot), "clock " + local(b.utc)].join(" · ")];
+}
+
+function banner(V, A) {
+  const s = summary(V), b = V.b, c = b.counters || {}, out = [];
+  let h = "";
+  if (V.gw) {
+    h = "<p>" + CATS.map(k => '<span class="k ' + k + '">' + s[k] + " " + k + "</span>").join("") + "</p>";
+    out.push("test " + (V.rec[1] ? pct(V.rec[0], V.rec[1]) + " over " + ago(V.span) : "-") + ", all " + pct(s.all[0], s.all[1]),
+      "weakest uplink " + (s.up ? s.up[0] + " dB (" + label(s.up[1]) + ")" : "-"));
+  } else out.push(b.attached ? (b.grounded === false ? "attached (float)" : "attached") + ", parent " + dash(b.parent) : "DETACHED");
+  out.push(V.gw ? "lowest battery " + (s.bat ? volts(s.bat[0]) + " (" + label(s.bat[1]) + ")" : "-") : "battery " + volts(b.battery),
+    "duty " + (s.duty == null ? "-" : pct(s.duty, 1)), "queue " + dash(c.queue));
+  h += "<p>" + esc(out.join(" · ")) + "</p>" + (A.length ? '<ul class=al>' + A.map(x =>
+    "<li class=l" + x.l + ">" + esc(x.t + " " + x.v)).join("") + "</ul>" : "<p>no alarm</p>");
+  return '<div class="ban l' + (A.length ? A[0].l : 0) + '">' + h + "</div>";
+}
+
+function cards(V, A) {
+  return V.nodes.map(n => {
+    const e = n.links.find(e => e[0] == n.parent), r = n.rec, t = n.tt, f = flags(n.flags & 0x76);
+    const ls = [n.c + " · heard " + ago(n.heard_s),
+      n.hops == null ? "parent " + dash(n.parent) + ", no chain" : plural(n.hops, "hop") + (n.hops > 1 ? " via " + n.parent : ""),
+      "up " + (n.up == null ? "-" : n.up + " dB") + (e ? " · " + e[3] + " %" : ""),
+      t ? "test " + (r && r[1] ? pct(r[0], r[1]) + " recent, " : "") + (t.delivery == null ? "-" : (100 * t.delivery).toFixed(1) + " %") + " all" : "",
+      volts(n.battery) + " · " + dash(n.mode),
+      n.restarts || n.parent_changes ? plural(n.restarts, "restart") + " · " + plural(n.parent_changes, "parent change") : ""];
+    return '<div class="card ' + n.c + '"><b>' + esc(label(n)) + "</b>" + (f ? " <i>" + f + "</i>" : "") +
+      ls.filter(x => x).map(x => "<br>" + esc(x)).join("") + "</div>";
+  }).join("");
+}
+
+function nodeTable(V) {
+  const rank = {};
+  for (const x of V.b.neighbours || []) rank[x.address] = x.rank;
+  return table(["node", "state", "heard", "parent", "hops", "rank", "up dB", "battery", "mode", "flags",
+    "links adr:dB/%", "test rx/exp", "deliv %", "recent %", "ms med/p90/max", "presences/restarts", "parent chg", "fw"],
+  V.nodes.map(n => {
+    const t = n.tt, r = n.rec;
+    return row([label(n), n.c + " " + ago(n.age_s), ago(n.heard_s), dash(n.parent), dash(n.hops), dash(rank[n.address]),
+      dash(n.up), volts(n.battery), dash(n.mode), flags(n.flags),
       n.links.length ? links(n.links) + " (" + ago(n.topology_age_s) + ")" : "-",
-      t ? t.received + "/" + t.expected : "-",
-      t && t.delivery != null ? (100 * t.delivery).toFixed(1) : "-",
+      t ? t.received + "/" + t.expected : "-", t && t.delivery != null ? (100 * t.delivery).toFixed(1) : "-",
+      r && r[1] ? (100 * r[0] / r[1]).toFixed(1) : "-",
       t ? dash(t.median_ms) + "/" + dash(t.p90_ms) + "/" + dash(t.max_ms) : "-",
       n.presences + "/" + n.restarts,
-      n.parent_changes + (n.parent_age_s == null ? "" : " (" + ago(n.parent_age_s) + ")"),
-      dash(n.firmware)], n.state);
-  });
-  return "<h2>Mesh</h2><p>" + nodes.length + " nodes, presence every " + m.period_s + " s" +
-    (m.beyond ? ", " + m.beyond + " reports beyond the bound" : "") + "</p>" +
-    "<pre>" + esc(lines.join("\n")) + "</pre><h2>Nodes</h2>" +
-    table(["node", "state", "heard", "parent", "hops", "rank", "battery", "mode", "flags",
-      "links adr:dB/%", "test rx/exp", "deliv %", "ms med/p90/max", "presences/restarts",
-      "parent chg", "fw"], rows) +
-    "<p>D duty > 80 %, Q queue overflow, R rank errors, A address conflict, " +
-    "K authentication failures, B first report since boot. * parent set.</p>";
+      n.parent_changes + (n.parent_age_s == null ? "" : " (" + ago(n.parent_age_s) + ")"), dash(n.firmware)], n.c);
+  })) + "<p>Flags: " + FLAGS.map(f => f[1] + " " + f[3]).join(", ") + ". * parent set. Recent: the last " +
+    ago(V.span) + ".</p>";
+}
+
+// The graph: the gateway on top, the nodes in rows by hops, those without hops apart below.
+const GW = 360, R = 15, ROW = 64, PER = 6;
+
+function layout(V) {
+  const pos = {0: [GW / 2, 26]}, L = [], apart = [];
+  let y = 26, top = null;
+  for (const n of V.nodes) n.hops == null ? apart.push(n) : (L[n.hops] = L[n.hops] || []).push(n);
+  const px = n => (pos[n.parent] ? pos[n.parent][0] : GW / 2);
+  const place = list => {
+    for (let i = 0; i < list.length; i += PER) {
+      const r = list.slice(i, i + PER);
+      y += ROW;
+      r.forEach((n, k) => (pos[n.address] = [Math.round(GW * (k + 0.5) / r.length), y, k]));
+    }
+  };
+  for (const l of L) if (l) place(l.sort((p, q) => px(p) - px(q) || p.address - q.address));
+  if (apart.length) {
+    top = y + ROW / 2;
+    y += 14;
+    place(apart);
+  }
+  return {pos, top, h: y + R + 26};
+}
+
+// Edges {key: [type, label, a, b]}: 0 preferred parent (labelled), 1 other parent-set member, 2 heard.
+function edges(V, pos) {
+  const E = {};
+  const put = (a, c, t, lab) => {
+    if (!pos[a] || !pos[c] || a == c) return;
+    const k = Math.min(a, c) + "-" + Math.max(a, c);
+    if (!E[k] || E[k][0] > t) E[k] = [t, lab, a, c];
+  };
+  for (const n of V.nodes) {
+    const e = n.links.find(e => e[0] == n.parent);
+    put(n.address, n.parent, 0, (n.up == null ? "" : n.up + "dB") + (e && e[3] < 100 * DELIVERY_MIN ? "·" + e[3] + "%" : ""));
+    for (const e of n.links) put(n.address, e[0], e[2] ? 1 : 2, "");
+  }
+  if (V.gw) for (const x of V.b.neighbours || []) put(0, x.address, 2, "");
+  return E;
+}
+
+function graph(V, A) {
+  const {pos, top, h} = layout(V), E = edges(V, pos), bad = {}, out = [], labs = [];
+  for (const x of A) if (x.a != null) bad[x.a] = 1;
+  if (top != null) out.push("<rect class=ap x=3 y=" + top + " width=" + (GW - 6) + " height=" + (h - top - 4) +
+    " /><text x=" + GW / 2 + " y=" + (top + 13) + ">not reaching the gateway</text>");
+  for (const [t, lab, a, c] of Object.values(E).sort((p, q) => q[0] - p[0])) {
+    const [x1, y1] = pos[c], [x2, y2] = pos[a];
+    if (t) {
+      const mx = Math.round((x1 + x2) / 2 + (y2 - y1) * 0.15), my = Math.round((y1 + y2) / 2 - (x2 - x1) * 0.15);
+      out.push("<path class=e" + t + ' d="M' + x1 + " " + y1 + "Q" + mx + " " + my + " " + x2 + " " + y2 + '"/>');
+    } else {
+      out.push("<line class=e0 x1=" + x1 + " y1=" + y1 + " x2=" + x2 + " y2=" + y2 + " />");
+      const f = pos[a][2] % 2 ? 0.42 : 0.68; // staggered along a row, beside a vertical line
+      if (lab) labs.push([x1 + f * (x2 - x1) + (Math.abs(x2 - x1) < 20 ? 5 : 0), y1 + f * (y2 - y1) + 4, lab, Math.abs(x2 - x1) < 20]);
+    }
+  }
+  for (const [x, y, lab, side] of labs)
+    out.push('<text class="el' + (side ? ' s"' : '"') + " x=" + Math.round(x) + " y=" + Math.round(y) + ">" + esc(lab) + "</text>");
+  const dot = (a, x, y, c, name, tip, gw) => out.push('<g class="n ' + c + '"><title>' + esc(tip) + "</title>" +
+    (gw ? "<rect x=" + (x - 20) + " y=" + (y - 13) + " width=40 height=26 />" : "<circle cx=" + x + " cy=" + y + " r=" + R + " />") +
+    "<text x=" + x + " y=" + (y + 5) + ">" + esc(a) + "</text><text " + (gw ? 'class="nm s" x=' + (x + 24) + " y=" + (y + 5) : "class=nm x=" + x + " y=" + (y + R + 13)) + ">" +
+    esc(String(name || "").slice(0, 9)) + "</text>" + (bad[a] ? "<circle class=x cx=" + (x + 13) + " cy=" + (y - 12) +
+    " r=6 /><text class=xt x=" + (x + 13) + " y=" + (y - 8) + ">!</text>" : "") + "</g>");
+  dot(0, pos[0][0], pos[0][1], "ok", V.b.name, "gateway " + label(V.b), 1);
+  for (const n of V.nodes) {
+    const p = pos[n.address];
+    dot(n.address, p[0], p[1], n.c, n.name, "node " + label(n) + ": " + n.c + ", parent " + dash(n.parent) + ", up " +
+      dash(n.up) + " dB, " + volts(n.battery) + ", links " + links(n.links));
+  }
+  return '<svg viewBox="0 0 ' + GW + " " + h + '" role=img aria-label="network graph">' + out.join("") + "</svg><p>" +
+    CATS.map(k => '<span class="k ' + k + '">' + k + "</span>").join("") +
+    "<br>Solid: preferred parent (uplink margin; delivery when below " + 100 * DELIVERY_MIN +
+    " %); dashed: other parent-set link; thin: heard. ! an alarm.</p>";
+}
+
+function logHtml(log) {
+  const today = day(Date.now());
+  return log.map(e => "<li class=l" + e[1] + ">" + (day(e[0]) == today ? "" : day(e[0]) + " ") + hms(e[0]) + " " +
+    esc(e[2])).join("") || "<li>no event yet";
 }
 
 // Any box's own view.
@@ -112,15 +390,15 @@ function box(b) {
     "queue " + dash(c.queue), "heap " + Math.round(b.heap / 1024) + " kB",
     "journal " + dash(c.journal_lines) + " lines" + (c.journal_errors ? ", " + c.journal_errors + " errors" : ""),
     "frames " + dash(c.tx_frames) + " sent, " + dash(c.rx_frames) + " received"];
-  out.push("<h2>This box</h2><p>" + esc(items.join(" · ")) + "</p>");
+  out.push("<p>" + esc(items.join(" · ")) + "</p>");
   const key = n => (n.address == b.parent ? 0 : n.parent ? 1 : 2) * 65536 + n.address;
   const nb = (b.neighbours || []).slice().sort((x, y) => key(x) - key(y));
   out.push("<h2>Neighbours</h2>" + (nb.length ? table(
-    ["adr", "rank", "dB", "last dB", "ETX", "in %", "age", "RSSI", "SNR"],
+    ["adr", "rank", "dB", "ETX", "in %", "age", "last dB", "RSSI", "SNR"],
     nb.map(n => row([(n.address == b.parent ? "*" : n.parent ? "+" : "") + n.address,
-      n.rank == 255 ? "-" : dash(n.rank), tenths(n.margin), tenths(n.last_margin),
-      n.etx == null ? "-" : (n.etx / 128).toFixed(2), dash(n.d_in), ago(n.age_s), dash(n.rssi),
-      tenths(n.snr_mean)]))) + "<p>* preferred parent, + parent set</p>" : "<p>none heard</p>"));
+      n.rank == 255 ? "-" : dash(n.rank), tenths(n.margin), n.etx == null ? "-" : (n.etx / 128).toFixed(2),
+      dash(n.d_in), ago(n.age_s), tenths(n.last_margin), dash(n.rssi), tenths(n.snr_mean)])), "nb") +
+    "<p>* preferred parent, + parent set</p>" : "<p>none heard</p>"));
   if (b.foreign && b.foreign[0]) out.push("<p>Foreign sources: " + b.foreign[0] + ", " + b.foreign[1] + " frames</p>");
   const t = b.traffic;
   if (t && t.role == "sender") {
@@ -135,17 +413,45 @@ function box(b) {
     if (v) out.push("<p>" + esc(h + ": " + Object.keys(v).map(k => k + " " + dash(v[k])).join(", ")) + "</p>");
   return out.join("");
 }
-
-// Polling: the next request 5 s after the answer, none while hidden; each
-// carries the phone's time (ms since the Unix epoch), which sets the box's clock.
-const start = Date.now();
-let last = 0, error = "", next = null;
+</script>
+<script>
+"use strict";
+// Polling: the next request 5 s after the answer, none while hidden; each carries the
+// phone's time (ms since the Unix epoch), which sets the box's clock.
+const $ = i => document.getElementById(i);
+const S = fresh(), start = Date.now(), wide = matchMedia("(min-width:900px)").matches;
+const store = (() => {
+  try {
+    return window.localStorage;
+  } catch (e) {
+    return null;
+  }
+})();
+let error = "", next = null, shown = false;
 
 function tick() {
-  const s = Math.round((Date.now() - (last || start)) / 1000), e = $("up"), bad = s >= 20;
+  const s = Math.round((Date.now() - (S.t || start)) / 1000), e = $("up"), bad = s >= STALE_S;
   e.className = bad ? "bad" : "";
   e.textContent = bad ? "no answer for " + s + " s" + (error ? " (" + error + ")" : "") :
-    last ? "updated " + s + " s ago" : "waiting for the box";
+    S.t ? "updated " + s + " s ago" : "waiting for the box";
+}
+
+function draw() {
+  const V = S.v, b = V.b, h = header(b);
+  $("hd").textContent = document.title = h[0];
+  $("sub").textContent = h[1];
+  $("sum").innerHTML = banner(V, S.a);
+  $("gr").innerHTML = V.gw ? graph(V, S.a) : "";
+  $("cards").innerHTML = V.gw ? cards(V, S.a) : "";
+  $("tb").innerHTML = V.gw ? nodeTable(V) : "";
+  $("tbd").hidden = !V.gw;
+  $("log").innerHTML = logHtml(S.log);
+  $("own").innerHTML = box(b);
+  if (!shown) {
+    shown = true;
+    $("tbd").open = wide;
+    $("ownd").open = wide || !V.gw;
+  }
 }
 
 function poll() {
@@ -155,18 +461,23 @@ function poll() {
   fetch("/status.json?now=" + Date.now(), {cache: "no-store", signal: c.signal})
     .then(r => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
     .then(j => {
-      const b = j.box;
-      header(b);
-      $("gw").innerHTML = j.mesh ? mesh(b, j.mesh) : "";
-      $("own").innerHTML = box(b);
-      last = Date.now();
+      step(S, j, Date.now(), store);
+      draw();
       error = "";
     })
     .catch(e => (error = e.name == "AbortError" ? "timeout" : String(e.message || e)))
     .finally(() => (clearTimeout(k), next = setTimeout(poll, 5000), tick()));
 }
 
-document.addEventListener("visibilitychange", () => document.hidden || next !== null || poll());
+$("clr").onclick = () => {
+  S.log = [];
+  save(store, S);
+  $("log").innerHTML = logHtml(S.log);
+};
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) S.why = "page hidden or phone locked";
+  else if (next === null) poll();
+});
 setInterval(tick, 1000);
 poll();
 </script>
