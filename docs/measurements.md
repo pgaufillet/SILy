@@ -253,6 +253,50 @@ Not measured here (a third board needed): the start of the window of a
 child that overhears its parent's frame to the root, and back-to-back
 reply windows.
 
+## 2026-11-20 — one T3S3 board, the box application
+
+Conditions: one board alone (no other box on the air), indoors, on the
+laptop's USB, the box application at b3e3b13 deployed as `.py`, SF7,
+−9 dBm, configured by `make configure` first as a node (never attached),
+then as a gateway. Journal records every 10 s.
+
+### Loop lateness (`sily.lateness`: 20 ms period, 30 ms bound)
+
+| Run | Span | Wakes per 10 s | Longest, quiet records | Wakes over the bound | Deaf time |
+|---|---|---|---|---|---|
+| Node alone | 5:42 | 411–455 | 19–22 ms | 26 | 615 ms (0.18 %) |
+| Gateway alone, page open ~2 min | 3:41 | 422–453 | 16–25 ms | 9 | 162 ms (0.07 %) |
+
+- About 2640 wakes per minute. The quiet records' longest lateness comes
+  at one phase of each second: the display's refresh (once a second).
+- Over the bound, by the figures of the same record: the journal's record
+  write (`jw` 43–141 ms: lateness 44–140 ms), the most frequent; a garbage
+  collection (35–39 ms, no write in the record); the web server's
+  stretch with the page open (36–72 ms: lateness up to 69 ms); a display
+  refresh (93 ms, once).
+- Per wake, at the REPL (3 × 2000): `asyncio.sleep_ms(0)` 178–193 µs, with
+  the probe's own lines 201–217 µs: about 0.9 % of the CPU at about 44
+  wakes per second. The probe alone on a loop for 10 s: 499 wakes, longest
+  lateness 3 ms: the idle loop's 100 Hz tick did not delay the wakes here
+  (board on USB).
+
+### Clock
+
+- `make configure`: RTC check +0 to +2 ms (five runs).
+- Running, without a reset or a page: within the readings' ±2–3 ms over 69
+  and 151 s; a `machine.reset` stepped it by at most 1 ms.
+- A phone opening the page sets the RTC (a boot's first sample is an
+  anchor, `sily.utc`): the gateway read 30 ms ahead of the laptop's clock
+  four minutes later (anchor departure +42 ms), the node 73 ms ahead
+  seven minutes later (anchor departure −19 ms): the phone's clock and the
+  request's delay replace `make configure`'s setting. `tools/bench.py`'s
+  platform test moved it by 0.6 s.
+
+### Gateway page
+
+Load about 3 s on a phone (page 29 KB); the server's longest stretch 38 ms
+during the load, 19–37 ms per record while the page polls.
+
 ## 2026-10-19 — simulator speed, host
 
 `make simbench NODES=<n>` (`tools/simbench.py`, see its docstring): grid of
