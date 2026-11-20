@@ -143,9 +143,10 @@ The box closed, its switch on (battery connected), its USB to the host
    point `SILy-check-<box>` shows on a phone. The box name, the last three
    bytes of the MAC address, goes on the box's label. A board without
    battery: `BATTERY=0`. On USB without a battery, the charger's output
-   reads 4.18–4.24 V, steady (a spread of 80–101 mV over the check's 10
-   readings, on 2 boards): a box declared with a battery passes on USB
-   alone, battery missing or not. Check the battery with USB unplugged:
+   reads 4.18–4.24 V, a spread of 67–134 mV over the check's 10 readings
+   (4 boards), within both bounds of the battery item: a box declared
+   with a battery passes on USB alone, battery missing or switched off,
+   and a spread just above 150 mV on USB may be the charger alone. Check the battery with USB unplugged:
    the box then runs on it, and the display's first page or the box's
    status page (after step 4) gives its voltage.
 

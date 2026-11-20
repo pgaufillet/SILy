@@ -51,7 +51,9 @@ KDF_ITERATIONS = 6000
 BATTERY_MIN_MV = 3000
 BATTERY_MAX_MV = 4400
 # Largest spread of the readings of a battery, each the mean of several ADC
-# reads; the charger's output without a battery moves by more.
+# reads: catches an unsteady reading. It does not tell a missing battery: on
+# USB alone the charger's output reads 4.18-4.24 V, spread 67-134 mV over the
+# check's readings (4 boards), within both bounds.
 BATTERY_SPREAD_MV = 150
 BATTERY_READINGS = 10
 BATTERY_GAP_MS = 50
@@ -75,7 +77,9 @@ def battery_verdict(readings, battery=True):
     reading lies within BATTERY_MIN_MV..BATTERY_MAX_MV and they spread by at
     most BATTERY_SPREAD_MV, FAIL otherwise, with the likely causes. Without
     one (a board on USB alone), the reading is the charger's output: reported,
-    not judged (OBSERVE).
+    not judged (OBSERVE). On USB, a missing or switched-off battery passes
+    too (the charger's output lies within both bounds): only a check on the
+    battery alone, USB unplugged, shows it.
     """
     n = len(readings)
     low = min(readings)
@@ -85,14 +89,15 @@ def battery_verdict(readings, battery=True):
         return OBSERVE, detail + ": no battery declared, not judged"
     if low < BATTERY_MIN_MV or high > BATTERY_MAX_MV:
         return FAIL, detail + (
-            ": outside %d-%d mV (one Li-ion cell): battery switched off or not "
-            "connected? (on USB alone this reads the charger's output) Otherwise "
-            "a flat battery or the sense divider" % (BATTERY_MIN_MV, BATTERY_MAX_MV)
+            ": outside %d-%d mV (one Li-ion cell): a flat battery or the sense "
+            "divider (a missing or switched-off battery on USB reads the "
+            "charger's output, about 4.2 V)" % (BATTERY_MIN_MV, BATTERY_MAX_MV)
         )
     if high - low > BATTERY_SPREAD_MV:
         return FAIL, detail + (
-            ": unsteady beyond %d mV: battery not connected? (the charger's "
-            "output moves without one)" % BATTERY_SPREAD_MV
+            ": unsteady beyond %d mV: a loose battery contact or switch? On USB "
+            "the charger's output alone spreads up to about 135 mV: unplug USB "
+            "and check again" % BATTERY_SPREAD_MV
         )
     return PASS, detail
 

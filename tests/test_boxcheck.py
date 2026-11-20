@@ -39,10 +39,10 @@ class Battery(unittest.TestCase):
         self.assertEqual(battery_verdict([BATTERY_MIN_MV] * 3)[0], PASS)
         self.assertEqual(battery_verdict([BATTERY_MAX_MV] * 3)[0], PASS)
 
-    def test_below_range_fails_naming_the_switch(self):
+    def test_below_range_fails_naming_a_flat_battery(self):
         status, detail = battery_verdict([BATTERY_MIN_MV - 1, 3050])
         self.assertEqual(status, FAIL)
-        self.assertIn("switched off", detail)
+        self.assertIn("flat battery", detail)
 
     def test_above_range_fails(self):
         self.assertEqual(battery_verdict([4300, BATTERY_MAX_MV + 1])[0], FAIL)
@@ -51,6 +51,7 @@ class Battery(unittest.TestCase):
         status, detail = battery_verdict([3600, 3600 + BATTERY_SPREAD_MV + 1])
         self.assertEqual(status, FAIL)
         self.assertIn("unsteady", detail)
+        self.assertIn("unplug USB", detail)
         self.assertEqual(battery_verdict([3600, 3600 + BATTERY_SPREAD_MV])[0], PASS)
 
     def test_no_battery_declared_is_reported_not_judged(self):
