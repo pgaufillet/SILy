@@ -50,8 +50,11 @@ class Decisions(unittest.TestCase):
         self.assertEqual(self.flash.commits, 0)
 
     def test_skip_flag_once(self):
+        self.assertFalse(self.guard.skipping)
         self.guard.skip_next()
+        self.assertTrue(self.guard.skipping)
         self.assertEqual(self.guard.decide(False), SKIP)
+        self.assertFalse(self.guard.skipping)
         self.assertEqual(self.guard.decide(False), START)
 
     def test_skip_flag_before_safe_mode(self):

@@ -81,6 +81,25 @@ PYTHON ?= $(VENV)/bin/python
 # a new segment), then the summary printed.
 JOURNAL_OUT = $(if $(filter command line,$(origin OUT)),$(OUT),build/journal)
 
+# Field capture (`make sniff`, tools/sniff.py, src/sily/sniff.py): the board
+# at PORT, configured as a box, its application stopped, prints every frame
+# it hears; each line, stamped with the host's UTC, goes into SNIFF_OUT (OUT
+# given on the command line, else build/sniff/capture.txt; replaced) until
+# Ctrl-C, then the board's sniffer is stopped (radio asleep, the REPL free;
+# its next reset starts the application). `make sniff-trace`
+# (tools/capture.py, on the unix port: the AES of mesh.ccm) turns the
+# capture CAPTURE into a trace for tools/traceview.html (OUT given on the
+# command line, else CAPTURE with .jsonl), the boxes named by their files
+# BOXES and the frames opened by the key derived from NETWORK (none
+# without it), and prints the frames per transmitter and the ciphertext
+# check; heap CAPTURE_HEAP.
+SNIFF_OUT = $(if $(filter command line,$(origin OUT)),$(OUT),build/sniff/capture.txt)
+CAPTURE ?= build/sniff/capture.txt
+BOXES ?=
+CAPTURE_HEAP ?= 256M
+CAPTURE_OPTIONS = $(if $(NETWORK),--network $(NETWORK)) \
+	$(if $(filter command line,$(origin OUT)),--out $(OUT))
+
 # Top-level entries of src/ copied to the board's filesystem root, from a
 # staged copy without the host's __pycache__ directories (files of the
 # board's root that src/ lacks, /config.json among them, stay). The staged
@@ -181,6 +200,7 @@ TRACE = env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(TEST_HEAP) too
 
 .PHONY: help check test seeds simbench large sweep sweep-summary campaign-plan \
 	campaign campaign-fetch trace lint push-check firmware flash deploy box-check configure journal \
+	sniff sniff-trace \
 	spec spec-quick spec-pass spec-defects spec-calibrate spec-remote spec-remote-fetch
 
 help:
@@ -204,6 +224,9 @@ help:
 	@echo "make box-check PORT=<dev> [BATTERY=0 HOLD=15]  per-box hardware check (docs/hardware.md)"
 	@echo "make configure PORT=<dev> NETWORK=<file> BOX=<file>  write the box's /config.json, reset"
 	@echo "make journal PORT=<dev> [OUT=build/journal]  copy the box's journal, reset, summary"
+	@echo "make sniff PORT=<dev> [OUT=build/sniff/capture.txt]  frames heard by a box, until Ctrl-C"
+	@echo "make sniff-trace [CAPTURE=...] [NETWORK=<file>] [BOXES=\"<files>\"] [OUT=<trace>]  capture"
+	@echo "                          to trace (tools/traceview.html), per box counts, ciphertext check"
 	@echo "make spec                 TLC: every model, each against its expected outcome (full tier)"
 	@echo "make spec-quick           TLC: the models recorded at most QUICK_SECS=60 s (quick tier)"
 	@echo "make spec-pass            TLC: the models that must hold"
@@ -307,6 +330,14 @@ journal:
 	$(MPREMOTE) connect $(PORT) resume exec "from sily import app; app.close()" \
 		+ fs cp -r :journal $(JOURNAL_OUT) + reset
 	$(PYTHON) tools/journal_summary.py $(JOURNAL_OUT)/journal
+
+sniff:
+	@mkdir -p $(dir $(SNIFF_OUT))
+	$(PYTHON) tools/sniff.py $(SNIFF_OUT) --port $(PORT) --mpremote $(MPREMOTE)
+
+sniff-trace:
+	env MICROPYPATH=$(TEST_PATH) $(MICROPYTHON) -X heapsize=$(CAPTURE_HEAP) tools/capture.py \
+		$(CAPTURE) $(CAPTURE_OPTIONS) $(BOXES)
 
 spec:
 	$(SPEC) all

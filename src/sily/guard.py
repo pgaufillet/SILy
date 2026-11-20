@@ -42,6 +42,11 @@ class Guard:
         value = self.store.get(_CRASHES)
         return value[0] if value else 0
 
+    @property
+    def skipping(self):
+        """The skip flag is set: the next boot returns to the REPL."""
+        return self.store.get(_SKIP) is not None
+
     def decide(self, power_on, hung=False):
         """Return `START`, `SKIP` or `SAFE` for this boot; power_on: it follows
         one; hung: it follows a watchdog reset (a crash)."""

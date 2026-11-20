@@ -49,6 +49,8 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
       (*Application*);
     - `display.py` — the OLED status display: rotating pages of the box's
       status, written row by row (*Application*);
+    - `sniff.py` — the field sniffer: a box's radio listening, one console
+      line per frame heard (`make sniff`, *Field capture*);
   - `mesh/` — application-agnostic LoRa mesh; imports nothing from `sily`,
     `board` or `machine` (radio and platform are injected), so that it runs
     on the unix port and can be extracted later; its core is event-driven
@@ -77,6 +79,11 @@ The previous Arduino version (v0.1.0) is on branch `arduino` and tag
   one box and its RTC set to UTC, `make configure`; `check`: a whole
   network), with the templates `tools/network.example.json` and
   `tools/box.example.json`.
+- `tools/sniff.py` — the host side of `make sniff`: the sniffer's lines
+  stamped with the host's UTC into a capture file, stopped by Ctrl-C
+  (CPython 3, mpremote); `tools/capture.py` — a capture as a trace for
+  `tools/traceview.html`, frames per box and the ciphertext check (`make
+  sniff-trace`, the unix port; *Field capture*).
 - `tools/journal_summary.py` — summary of a journal read back from a box
   (`make journal`), per boot (CPython 3 or the unix port).
 - `tools/survey.py` — range survey: the links between a walking box and
@@ -132,6 +139,8 @@ make deploy PORT=/dev/ttyACM0  # copy src/ to the board and reset it (keeps /con
 make box-check PORT=/dev/ttyACM0  # per-box hardware check (docs/hardware.md)
 make configure PORT=/dev/ttyACM0 NETWORK=<file> BOX=<file>  # the box's /config.json, RTC, reset
 make journal PORT=/dev/ttyACM0 OUT=build/box3  # copy the box's journal, reset it, print the summary
+make sniff PORT=/dev/ttyACM2 OUT=build/sniff/house.txt  # frames a box hears, until Ctrl-C
+make sniff-trace CAPTURE=build/sniff/house.txt NETWORK=<file> BOXES="<files>"  # its trace, check
 ```
 
 Host tests use micropython-lib's `unittest` from the MicroPython tree (through
@@ -335,6 +344,9 @@ docstring of `sim/trace.py`. The recorder only observes: a run computes
 the same with or without it. `make trace RUN="relay-death star 1"` writes
 about 3.5 MB (36 000 records) and takes 5 to 10 % longer than the run; the
 small networks of the scenario tests take about 1.6 times as long.
+
+A field capture becomes a trace of the same format (`make sniff-trace`,
+*Field capture* below).
 
 `tools/traceview.html` shows them: open it in a browser from the file
 system (one file, no network, no server), then load one or several traces
@@ -705,6 +717,55 @@ and the stations joined (`web`). To switch the access point off, set
 `"ap": null` in the box file and run `make configure` again. An access point
 or server failing at start is journaled (`ev` `wifi`) and the application
 goes on without them.
+
+## Field capture
+
+A sniffer is a board configured as a box (`make configure`: profile, SF,
+power as the network's; any free address) whose radio only listens: `make
+sniff PORT=... OUT=...` stops its application (mpremote's Ctrl-C at
+connection, then its soft reset, after which `main.py` does not run, as
+for `make box-check`), runs `src/sily/sniff.py` in its place and writes
+into `OUT` (default `build/sniff/capture.txt`, replaced) every line the
+board prints, each stamped with the host's UTC: a first `SNIFF` line with
+the radio settings, the board's ticks and RTC, then per frame heard its
+ticks and UTC at reception, RSSI, SNR and bytes in hex (`C` lines: the
+frames whose CRC failed). The board never transmits, never uses the key
+and writes nothing to flash (each line costs about a ms, estimated).
+Ctrl-C ends the capture without losing a line (`tools/sniff.py`), then a
+second mpremote stops the board's sniffer: radio asleep, the REPL free,
+an `END` line with the radio's counters and the start guard's state
+(crashes, skip flag), which nothing touched: the board's next reset (or
+power-on) starts its application, a box that joins the mesh and
+transmits: reset it after the run.
+
+`make sniff-trace CAPTURE=... NETWORK=... BOXES="..."` (`tools/capture.py`,
+on the unix port: the AES of `mesh.ccm` is MicroPython's) turns a capture
+into a trace in the format of `sim/trace.py` (written next to it as
+`.jsonl`, or to `OUT`), which `tools/traceview.html` opens as it opens a
+simulated one: one lane per box of the box files (and per other
+transmitter heard), the sniffer's lane with each reception, each frame
+decoded as the recorder decodes it (`sim.trace.decode_frame`) with the
+frame key derived on the host from `NETWORK` as `make configure` derives
+it, and the boxes' rank, DODAG version and preferred parent as their
+frames tell them (the parent: a box's own presence goes first to it),
+which draws the DODAG tree in the graph. A sniffer cannot show the frames
+it did not receive (out of its range, collided there; its CRC errors are
+counted, not traced), what each box heard or lost, carrier sense,
+backoffs, queues, counters, submissions, deliveries and failures (the
+messages panel leaves them pending), parent sets, nor a change in a box
+until the box sends again; its times are its own, a frame's start its
+reception less its time on air.
+
+The converter also prints, per transmitter, the frames heard, opened by
+the key, not opened (the key fails: another network, or no `NETWORK`
+given) and undecodable, and the **ciphertext check**, the evidence that
+frames travel encrypted: each decoded payload of 4 bytes or
+more is searched for in its raw frame's bytes, and each one found is
+reported (exit status 1); shorter ones are counted, not judged (a 3-byte
+match occurs by chance about once in 10^5 frames). Without `NETWORK`
+every frame shows as not opened. The converter needs about 5 KB of heap
+per frame (`CAPTURE_HEAP`, default 256M: some 50 000 frames) and about
+3 s per hour of a five-box network.
 
 ## Bench
 

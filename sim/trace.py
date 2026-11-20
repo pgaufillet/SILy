@@ -100,6 +100,9 @@ fields are omitted.
 TEST=MODULE[.CLASS]`` records every network a test class of tests/ builds,
 ``make trace RUN="SCENARIO TOPOLOGY SEED [NODES]"`` one run of the
 large-network suite, into ``OUT`` (default build/trace; `tools/trace.py`).
+`decode_frame` decodes a frame into the fields of a ``tx`` record outside
+a simulation too: ``tools/capture.py`` writes the frames a board heard in
+the field (``make sniff``) as a trace of this format.
 """
 
 import json
@@ -232,6 +235,111 @@ def _counts(engine, routing):
 
 
 _NAMES = COUNTERS + DODAG_COUNTERS + ROUTING_COUNTERS + (TRICKLE_RESETS,)
+
+
+# --- Frames -------------------------------------------------------------------------------
+#
+# The decoding of the ``tx`` records, also used outside the recorder on frames
+# a real radio heard (tools/capture.py).
+
+
+def cipher(ciphers, key):
+    """Return the `mesh.security.frame_cipher` of key, kept in the dict ciphers."""
+    key = bytes(key)
+    c = ciphers.get(key)
+    if c is None:
+        c = frame_cipher(key)
+        ciphers[key] = c
+    return c
+
+
+def decode_frame(rec, data, keys, ciphers, home=None):
+    """Decode a copy of the frame data into rec, the fields of a ``tx`` record.
+
+    The clear header (``d``, ``s``, ``fc``, ``r``, ``v``, ``ep``), then the
+    messages ``m`` (`message_fields`) once the first of keys (16-byte frame
+    keys, tried in order; their ciphers kept in the dict ciphers, `cipher`)
+    opens it; ``fk`` 1 when that key is not home (the network's key; None:
+    never set). ``err`` instead of what does not decode: the `mesh.frame`
+    reason of the header or of the messages, or "authentication" when no
+    key opens it (none given: every frame). data is not changed.
+
+    Returns the decoded `mesh.frame.Message` list, None with ``err``.
+    """
+    n = len(data)
+    try:
+        h = decode_header(data, n)
+    except FormatError as e:
+        rec["err"] = e.reason
+        return None
+    rec["d"] = h.dest
+    rec["s"] = h.source
+    rec["fc"] = h.counter
+    rec["r"] = h.rank
+    rec["v"] = h.dodag_version
+    rec["ep"] = h.epoch
+    nonce = bytes(data[3:8]) + bytes(NONCE_SIZE - 5)
+    buf = None
+    for key in keys:
+        buf = bytearray(data)
+        if cipher(ciphers, key).decrypt(nonce, aad(buf), body(buf, n), tag(buf, n)):
+            if home is not None and key != home:
+                rec["fk"] = 1
+            break
+        buf = None
+    if buf is None:
+        rec["err"] = AUTHENTICATION
+        return None
+    try:
+        messages = decode_messages(buf, HEADER_SIZE, n - TAG_SIZE)
+    except FormatError as e:
+        rec["err"] = e.reason
+        return None
+    rec["m"] = [message_fields(m, h) for m in messages]
+    return messages
+
+
+def message_fields(m, h):
+    """Return the fields of message m (a `mesh.frame.Message`) of a frame of
+    header h in a ``tx`` record's ``m`` (the module documentation)."""
+    out = {"m": m.mode, "c": m.cls, "p": m.port, "len": len(m.payload)}
+    if m.mode == FIRST_HOP:
+        out["o"] = h.source
+    elif m.origin is not None:
+        out["o"] = m.origin
+    if m.dest is not None:
+        out["d"] = m.dest
+    if m.seq is not None:
+        out["q"] = m.seq
+    if m.route is not None:
+        out["r"] = list(m.route)
+    port = m.port
+    try:
+        if port == ACK:
+            out["a"] = [list(e) for e in decode_acks(m.payload)]
+        elif port == ERROR:
+            out["e"] = list(decode_error(m.payload))
+        elif port == DODAG_INFO:
+            info = decode_info(m.payload)
+            if info is None:
+                out["sol"] = 1
+            else:
+                out["di"] = [
+                    info.flags,
+                    info.presence_s,
+                    info.topology_s,
+                    info.imin_slots,
+                    info.max_increase,
+                    info.profile,
+                ]
+        elif port == PRESENCE and m.mode in (UPWARD, FIRST_HOP):
+            p = decode_presence(m.payload, m.mode == UPWARD)
+            if p.parent is not None:
+                out["pp"] = p.parent
+            out["pf"] = p.flags
+    except ValueError:
+        out["bad"] = 1
+    return out
 
 
 class Recorder:
@@ -385,14 +493,6 @@ class Recorder:
 
     # --- Frames ---------------------------------------------------------------------------
 
-    def _cipher(self, key):
-        key = bytes(key)
-        c = self._ciphers.get(key)
-        if c is None:
-            c = frame_cipher(key)
-            self._ciphers[key] = c
-        return c
-
     def _keys(self, radio):
         # The sender's key first, then every other key of the network (a
         # sniffer replays the frames of any board).
@@ -403,79 +503,6 @@ class Recorder:
             if k not in tried:
                 tried.append(k)
                 yield k
-
-    def _decode(self, rec, radio, data):
-        # Header and messages of a copy of data into rec.
-        n = len(data)
-        try:
-            h = decode_header(data, n)
-        except FormatError as e:
-            rec["err"] = e.reason
-            return
-        rec["d"] = h.dest
-        rec["s"] = h.source
-        rec["fc"] = h.counter
-        rec["r"] = h.rank
-        rec["v"] = h.dodag_version
-        rec["ep"] = h.epoch
-        nonce = bytes(data[3:8]) + bytes(NONCE_SIZE - 5)
-        buf = None
-        for key in self._keys(radio):
-            buf = bytearray(data)
-            if self._cipher(key).decrypt(nonce, aad(buf), body(buf, n), tag(buf, n)):
-                if key != self.net.key:
-                    rec["fk"] = 1
-                break
-            buf = None
-        if buf is None:
-            rec["err"] = AUTHENTICATION
-            return
-        try:
-            messages = decode_messages(buf, HEADER_SIZE, n - TAG_SIZE)
-        except FormatError as e:
-            rec["err"] = e.reason
-            return
-        rec["m"] = [self._message(m, h) for m in messages]
-
-    def _message(self, m, h):
-        out = {"m": m.mode, "c": m.cls, "p": m.port, "len": len(m.payload)}
-        if m.mode == FIRST_HOP:
-            out["o"] = h.source
-        elif m.origin is not None:
-            out["o"] = m.origin
-        if m.dest is not None:
-            out["d"] = m.dest
-        if m.seq is not None:
-            out["q"] = m.seq
-        if m.route is not None:
-            out["r"] = list(m.route)
-        port = m.port
-        try:
-            if port == ACK:
-                out["a"] = [list(e) for e in decode_acks(m.payload)]
-            elif port == ERROR:
-                out["e"] = list(decode_error(m.payload))
-            elif port == DODAG_INFO:
-                info = decode_info(m.payload)
-                if info is None:
-                    out["sol"] = 1
-                else:
-                    out["di"] = [
-                        info.flags,
-                        info.presence_s,
-                        info.topology_s,
-                        info.imin_slots,
-                        info.max_increase,
-                        info.profile,
-                    ]
-            elif port == PRESENCE and m.mode in (UPWARD, FIRST_HOP):
-                p = decode_presence(m.payload, m.mode == UPWARD)
-                if p.parent is not None:
-                    out["pp"] = p.parent
-                out["pf"] = p.flags
-        except ValueError:
-            out["bad"] = 1
-        return out
 
     # --- Medium observer (`sim.medium.Observer`) ----------------------------------------
 
@@ -491,7 +518,7 @@ class Recorder:
         }
         if not isinstance(radio, Board):
             rec["sn"] = 1
-        self._decode(rec, radio, frame)
+        decode_frame(rec, frame, self._keys(radio), self._ciphers, self.net.key)
         self._tx[(source, start)] = self._emit(rec)
 
     def ended(self, source, start, end, fates):
