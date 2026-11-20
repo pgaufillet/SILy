@@ -34,13 +34,16 @@ reply window's slack). ``reply_routing``: the same with both boards running
 the mesh routing (the root prints each presence received).
 """
 
-import argparse
 import json
 import math
 import sys
 import time
 
-import serial
+# Hard reset (`Board.hard_reset`): the skip flag set before, the start guard
+# cleared after.
+SKIP_CODE = "from sily import hw; hw.skip_next_boot()"
+RESET_LINE = b"import machine; machine.reset()\r\n"
+CLEAR_CODE = "from sily import hw; hw.clear_guard()"
 
 
 class Board:
@@ -56,6 +59,8 @@ class Board:
         self.open()
 
     def open(self, retries=50):
+        import serial  # pyserial: CPython only (tests run on the unix port)
+
         for _ in range(retries):
             try:
                 self.conn = serial.Serial(self.port, 115200, timeout=0.05)
@@ -132,17 +137,23 @@ class Board:
         """machine.reset(): the USB port goes away and comes back.
 
         The application, which starts at boot (``sily.app``), skips that boot
-        (``sily.hw.skip_next_boot``): it would rewrite the RTC memory.
+        (``sily.hw.skip_next_boot``): it would rewrite the RTC memory. The
+        interrupt that follows the reconnection may come before the boot
+        reached its start decision (``sily.guard``), which then never consumed
+        the skip flag: the board's next reset would not start the application.
+        Back at the REPL, the start guard is cleared (``sily.hw.clear_guard``)
+        so that the bench leaves the board startable.
         """
-        self.exec("from sily import hw; hw.skip_next_boot()")
+        self.exec(SKIP_CODE)
         self.interrupt()
-        self.conn.write(b"import machine; machine.reset()\r\n")
+        self.conn.write(RESET_LINE)
         time.sleep(0.5)
         self.close()
         time.sleep(2.0)
         self.open()
         time.sleep(1.0)
         self.interrupt()
+        self.exec(CLEAR_CODE)
 
     # --- Bench console -------------------------------------------------------------
 
@@ -811,6 +822,8 @@ TESTS = ("platform", "kdf", "aead", "link", "sense", "errors", "filter")
 
 
 def main():
+    import argparse
+
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--a", required=True, help="serial port of board A (address 1)")
     parser.add_argument("--b", required=True, help="serial port of board B (address 2)")
